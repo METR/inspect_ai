@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from typing import IO, TYPE_CHECKING, Any
+import uuid
 
 import anyio
 import httpx
+from openai import AsyncOpenAI, OpenAIError
 import pytest
 from openai.resources.batches import AsyncBatches
 from openai.resources.chat.completions import AsyncCompletions
@@ -12,6 +14,7 @@ from openai.resources.files import AsyncFiles
 from openai.types import Batch, FileObject
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from inspect_ai.model._providers.util.batch import BatchRequest
 from test_helpers.utils import skip_if_no_openai
 
 from inspect_ai import Task, eval
@@ -24,7 +27,13 @@ from inspect_ai.model import (
     get_model,
 )
 from inspect_ai.model._chat_message import ChatMessageSystem
-from inspect_ai.model._providers.openai import OpenAIAPI
+from inspect_ai.model._providers.openai import (
+    OpenAIAPI,
+    OpenAIBatcher,
+    OpenAIInspectBatch,
+)
+
+from anyio.streams.memory import MemoryObjectSendStream
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -352,3 +361,107 @@ async def test_openai_batch(mocker: MockerFixture):
     await anyio.sleep(2 * batch_tick)
 
     assert not model._batcher._is_batch_worker_running  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("is_success", "expected_type"),
+    (
+        (True, ChatCompletion),
+        (False, OpenAIError),
+    ),
+)
+@pytest.mark.anyio
+async def test_openai_handle_batch_result(
+    mocker: MockerFixture, is_success: bool, expected_type: type
+):
+    batch_tick = 0.01
+    batch_max_send_delay = 1.0
+
+    mock_client = mocker.AsyncMock(spec=AsyncOpenAI)
+    mock_client._make_status_error_from_response.return_value = OpenAIError()
+
+    batcher = OpenAIBatcher(
+        client=mock_client,
+        config=GenerateConfig(
+            batch_size=10,
+            batch_max_send_delay=batch_max_send_delay,
+            batch_tick=batch_tick,
+        ),
+    )
+
+    send_stream, receive_stream = anyio.create_memory_object_stream[
+        ChatCompletion | Exception
+    ](1)
+
+    custom_id = uuid.uuid4().hex
+
+    batch_request_0 = BatchRequest(
+        custom_id=custom_id,
+        request=dict(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hello, world!"}],
+        ),
+        result_stream=send_stream,
+    )
+    batch: OpenAIInspectBatch = OpenAIInspectBatch(
+        result_uris=["test-result-uri"],
+        requests={custom_id: batch_request_0},
+    )
+
+    expected_chat_completion = ChatCompletion(
+        id="test-id-0",
+        object="chat.completion",
+        created=1718239200,
+        model="gpt-3.5-turbo",
+        choices=[],
+    )
+
+    async def content_mock(*_args: Any, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            text="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "error": {"code": "ERR", "message": "An error occurred"}
+                            if not is_success
+                            else None,
+                            "id": "test-id-0",
+                            "custom_id": custom_id,
+                            "response": {
+                                "request_id": "test-id-0",
+                                "body": expected_chat_completion.model_dump(),
+                            },
+                        }
+                    )
+                ]
+            ),
+        )
+
+    mock_client.files.content = mocker.AsyncMock(side_effect=content_mock)
+
+    await batcher._handle_batch_result(batch, 0)
+
+    mock_client.files.content.assert_awaited_once()
+    assert mock_client.files.content.call_args[0][0] == "test-result-uri", (
+        "Should fetch content from the result_uri"
+    )
+
+    assert len(batch.requests) == 0, "All requests should be removed from the batch"
+
+    result = receive_stream.receive_nowait()
+
+    assert isinstance(result, expected_type), (
+        f"Should return a {expected_type.__name__}, got {result}"
+    )
+
+    if is_success:
+        assert isinstance(result, ChatCompletion), (
+            "Should return a ChatCompletion object"
+        )
+        assert result == expected_chat_completion, (
+            "Should return the expected ChatCompletion object"
+        )
+    else:
+        assert isinstance(result, OpenAIError), "Should return an OpenAIError object"
+        mock_client._make_status_error_from_response.assert_called_once()

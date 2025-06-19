@@ -12,6 +12,7 @@ from openai import (
     InternalServerError,
     RateLimitError,
     UnprocessableEntityError,
+    InternalServerError,
 )
 from openai._types import NOT_GIVEN
 from openai.types.chat import ChatCompletion
@@ -27,6 +28,7 @@ from inspect_ai.model._providers.util.batch import (
     Batcher,
     BatchRequest,
     CompletedBatchInfo,
+    ResponseT,
 )
 from inspect_ai.model._providers.util.hooks import HttpxHooks
 from inspect_ai.tool import ToolChoice, ToolInfo
@@ -57,6 +59,8 @@ from .._openai import (
 from .._openai_responses import is_native_tool_configured
 from .openai_o1 import generate_o1
 from .util import environment_prerequisite_error, model_base_url
+
+OpenAIInspectBatch = Batch[ChatCompletion]
 
 logger = getLogger(__name__)
 
@@ -137,7 +141,7 @@ class OpenAIBatcher(Batcher[ChatCompletion]):
 
     async def _handle_batch_result(
         self,
-        batch: Batch[ChatCompletion],
+        batch: OpenAIInspectBatch,
         completion_info: CompletedBatchInfo,
     ) -> None:
         result_uris = completion_info.get("result_uris")
@@ -165,11 +169,10 @@ class OpenAIBatcher(Batcher[ChatCompletion]):
                     )
                 )
 
-    def _get_request_failed_error(
-        self, request: BatchRequest[ChatCompletion]
-    ) -> Exception:
+    def _get_request_failed_error(self, request: BatchRequest[ResponseT]) -> Exception:
+        """Generate an exception for a probably-transient error where the OpenAI request was not completed for some reason."""
         return InternalServerError(
-            message="Request failed",
+            message="OpenAI request failed. Please try again later.",
             response=httpx.Response(status_code=500, text="Request failed"),
             body=None,
         )
