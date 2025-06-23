@@ -1,6 +1,6 @@
 import os
 from json import dumps
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from openai import APIStatusError
@@ -26,6 +26,7 @@ from .._model_output import (
     as_stop_reason,
 )
 from .._openai import chat_message_assistant_from_openai
+from ._together_batch import TogetherBatcher
 from .openai_compatible import OpenAICompatibleAPI
 from .util import (
     chat_api_input,
@@ -91,6 +92,7 @@ class TogetherAIAPI(OpenAICompatibleAPI):
             service="Together",
             service_base_url="https://api.together.xyz/v1",
         )
+        self._batcher: TogetherBatcher | None = None
 
     # Together uses a default of 512 so we bump it up
     @override
@@ -131,6 +133,19 @@ class TogetherAIAPI(OpenAICompatibleAPI):
         self, completion: ChatCompletion, tools: list[ToolInfo]
     ) -> list[ChatCompletionChoice]:
         return chat_choices_from_response_together(completion, tools)
+
+    @override
+    async def _generate_completion(
+        self, request: dict[str, Any], config: GenerateConfig
+    ) -> ChatCompletion:
+        if config.batch is False or not config.batch_size:
+            return cast(
+                ChatCompletion, await self.client.chat.completions.create(**request)
+            )
+
+        if not self._batcher:
+            self._batcher = TogetherBatcher(self.client, config)
+        return await self._batcher.generate(request, config)
 
 
 # Implementation of REST client for Together (currently not used)
