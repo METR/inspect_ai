@@ -1,8 +1,18 @@
 ## Unreleased
 
-- Bugfix: Prevent concurrent accesses of eval event database from raising lock errors.
+- Analysis: More forgiving column reading (use Pandas default reader rather than PyArrow).
 - Inspect View: Properly wrap log configuration values in evaluation header.
 - Inspect View: Support for displaying and navigating directories of evaluation logs.
+- Bugfix: Prevent concurrent accesses of eval event database from raising lock errors.
+- Docs: Correct shared documentation snippet that describes Dockerfile customization for Inspect Tool Support. 
+
+## 0.3.108 (25 June 2025)
+
+- Bugfix: Don't raise error on Anthropic cited_text not being a `str`.
+
+## 0.3.107 (24 June 2025)
+
+- Bugfix: Shield critical shutdown code from cancel scope.
 
 ## v0.3.106 (21 June 2025)
 
