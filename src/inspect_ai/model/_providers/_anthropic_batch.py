@@ -28,7 +28,7 @@ from anthropic.types.messages.batch_create_params import (
     Request as AnthropicBatchRequest,
 )
 
-from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._generate_config import BatchConfig
 
 from .util.batch import (
     Batch,
@@ -44,7 +44,7 @@ class AnthropicBatcher(Batcher[Message, CompletedBatchInfo]):
     def __init__(
         self,
         client: AsyncAnthropic | AsyncAnthropicBedrock | AsyncAnthropicVertex,
-        config: GenerateConfig,
+        config: BatchConfig,
     ):
         super().__init__(
             config,
@@ -145,6 +145,13 @@ class AnthropicBatcher(Batcher[Message, CompletedBatchInfo]):
     def _get_request_failed_error(self, request: BatchRequest[Message]) -> Exception:
         return InternalServerError(
             message="Request failed",
-            response=httpx.Response(status_code=500, text="Request failed"),
+            response=httpx.Response(
+                status_code=500,
+                text="Request failed",
+                request=httpx.Request(
+                    method="POST",
+                    url="https://api.anthropic.com/v1/messages/batches",
+                ),
+            ),
             body=None,
         )

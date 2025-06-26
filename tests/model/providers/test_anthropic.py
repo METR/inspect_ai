@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.resources.messages.batches import AsyncBatches
 from anthropic.resources.messages.messages import AsyncMessages
 from anthropic.types import Message, TextBlock, Usage
@@ -25,7 +26,10 @@ from inspect_ai.model import (
     ModelOutput,
     get_model,
 )
+from inspect_ai.model._generate_config import BatchConfig
+from inspect_ai.model._providers._anthropic_batch import AnthropicBatcher
 from inspect_ai.model._providers.anthropic import AnthropicAPI
+from inspect_ai.model._providers.util.batch import BatchRequest
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -86,9 +90,9 @@ async def test_anthropic_batch(mocker: MockerFixture):
     model_name = "claude-3-7-sonnet-20250219"
     max_tokens = 1000
     generate_config = GenerateConfig(
-        batch_size=10,
-        batch_max_send_delay=batch_max_send_delay,
-        batch_tick=batch_tick,
+        batch_config=BatchConfig(
+            size=10, send_delay=batch_max_send_delay, tick=batch_tick
+        ),
         max_tokens=max_tokens,
     )
     model = AnthropicAPI(model_name=model_name, api_key="test-key")
@@ -261,3 +265,20 @@ async def test_anthropic_batch(mocker: MockerFixture):
     await anyio.sleep(2 * batch_tick)
 
     assert not model._batcher._is_batch_worker_running  # pyright: ignore[reportPrivateUsage]
+
+
+def test_get_request_failed_error(mocker: MockerFixture):
+    batcher = AnthropicBatcher(
+        client=AsyncAnthropic(api_key="test-key"),
+        config=BatchConfig(size=10, send_delay=1.0, tick=0.01),
+    )
+    send_stream, _ = anyio.create_memory_object_stream[Message | Exception]()
+    error = batcher._get_request_failed_error(  # pyright: ignore[reportPrivateUsage]
+        BatchRequest[Message](
+            request={"foo": "bar"},
+            result_stream=send_stream,
+            custom_id="test-id",
+        )
+    )
+
+    assert isinstance(error, Exception)
