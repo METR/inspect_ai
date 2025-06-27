@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from inspect_ai._util.error import pip_dependency_error
 from inspect_ai._util.version import verify_required_version
 
-from .._generate_config import GenerateConfig
+from .._generate_config import BatchConfig
 from ._openai_batch import OpenAIBatcher
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ class CompletedBatchInfo(TypedDict):
 
 
 class TogetherBatcher(OpenAIBatcher):
-    def __init__(self, client: AsyncOpenAI, config: GenerateConfig):
+    def __init__(self, client: AsyncOpenAI, config: BatchConfig):
         FEATURE = "Together Batch API"
         PACKAGE = "together"
         MIN_VERSION = "1.5.13"

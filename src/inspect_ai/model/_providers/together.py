@@ -138,13 +138,17 @@ class TogetherAIAPI(OpenAICompatibleAPI):
     async def _generate_completion(
         self, request: dict[str, Any], config: GenerateConfig
     ) -> ChatCompletion:
-        if config.batch is False or not config.batch_size:
+        if (
+            config.batch is False
+            or not config.batch_config
+            or not config.batch_config.size
+        ):
             return cast(
                 ChatCompletion, await self.client.chat.completions.create(**request)
             )
 
         if not self._batcher:
-            self._batcher = TogetherBatcher(self.client, config)
+            self._batcher = TogetherBatcher(self.client, config.batch_config)
         return await self._batcher.generate(request, config)
 
 
