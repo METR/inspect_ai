@@ -237,15 +237,15 @@ class Batcher(Generic[ResponseT, CompletedBatchInfoT]):
             await self._handle_batch_result(batch, completion_info)
             batch.retry_count = 0
         except Exception as e:
-            logger.error(
-                f"Error handling batch {batch.id} result {completion_info}",
-                exc_info=e,
-            )
+            # logger.error(
+            #     f"Error handling batch {batch.id} result {completion_info}",
+            #     exc_info=e,
+            # )
             batch.retry_count += 1
             if batch.retry_count >= 3:
-                logger.error(
-                    f"Batch {batch.id} failed after 3 retries, failing all {len(batch.requests)} requests in batch",
-                )
+                # logger.error(
+                #     f"Batch {batch.id} failed after 3 retries, failing all {len(batch.requests)} requests in batch",
+                # )
                 await self._fail_all_requests([*batch.requests.values()], e)
                 batch.requests = {}
 
