@@ -90,9 +90,7 @@ async def test_anthropic_batch(mocker: MockerFixture):
     model_name = "claude-3-7-sonnet-20250219"
     max_tokens = 1000
     generate_config = GenerateConfig(
-        batch_config=BatchConfig(
-            size=10, send_delay=batch_max_send_delay, tick=batch_tick
-        ),
+        batch=BatchConfig(size=10, send_delay=batch_max_send_delay, tick=batch_tick),
         max_tokens=max_tokens,
     )
     model = AnthropicAPI(model_name=model_name, api_key="test-key")
@@ -267,7 +265,7 @@ async def test_anthropic_batch(mocker: MockerFixture):
     assert not model._batcher._is_batch_worker_running  # pyright: ignore[reportPrivateUsage]
 
 
-def test_get_request_failed_error(mocker: MockerFixture):
+def test_batcher_get_request_failed_error(mocker: MockerFixture):
     batcher = AnthropicBatcher(
         client=AsyncAnthropic(api_key="test-key"),
         config=BatchConfig(size=10, send_delay=1.0, tick=0.01),
