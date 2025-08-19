@@ -18,6 +18,7 @@ from inspect_ai._display.core.rich import rich_theme
 from inspect_ai._eval.context import init_eval_context
 from inspect_ai._eval.score import ScoreAction, task_score
 from inspect_ai._util._async import configured_async_backend
+from inspect_ai._util.platform import platform_init
 from inspect_ai.log._log import EvalLog
 from inspect_ai.log._recorders import create_recorder_for_location
 
@@ -99,6 +100,8 @@ async def score(
     log_level: str | None,
     output_file: str | None = None,
 ) -> None:
+    platform_init()
+
     # init eval context
     init_eval_context(log_level, None)
     scorer_args = parse_cli_config(args=s, config=None)
