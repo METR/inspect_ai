@@ -2,7 +2,15 @@ import mimetypes
 from pathlib import Path
 from typing import Any, Literal, Sequence, Union
 
-from pydantic import BaseModel, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 from inspect_ai._util.citation import Citation
 from inspect_ai._util.url import data_uri_mime_type
@@ -11,6 +19,15 @@ from inspect_ai._util.url import data_uri_mime_type
 class ContentBase(BaseModel):
     internal: JsonValue | None = Field(default=None)
     """Model provider specific payload - typically used to aid transformation back to model types."""
+
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def ignore_validation(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> Any:
+        if not (info.context and "no_validation" in info.context):
+            return handler(value)
+        return value
 
 
 class ContentText(ContentBase):

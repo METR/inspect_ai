@@ -1,9 +1,19 @@
 from logging import getLogger
-from typing import Any, Literal, Type, Union
+from typing import Annotated, Any, Literal, Type, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    Discriminator,
+    Field,
+    Tag,
+    TypeAdapter,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 from shortuuid import uuid
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.constants import DESERIALIZING
 from inspect_ai._util.content import Content, ContentReasoning, ContentText
 from inspect_ai._util.metadata import MT, metadata_as
@@ -15,7 +25,7 @@ from ._reasoning import parse_content_with_reasoning
 logger = getLogger(__name__)
 
 
-class ChatMessageBase(BaseModel):
+class ChatMessageBase(InspectBaseModel):
     """Base class for chat messages."""
 
     id: str | None = Field(default=None)
@@ -29,6 +39,29 @@ class ChatMessageBase(BaseModel):
 
     metadata: dict[str, Any] | None = Field(default=None)
     """Additional message metadata."""
+
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def ignore_validation(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> Any:
+        if not (info.context and "no_validation" in info.context):
+            return handler(value)
+
+        if info.field_name == "content":
+            return handler(value)
+
+        if info.field_name == "tool_calls":
+            return (
+                None
+                if value is None
+                else [ToolCall(**tool_call) for tool_call in value]
+            )
+
+        if info.field_name == "error":
+            return None if value is None else ToolCallError(**value)
+
+        return value
 
     def metadata_as(self, metadata_cls: Type[MT]) -> MT:
         """Metadata as a Pydantic model.
@@ -207,7 +240,26 @@ class ChatMessageTool(ChatMessageBase):
         return values
 
 
-ChatMessage = Union[
-    ChatMessageSystem, ChatMessageUser, ChatMessageAssistant, ChatMessageTool
+def _get_chat_message_type(data: Any) -> str:
+    name: str | None = None
+    if isinstance(data, dict):
+        name = data.get("role")
+    elif isinstance(data, ChatMessageBase):
+        name = getattr(data, "role")
+    if name is None:
+        raise ValueError(f"Invalid chat message: {data}")
+
+    return name
+
+
+ChatMessage = Annotated[
+    Union[
+        Annotated[ChatMessageSystem, Tag("system")],
+        Annotated[ChatMessageUser, Tag("user")],
+        Annotated[ChatMessageAssistant, Tag("assistant")],
+        Annotated[ChatMessageTool, Tag("tool")],
+    ],
+    Discriminator(_get_chat_message_type),
 ]
+ChatMessageAdapter: TypeAdapter[ChatMessage] = TypeAdapter(ChatMessage)
 """Message in a chat conversation"""

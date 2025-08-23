@@ -2,14 +2,15 @@ from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 from typing_extensions import TypedDict
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.constants import DEFAULT_BATCH_SIZE
 from inspect_ai.util._json import JSONSchema
 
 
-class ResponseSchema(BaseModel):
+class ResponseSchema(InspectBaseModel):
     """Schema for model response when using Structured Output."""
 
     name: str
@@ -26,7 +27,7 @@ class ResponseSchema(BaseModel):
     OpenAI and Mistral only."""
 
 
-class BatchConfig(BaseModel):
+class BatchConfig(InspectBaseModel):
     """Batch processing configuration."""
 
     size: int | None = Field(default=None)
@@ -140,7 +141,7 @@ class GenerateConfigArgs(TypedDict, total=False):
     """Use batching API when available. True to enable batching with default configuration, False to disable batching, a number to enable batching of the specified batch size, or a BatchConfig object specifying the batching configuration."""
 
 
-class GenerateConfig(BaseModel):
+class GenerateConfig(InspectBaseModel):
     """Model generation options."""
 
     max_retries: int | None = Field(default=None)

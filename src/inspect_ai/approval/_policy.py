@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.config import read_config_object
 from inspect_ai._util.format import format_function_call
 from inspect_ai._util.registry import registry_create, registry_lookup
@@ -81,7 +82,7 @@ def policy_approver(policies: str | list[ApprovalPolicy]) -> Approver:
     return approve
 
 
-class ApproverPolicyConfig(BaseModel):
+class ApproverPolicyConfig(InspectBaseModel):
     """
     Configuration format for approver policies.
 
@@ -124,7 +125,7 @@ class ApproverPolicyConfig(BaseModel):
         return data
 
 
-class ApprovalPolicyConfig(BaseModel):
+class ApprovalPolicyConfig(InspectBaseModel):
     approvers: list[ApproverPolicyConfig]
 
 

@@ -8,15 +8,16 @@ from typing import (
 )
 
 from docstring_parser import Docstring, parse
-from pydantic import BaseModel, Field
+from pydantic import Field
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai.util._json import JSONType, json_schema
 
 from ._tool_description import tool_description
 from ._tool_params import ToolParam, ToolParams
 
 
-class ToolInfo(BaseModel):
+class ToolInfo(InspectBaseModel):
     """Specification of a tool (JSON Schema compatible)
 
     If you are implementing a ModelAPI, most LLM libraries can

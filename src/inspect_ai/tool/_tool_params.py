@@ -3,15 +3,18 @@ from typing import (
     TypeAlias,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    Field,
+)
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai.util._json import JSONSchema
 
 ToolParam: TypeAlias = JSONSchema
 """Description of tool parameter in JSON Schema format."""
 
 
-class ToolParams(BaseModel):
+class ToolParams(InspectBaseModel):
     """Description of tool parameters object in JSON Schema format."""
 
     type: Literal["object"] = Field(default="object")

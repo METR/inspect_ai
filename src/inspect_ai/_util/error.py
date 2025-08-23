@@ -3,12 +3,13 @@ from importlib.metadata import version
 from types import TracebackType
 from typing import Callable
 
-from pydantic import BaseModel
 from rich import print
 from rich.console import RenderableType
 
+from inspect_ai._util._tracer import InspectBaseModel
 
-class EvalError(BaseModel):
+
+class EvalError(InspectBaseModel):
     """Eval error details."""
 
     message: str

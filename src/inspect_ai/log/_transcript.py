@@ -3,11 +3,14 @@ from contextvars import ContextVar
 from datetime import datetime
 from logging import getLogger
 from typing import (
+    Annotated,
     Any,
     Callable,
     Iterator,
     Literal,
+    Self,
     Sequence,
+    SupportsIndex,
     Type,
     TypeVar,
     Union,
@@ -15,14 +18,23 @@ from typing import (
 )
 
 from pydantic import (
-    BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     JsonValue,
+    ModelWrapValidatorHandler,
+    RootModel,
+    Tag,
+    TypeAdapter,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
     field_serializer,
+    field_validator,
+    model_validator,
 )
 from shortuuid import uuid
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.constants import DESERIALIZING
 from inspect_ai._util.error import EvalError
 from inspect_ai._util.json import JsonChange
@@ -30,7 +42,9 @@ from inspect_ai._util.logger import warn_once
 from inspect_ai._util.working import sample_working_time
 from inspect_ai.dataset._dataset import Sample
 from inspect_ai.log._message import LoggingMessage
-from inspect_ai.model._chat_message import ChatMessage
+from inspect_ai.model._chat_message import (
+    ChatMessage,
+)
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._model_call import ModelCall
 from inspect_ai.model._model_output import ModelOutput
@@ -50,7 +64,7 @@ from inspect_ai.util._store import store, store_changes, store_jsonable
 logger = getLogger(__name__)
 
 
-class BaseEvent(BaseModel):
+class BaseEvent(InspectBaseModel):
     uuid: str | None = Field(default=None)
     """Unique identifer for event."""
 
@@ -85,6 +99,29 @@ class BaseEvent(BaseModel):
     @field_serializer("timestamp")
     def serialize_timestamp(self, dt: datetime) -> str:
         return dt.astimezone().isoformat()
+
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def ignore_validation(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> Any:
+        if not (info.context and "no_validation" in info.context):
+            return handler(value)
+        match (cls.__name__, info.field_name):
+            case ("ModelEvent", "call"):
+                return ModelCall.model_construct(**value)
+            case ("ModelEvent", "input"):
+                return handler(value)
+            case ("ModelEvent", "tools"):
+                return value
+            case (str(), "changes"):
+                return (
+                    None
+                    if value is None
+                    else [JsonChange.model_construct(**change) for change in value]
+                )
+            case _:
+                return value
 
 
 class SampleInitEvent(BaseEvent):
@@ -512,26 +549,42 @@ class SubtaskEvent(BaseEvent):
         return dt.astimezone().isoformat()
 
 
-Event = Union[
-    SampleInitEvent,
-    SampleLimitEvent,
-    SandboxEvent,
-    StateEvent,
-    StoreEvent,
-    ModelEvent,
-    ToolEvent,
-    SandboxEvent,
-    ApprovalEvent,
-    InputEvent,
-    ScoreEvent,
-    ErrorEvent,
-    LoggerEvent,
-    InfoEvent,
-    SpanBeginEvent,
-    SpanEndEvent,
-    StepEvent,
-    SubtaskEvent,
+def _get_event_type(event: Any) -> str:
+    name: str | None = None
+    if isinstance(event, dict):
+        name = event.get("event")
+    elif isinstance(event, BaseEvent):
+        name = getattr(event, "event")
+
+    if name is None:
+        raise ValueError(f"Invalid event: {event}")
+
+    return name
+
+
+Event = Annotated[
+    Union[
+        Annotated[ApprovalEvent, Tag("approval")],
+        Annotated[ErrorEvent, Tag("error")],
+        Annotated[InfoEvent, Tag("info")],
+        Annotated[InputEvent, Tag("input")],
+        Annotated[LoggerEvent, Tag("logger")],
+        Annotated[ModelEvent, Tag("model")],
+        Annotated[SampleInitEvent, Tag("sample_init")],
+        Annotated[SampleLimitEvent, Tag("sample_limit")],
+        Annotated[SandboxEvent, Tag("sandbox")],
+        Annotated[ScoreEvent, Tag("score")],
+        Annotated[SpanBeginEvent, Tag("span_begin")],
+        Annotated[SpanEndEvent, Tag("span_end")],
+        Annotated[StateEvent, Tag("state")],
+        Annotated[StepEvent, Tag("step")],
+        Annotated[StoreEvent, Tag("store")],
+        Annotated[SubtaskEvent, Tag("subtask")],
+        Annotated[ToolEvent, Tag("tool")],
+    ],
+    Discriminator(_get_event_type),
 ]
+
 """Event in a transcript."""
 
 ET = TypeVar("ET", bound=BaseEvent)
