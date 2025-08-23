@@ -1,12 +1,16 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.content import Content
 
 
-class ToolCallContent(BaseModel):
+class ToolCallContent(InspectBaseModel):
     """Content to include in tool call view."""
 
     title: str | None = Field(default=None)

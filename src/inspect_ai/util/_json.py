@@ -21,13 +21,18 @@ from typing import (
     is_typeddict,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
+
+from inspect_ai._util._tracer import InspectBaseModel
 
 JSONType = Literal["string", "integer", "number", "boolean", "array", "object", "null"]
 """Valid types within JSON schema."""
 
 
-class JSONSchema(BaseModel):
+class JSONSchema(InspectBaseModel):
     """JSON Schema for type."""
 
     type: JSONType | None = Field(default=None)

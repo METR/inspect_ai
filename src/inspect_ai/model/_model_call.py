@@ -1,7 +1,11 @@
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import (
+    Field,
+    JsonValue,
+)
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.json import jsonable_python
 
 ModelCallFilter = Callable[[JsonValue | None, JsonValue], JsonValue]
@@ -13,7 +17,7 @@ The second parameter is the value. Return a modified value if appropriate.
 """
 
 
-class ModelCall(BaseModel):
+class ModelCall(InspectBaseModel):
     """Model call (raw request/response data)."""
 
     request: dict[str, JsonValue]
