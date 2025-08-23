@@ -5,8 +5,10 @@ from typing import (
 )
 
 import jsonpatch
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import Field, JsonValue
 from pydantic_core import PydanticSerializationError, to_json, to_jsonable_python
+
+from inspect_ai._util._tracer import InspectBaseModel
 
 JSONType = Literal["string", "integer", "number", "boolean", "array", "object", "null"]
 """Valid types within JSON schema."""
@@ -80,7 +82,7 @@ def python_type_to_json_type(python_type: str | None) -> JSONType:
             )
 
 
-class JsonChange(BaseModel):
+class JsonChange(InspectBaseModel):
     """Describes a change to data using JSON Patch format."""
 
     op: Literal["remove", "add", "replace", "move", "test", "copy"]

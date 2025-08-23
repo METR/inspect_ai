@@ -18,6 +18,7 @@ from typing import (
 
 from pydantic import BaseModel, Field, model_validator
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.logger import warn_once
 
 from .._subprocess import ExecResult
@@ -51,18 +52,18 @@ SampleCleanup = Callable[
 ConfigDeserialize = Callable[[dict[str, Any]], BaseModel]
 
 
-class HostMapping(BaseModel):
+class HostMapping(InspectBaseModel):
     host_ip: str
     host_port: int
 
 
-class PortMapping(BaseModel):
+class PortMapping(InspectBaseModel):
     container_port: int
     protocol: Literal["tcp", "udp"]
     mappings: list[HostMapping]
 
 
-class SandboxConnection(BaseModel):
+class SandboxConnection(InspectBaseModel):
     """Information required to connect to sandbox."""
 
     type: str
@@ -374,7 +375,7 @@ class SandboxEnvironments:
     """
 
 
-class SandboxEnvironmentSpec(BaseModel, frozen=True):
+class SandboxEnvironmentSpec(InspectBaseModel):
     """Specification of a SandboxEnvironment."""
 
     type: str

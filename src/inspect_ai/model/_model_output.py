@@ -1,15 +1,16 @@
 import uuid
 from typing import Any, Literal, Type
 
-from pydantic import BaseModel, Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, model_validator
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.content import Content
 from inspect_ai.tool._tool_call import ToolCall
 
 from ._chat_message import ChatMessage, ChatMessageAssistant
 
 
-class ModelUsage(BaseModel):
+class ModelUsage(InspectBaseModel):
     """Token usage for completion."""
 
     input_tokens: int = Field(default=0)
@@ -67,7 +68,7 @@ StopReason = Literal[
 """Reason that the model stopped or failed to generate."""
 
 
-class TopLogprob(BaseModel):
+class TopLogprob(InspectBaseModel):
     """List of the most likely tokens and their log probability, at this token position."""
 
     token: str
@@ -80,7 +81,7 @@ class TopLogprob(BaseModel):
     """The top-kth token represented as a byte array (a list of integers)."""
 
 
-class Logprob(BaseModel):
+class Logprob(InspectBaseModel):
     """Log probability for a token."""
 
     token: str
@@ -96,14 +97,14 @@ class Logprob(BaseModel):
     """If the `top_logprobs` argument is greater than 0, this will contain an ordered list of the top K most likely tokens and their log probabilities."""
 
 
-class Logprobs(BaseModel):
+class Logprobs(InspectBaseModel):
     """Log probability information for a completion choice."""
 
     content: list[Logprob]
     """a (num_generated_tokens,) length list containing the individual log probabilities for each generated token."""
 
 
-class ChatCompletionChoice(BaseModel):
+class ChatCompletionChoice(InspectBaseModel):
     """Choice generated for completion."""
 
     message: ChatMessageAssistant
@@ -128,7 +129,7 @@ class ChatCompletionChoice(BaseModel):
         return values
 
 
-class ModelOutput(BaseModel):
+class ModelOutput(InspectBaseModel):
     """Output from model generation."""
 
     model: str = Field(default_factory=str)

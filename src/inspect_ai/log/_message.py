@@ -2,7 +2,9 @@ import re
 from logging import LogRecord
 from typing import Any, Literal, Type, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
+
+from inspect_ai._util._tracer import InspectBaseModel
 
 LoggingLevel = Literal[
     "debug", "trace", "http", "sandbox", "info", "warning", "error", "critical"
@@ -10,7 +12,7 @@ LoggingLevel = Literal[
 """Logging level."""
 
 
-class LoggingMessage(BaseModel):
+class LoggingMessage(InspectBaseModel):
     """Message written to Python log."""
 
     name: str | None = Field(default=None)

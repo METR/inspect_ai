@@ -9,16 +9,19 @@ from typing import Any, Literal, Tuple, Type, TypedDict
 import click
 import tenacity
 from pydantic import (
-    BaseModel,
     ConfigDict,
     Field,
     PrivateAttr,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
     model_validator,
 )
 from rich.console import Console, RenderableType
 from rich.traceback import Traceback
 from shortuuid import uuid
 
+from inspect_ai._util._tracer import InspectBaseModel
 from inspect_ai._util.constants import CONSOLE_DISPLAY_WIDTH, DESERIALIZING, PKG_NAME
 from inspect_ai._util.error import EvalError, exception_message
 from inspect_ai._util.hash import base57_id_hash
@@ -66,7 +69,7 @@ def eval_config_defaults() -> EvalConfigDefaults:
     }
 
 
-class EvalConfig(BaseModel):
+class EvalConfig(InspectBaseModel):
     """Configuration used for evaluation."""
 
     limit: int | tuple[int, int] | None = Field(default=None)
@@ -170,7 +173,7 @@ class EvalConfig(BaseModel):
         return values
 
 
-class EvalSampleLimit(BaseModel):
+class EvalSampleLimit(InspectBaseModel):
     """Limit encountered by sample."""
 
     type: Literal[
@@ -182,7 +185,7 @@ class EvalSampleLimit(BaseModel):
     """The limit value"""
 
 
-class EvalSampleSummary(BaseModel):
+class EvalSampleSummary(InspectBaseModel):
     """Summary information (including scoring) for a sample."""
 
     id: int | str
@@ -258,7 +261,7 @@ class EvalSampleSummary(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 
-class EvalSample(BaseModel):
+class EvalSample(InspectBaseModel):
     """Sample from evaluation task."""
 
     id: int | str
@@ -452,8 +455,19 @@ class EvalSample(BaseModel):
     # allow field model_usage
     model_config = ConfigDict(protected_namespaces=())
 
+    @field_validator("*", mode="wrap")
+    @classmethod
+    def ignore_validation(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> Any:
+        if not (info.context and "no_validation" in info.context):
+            return handler(value)
+        if info.field_name == "events":
+            return handler(value)
+        return value
 
-class EvalEvents(BaseModel):
+
+class EvalEvents(InspectBaseModel):
     events: list[Event] = Field(default_factory=list)
     """List of events."""
 
@@ -461,7 +475,7 @@ class EvalEvents(BaseModel):
     """Content references."""
 
 
-class EvalPlanStep(BaseModel):
+class EvalPlanStep(InspectBaseModel):
     """Solver step."""
 
     solver: str
@@ -471,7 +485,7 @@ class EvalPlanStep(BaseModel):
     """Parameters used to instantiate solver."""
 
 
-class EvalPlan(BaseModel):
+class EvalPlan(InspectBaseModel):
     """Plan (solvers) used in evaluation."""
 
     name: str = Field(default="plan")
@@ -487,7 +501,7 @@ class EvalPlan(BaseModel):
     """Generation config."""
 
 
-class EvalMetric(BaseModel):
+class EvalMetric(InspectBaseModel):
     """Metric for evaluation score."""
 
     name: str
@@ -503,7 +517,7 @@ class EvalMetric(BaseModel):
     """Additional metadata associated with metric."""
 
 
-class EvalScore(BaseModel):
+class EvalScore(InspectBaseModel):
     """Score for evaluation task."""
 
     name: str
@@ -538,7 +552,7 @@ class EvalSampleScore(Score):
     """Sample ID."""
 
 
-class EvalSampleReductions(BaseModel):
+class EvalSampleReductions(InspectBaseModel):
     """Score reductions."""
 
     scorer: str
@@ -551,7 +565,7 @@ class EvalSampleReductions(BaseModel):
     """List of reduced scores"""
 
 
-class EvalResults(BaseModel):
+class EvalResults(InspectBaseModel):
     """Scoring results from evaluation."""
 
     total_samples: int = Field(default=0)
@@ -635,7 +649,7 @@ class EvalResults(BaseModel):
         return values
 
 
-class EvalDataset(BaseModel):
+class EvalDataset(InspectBaseModel):
     """Dataset used for evaluation."""
 
     name: str | None = Field(default=None)
@@ -654,14 +668,14 @@ class EvalDataset(BaseModel):
     """Was the dataset shuffled after reading."""
 
 
-class EvalMetricDefinition(BaseModel):
+class EvalMetricDefinition(InspectBaseModel):
     name: str
     """Metric name"""
 
     options: dict[str, Any] | None = Field(default=None)
 
 
-class EvalScorer(BaseModel):
+class EvalScorer(InspectBaseModel):
     name: str
     """Scorer name"""
 
@@ -678,7 +692,7 @@ class EvalScorer(BaseModel):
     """Scorer metadata"""
 
 
-class EvalRevision(BaseModel):
+class EvalRevision(InspectBaseModel):
     """Git revision for evaluation."""
 
     type: Literal["git"]
@@ -691,7 +705,7 @@ class EvalRevision(BaseModel):
     """Revision commit."""
 
 
-class EvalModelConfig(BaseModel):
+class EvalModelConfig(InspectBaseModel):
     """Model config."""
 
     model: str
@@ -707,7 +721,7 @@ class EvalModelConfig(BaseModel):
     """Model specific arguments."""
 
 
-class EvalSpec(BaseModel):
+class EvalSpec(InspectBaseModel):
     """Eval target and configuration."""
 
     eval_set_id: str | None = Field(default=None)
@@ -921,7 +935,7 @@ def truncate_traceback(
     return truncated_header + truncated_frames + truncated_error, True
 
 
-class EvalStats(BaseModel):
+class EvalStats(InspectBaseModel):
     """Timing and usage statistics."""
 
     started_at: str = Field(default_factory=str)
@@ -937,7 +951,7 @@ class EvalStats(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 
-class EvalLog(BaseModel):
+class EvalLog(InspectBaseModel):
     """Evaluation log."""
 
     # WARNING: The order of these fields is important for the log file format.
