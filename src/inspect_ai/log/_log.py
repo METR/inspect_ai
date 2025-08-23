@@ -32,7 +32,7 @@ from inspect_ai.util._sandbox.environment import SandboxEnvironmentSpec
 from inspect_ai.util._store import Store
 from inspect_ai.util._store_model import SMT
 
-from ._transcript import Event
+from ._transcript import EventList
 from ._util import thin_input, thin_metadata, thin_text
 
 logger = getLogger(__name__)
@@ -337,7 +337,7 @@ class EvalSample(BaseModel):
         # create the model
         return model_cls.model_validate(data)
 
-    events: list[Event] = Field(default_factory=list)
+    events: EventList = Field(default_factory=lambda: EventList([]))
     """Events that occurred during sample execution."""
 
     model_usage: dict[str, ModelUsage] = Field(default_factory=dict)
@@ -454,7 +454,7 @@ class EvalSample(BaseModel):
 
 
 class EvalEvents(BaseModel):
-    events: list[Event] = Field(default_factory=list)
+    events: EventList = Field(default_factory=lambda: EventList([]))
     """List of events."""
 
     content: dict[str, str] = Field(default_factory=dict)
