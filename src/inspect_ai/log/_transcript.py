@@ -3,11 +3,15 @@ from contextvars import ContextVar
 from datetime import datetime
 from logging import getLogger
 from typing import (
+    Annotated,
     Any,
     Callable,
+    Generator,
     Iterator,
     Literal,
+    Self,
     Sequence,
+    SupportsIndex,
     Type,
     TypeVar,
     Union,
@@ -17,9 +21,17 @@ from typing import (
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     JsonValue,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    RootModel,
+    TypeAdapter,
+    computed_field,
     field_serializer,
+    field_validator,
+    model_validator,
 )
 from shortuuid import uuid
 
@@ -148,9 +160,6 @@ class ModelEvent(BaseEvent):
     role: str | None = Field(default=None)
     """Model role."""
 
-    input: list[ChatMessage]
-    """Model input (list of messages)."""
-
     tools: list[ToolInfo]
     """Tools available to the model."""
 
@@ -159,9 +168,6 @@ class ModelEvent(BaseEvent):
 
     config: GenerateConfig
     """Generate config used for call to model."""
-
-    output: ModelOutput
-    """Output from model."""
 
     retries: int | None = Field(default=None)
     """Retries for the model API request."""
@@ -172,20 +178,69 @@ class ModelEvent(BaseEvent):
     cache: Literal["read", "write"] | None = Field(default=None)
     """Was this a cache read or write."""
 
-    call: ModelCall | None = Field(default=None)
-    """Raw call made to model API."""
-
     completed: datetime | None = Field(default=None)
     """Time that model call completed (see `timestamp` for started)"""
 
     working_time: float | None = Field(default=None)
     """working time for model call that succeeded (i.e. was not retried)."""
 
+    _input: list[Any] = PrivateAttr(default=[])
+    _input_computed: bool = PrivateAttr(default=False)
+    _output: Any = PrivateAttr(default=None)
+    _output_computed: bool = PrivateAttr(default=False)
+    _call: Any = PrivateAttr(default=None)
+    _call_computed: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_input(cls, data: Any) -> Any:
+        for field in ["input", "output", "call"]:
+            if field in data:
+                data[f"_{field}"] = data.pop(field)
+        return data
+
     @field_serializer("completed")
     def serialize_completed(self, dt: datetime | None) -> str | None:
         if dt is None:
             return None
         return dt.astimezone().isoformat()
+
+    @computed_field
+    @property
+    def input(self) -> list[ChatMessage]:
+        if self._input_computed:
+            return self._input
+
+        input_validated = TypeAdapter(list[ChatMessage]).validate_python(self._input)
+        self._input = input_validated
+        self._input_computed = True
+        return input_validated
+
+    @computed_field
+    @property
+    def output(self) -> ModelOutput | None:
+        if self._output_computed:
+            return self._output
+
+        output_validated = ModelOutput.model_validate(self._output or {})
+        self._output = output_validated
+        self._output_computed = True
+        return output_validated
+
+    @computed_field
+    @property
+    def call(self) -> ModelCall | None:
+        if self._call_computed:
+            return self._call
+
+        if not self._call:
+            self._call_computed = True
+            return None
+
+        call_validated = ModelCall.model_validate(self._call)
+        self._call = call_validated
+        self._call_computed = True
+        return call_validated
 
 
 class ToolEvent(BaseEvent):
@@ -512,26 +567,72 @@ class SubtaskEvent(BaseEvent):
         return dt.astimezone().isoformat()
 
 
-Event = Union[
-    SampleInitEvent,
-    SampleLimitEvent,
-    SandboxEvent,
-    StateEvent,
-    StoreEvent,
-    ModelEvent,
-    ToolEvent,
-    SandboxEvent,
-    ApprovalEvent,
-    InputEvent,
-    ScoreEvent,
-    ErrorEvent,
-    LoggerEvent,
-    InfoEvent,
-    SpanBeginEvent,
-    SpanEndEvent,
-    StepEvent,
-    SubtaskEvent,
+Event = Annotated[
+    Union[
+        ApprovalEvent,
+        ErrorEvent,
+        InfoEvent,
+        InputEvent,
+        LoggerEvent,
+        ModelEvent,
+        SampleInitEvent,
+        SampleLimitEvent,
+        SandboxEvent,
+        ScoreEvent,
+        SpanBeginEvent,
+        SpanEndEvent,
+        StateEvent,
+        StepEvent,
+        StoreEvent,
+        SubtaskEvent,
+        ToolEvent,
+    ],
+    Discriminator("event"),
 ]
+
+EventAdapter: TypeAdapter[Event] = TypeAdapter(Event)
+"""Event in a transcript."""
+
+
+class EventList(RootModel[list[Event]]):
+    root: list[Event]
+
+    @field_validator("root", mode="wrap")
+    @classmethod
+    def validate_root(cls, data: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+        if not isinstance(data, list):
+            return handler(data)
+        return data
+
+    def __len__(self) -> int:
+        return len(self.root)
+
+    def __iter__(self) -> Generator[Event, None, None]:
+        for event in self.root:
+            yield EventAdapter.validate_python(event)
+
+    def __setitem__(self, index: SupportsIndex, value: Any) -> None:
+        self.root[index] = value
+
+    def __getitem__(self, index: SupportsIndex) -> Event | list[Event]:
+        returned = self.root[index]
+        idx_in_root = list(range(len(self.root)))[index]
+        return_list = isinstance(returned, list)
+        if not isinstance(returned, list):
+            returned = [returned]
+        if not isinstance(idx_in_root, list):
+            idx_in_root = [idx_in_root]
+        for idx, (idx_root, event) in enumerate(zip(idx_in_root, returned)):
+            if not isinstance(event, dict):
+                continue
+            event: Event = EventAdapter.validate_python(event)
+            self.root[idx_root] = event
+            returned[idx] = event
+        if not return_list:
+            return returned[0]
+        return returned
+
+
 """Event in a transcript."""
 
 ET = TypeVar("ET", bound=BaseEvent)
