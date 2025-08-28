@@ -8,18 +8,37 @@ import {
   SampleDataResponse,
 } from "./types";
 
+/* global __API_URL__ */
+const API_BASE_URL = __API_URL__ || "";
 const loaded_time = Date.now();
 let last_eval_time = 0;
+
+function buildApiUrl(path: string): string {
+  if (!API_BASE_URL) {
+    return path;
+  }
+  const base = API_BASE_URL.endsWith("/")
+    ? API_BASE_URL.slice(0, -1)
+    : API_BASE_URL;
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return base + cleanPath;
+}
+
+function isApiCrossOrigin(): boolean {
+  return Boolean(
+    API_BASE_URL && new URL(API_BASE_URL).origin !== window.location.origin,
+  );
+}
 
 async function client_events() {
   const params = new URLSearchParams();
   params.append("loaded_time", String(loaded_time.valueOf()));
   params.append("last_eval_time", String(last_eval_time.valueOf()));
-  return (await api("GET", `/api/events?${params.toString()}`)).parsed;
+  return (await api("GET", `/events?${params.toString()}`)).parsed;
 }
 
 async function eval_logs(log_dir?: string) {
-  const path = log_dir ? `/api/logs?log_dir=${encodeURIComponent(log_dir)}` : `/logs`;
+  const path = log_dir ? `/logs?log_dir=${encodeURIComponent(log_dir)}` : `/logs`;
   const logs = await api("GET", path);
   last_eval_time = Date.now();
   return logs.parsed;
@@ -32,18 +51,18 @@ async function eval_log(
 ): Promise<LogContents> {
   return await api(
     "GET",
-    `/api/logs/${encodeURIComponent(file)}?header-only=${headerOnly}`,
+    `/logs/${encodeURIComponent(file)}?header-only=${headerOnly}`,
   );
 }
 
 async function eval_log_size(file: string): Promise<number> {
-  return (await api("GET", `/api/log-size/${encodeURIComponent(file)}`)).parsed;
+  return (await api("GET", `/log-size/${encodeURIComponent(file)}`)).parsed;
 }
 
 async function eval_log_bytes(file: string, start: number, end: number) {
   return await api_bytes(
     "GET",
-    `/api/log-bytes/${encodeURIComponent(file)}?start=${start}&end=${end}`,
+    `/log-bytes/${encodeURIComponent(file)}?start=${start}&end=${end}`,
   );
 }
 
@@ -52,7 +71,7 @@ async function eval_log_headers(files: string[]) {
   for (const file of files) {
     params.append("file", file);
   }
-  return (await api("GET", `/api/log-headers?${params.toString()}`)).parsed;
+  return (await api("GET", `/log-headers?${params.toString()}`)).parsed;
 }
 
 async function eval_pending_samples(
@@ -95,7 +114,7 @@ async function eval_pending_samples(
   const result = (
     await apiRequest<PendingSampleResponse>(
       "GET",
-      `/api/pending-samples?${params.toString()}`,
+      `/pending-samples?${params.toString()}`,
       request,
     )
   ).parsed;
@@ -148,7 +167,7 @@ async function eval_log_sample_data(
   const result = (
     await apiRequest<SampleDataResponse>(
       "GET",
-      `/api/pending-sample-data?${params.toString()}`,
+      `/pending-sample-data?${params.toString()}`,
       request,
     )
   ).parsed;
@@ -174,7 +193,7 @@ async function log_message(log_file: string, message: string) {
   };
   await apiRequest<void>(
     "GET",
-    `/api/log-message?${params.toString()}`,
+    `/log-message?${params.toString()}`,
     request,
   );
 }
@@ -191,6 +210,8 @@ async function apiRequest<T>(
   path: string,
   request: Request<T>,
 ): Promise<{ raw: string; parsed: T }> {
+  const url = buildApiUrl(path);
+
   // build headers
   const responseHeaders: HeadersInit = {
     Accept: "application/json",
@@ -204,10 +225,11 @@ async function apiRequest<T>(
   }
 
   // make request
-  const response = await fetch(`${path}`, {
+  const response = await fetch(url, {
     method,
     headers: responseHeaders,
     body: request.body,
+    credentials: isApiCrossOrigin() ? "include" : "same-origin",
   });
   if (response.ok) {
     const text = await response.text();
@@ -242,6 +264,8 @@ async function api(
   headers?: Record<string, string>,
   body?: string,
 ) {
+  const url = buildApiUrl(path);
+
   // build headers
   const responseHeaders: HeadersInit = {
     Accept: "application/json",
@@ -255,10 +279,11 @@ async function api(
   }
 
   // make request
-  const response = await fetch(`${path}`, {
+  const response = await fetch(url, {
     method,
     headers: responseHeaders,
     body,
+    credentials: isApiCrossOrigin() ? "include" : "same-origin",
   });
   if (response.ok) {
     const text = await response.text();
@@ -279,6 +304,8 @@ async function api_bytes(
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
 ) {
+  const url = buildApiUrl(path);
+
   // build headers
   const headers: HeadersInit = {
     Accept: "application/octet-stream",
@@ -288,7 +315,11 @@ async function api_bytes(
   };
 
   // make request
-  const response = await fetch(`${path}`, { method, headers });
+  const response = await fetch(url, {
+    method,
+    headers,
+    credentials: isApiCrossOrigin() ? "include" : "same-origin",
+  });
   if (response.ok) {
     const buffer = await response.arrayBuffer();
     return new Uint8Array(buffer);
