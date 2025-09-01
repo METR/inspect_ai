@@ -19,7 +19,10 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    ModelWrapValidatorHandler,
+    ValidationInfo,
     field_serializer,
+    model_validator,
 )
 from shortuuid import uuid
 
@@ -50,6 +53,218 @@ from inspect_ai.util._store import store, store_changes, store_jsonable
 logger = getLogger(__name__)
 
 
+FAST_CONSTRUCT = "fast_construct"
+
+
+class FastConstructMixin:
+    """Mixin to add fast construction capability to Pydantic models"""
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _fast_construct_model(
+        cls, v: Any, handler: ModelWrapValidatorHandler[Any], info: ValidationInfo
+    ):
+        if not (info.context and info.context.get(FAST_CONSTRUCT)):
+            return handler(v)
+
+        if isinstance(v, dict):
+            # Handle Event type construction based on 'event' field
+            if "event" in v and "timestamp" in v:
+                # Parse timestamp string to datetime if needed
+                if isinstance(v.get("timestamp"), str):
+                    try:
+                        import dateutil.parser
+
+                        v = v.copy()
+                        v["timestamp"] = dateutil.parser.parse(v["timestamp"])
+                    except Exception:
+                        pass
+
+                # Process nested fields for events
+                v = _process_event_fields(v, info.context)
+
+                event_type = v["event"]
+                if event_type == "sample_init" and cls.__name__ != "SampleInitEvent":
+                    return SampleInitEvent.model_construct(**v)
+                elif event_type == "step" and cls.__name__ != "StepEvent":
+                    return StepEvent.model_construct(**v)
+                elif event_type == "state" and cls.__name__ != "StateEvent":
+                    return StateEvent.model_construct(**v)
+                elif event_type == "model" and cls.__name__ != "ModelEvent":
+                    return ModelEvent.model_construct(**v)
+                elif event_type == "score" and cls.__name__ != "ScoreEvent":
+                    return ScoreEvent.model_construct(**v)
+                elif event_type == "tool" and cls.__name__ != "ToolEvent":
+                    return ToolEvent.model_construct(**v)
+                elif event_type == "sandbox" and cls.__name__ != "SandboxEvent":
+                    return SandboxEvent.model_construct(**v)
+
+            # Handle ChatMessage role-based construction
+            elif "role" in v and "content" in v:
+                from inspect_ai.model._chat_message import (
+                    ChatMessageAssistant,
+                    ChatMessageSystem,
+                    ChatMessageTool,
+                    ChatMessageUser,
+                )
+
+                # Force id to None for ChatMessages
+                v = v.copy()
+                v["id"] = None
+
+                role = v["role"]
+                if role == "system" and cls.__name__ != "ChatMessageSystem":
+                    return ChatMessageSystem.model_construct(**v)
+                elif role == "user" and cls.__name__ != "ChatMessageUser":
+                    return ChatMessageUser.model_construct(**v)
+                elif role == "assistant" and cls.__name__ != "ChatMessageAssistant":
+                    return ChatMessageAssistant.model_construct(**v)
+                elif role == "tool" and cls.__name__ != "ChatMessageTool":
+                    return ChatMessageTool.model_construct(**v)
+
+        # For fast construct, use model_construct instead of validation
+        if isinstance(v, dict):
+            return cls.model_construct(**v)
+
+        return handler(v)
+
+
+def _process_event_fields(v: dict, context: dict) -> dict:
+    """Process nested fields within events that need special handling - OPTIMIZED"""
+    # Pre-check what fields exist to avoid expensive operations
+    has_sample = "sample" in v and isinstance(v.get("sample"), dict)
+    has_score = "score" in v and isinstance(v.get("score"), dict)
+    has_changes = "changes" in v and isinstance(v.get("changes"), list)
+    has_input = "input" in v and isinstance(v.get("input"), list)
+    has_config = "config" in v and isinstance(v.get("config"), dict)
+    has_output = "output" in v and isinstance(v.get("output"), dict)
+    has_call = "call" in v and isinstance(v.get("call"), dict)
+
+    # Only copy if we need to make changes
+    if (
+        has_sample
+        or has_score
+        or has_changes
+        or has_input
+        or has_config
+        or has_output
+        or has_call
+    ):
+        v = v.copy()
+
+    # Handle sample field (convert dict to Sample)
+    if has_sample:
+        from inspect_ai.dataset._dataset import Sample
+
+        v["sample"] = Sample.model_construct(**v["sample"])
+
+    # Handle score field (convert dict to Score)
+    if has_score:
+        from inspect_ai.scorer import Score
+
+        score_data = v["score"]
+        if "value" in score_data and "answer" in score_data:
+            v["score"] = Score.model_construct(**score_data)
+
+    # Handle changes field (convert dicts to JsonChange) - OPTIMIZED
+    if has_changes:
+        from inspect_ai._util.json import JsonChange
+
+        # Only process if there are dict items
+        changes_list = v["changes"]
+        if any(isinstance(change, dict) for change in changes_list):
+            changes = []
+            for change in changes_list:
+                if isinstance(change, dict):
+                    changes.append(JsonChange.model_construct(**change))
+                else:
+                    changes.append(change)
+            v["changes"] = changes
+
+    # Handle input field (convert dicts to ChatMessages) - OPTIMIZED
+    if has_input:
+        # Use optimized batch processing for chat messages
+        input_list = v["input"]
+        if any(isinstance(msg, dict) and "role" in msg for msg in input_list):
+            from inspect_ai.log._log import _batch_process_messages
+
+            # Clear all message IDs efficiently
+            for msg in input_list:
+                if isinstance(msg, dict):
+                    msg["id"] = None
+            v["input"] = _batch_process_messages(input_list)
+
+    # Handle config field (convert dict to GenerateConfig)
+    if has_config:
+        from inspect_ai.model._generate_config import GenerateConfig
+
+        v["config"] = GenerateConfig.model_construct(**v["config"])
+
+    # Handle output field (convert dict to ModelOutput)
+    if has_output:
+        from inspect_ai.model._model_output import ModelOutput
+
+        # Process nested ModelOutput fields first
+        output_data = _process_model_output_fields(v["output"], context)
+        v["output"] = ModelOutput.model_construct(**output_data)
+
+    # Handle call field (convert dict to ModelCall)
+    if has_call:
+        from inspect_ai.model._model_call import ModelCall
+
+        v["call"] = ModelCall.model_construct(**v["call"])
+
+    return v
+
+
+def _process_model_output_fields(
+    output_data: dict, context: dict | None = None
+) -> dict:
+    """Process nested fields within ModelOutput - OPTIMIZED"""
+    # Pre-check what needs processing
+    has_choices = "choices" in output_data and isinstance(output_data["choices"], list)
+    has_usage = "usage" in output_data and isinstance(output_data["usage"], dict)
+
+    # Only copy if needed
+    if has_choices or has_usage:
+        output_data = output_data.copy()
+
+    # Handle choices field (list of ChatCompletionChoice) - OPTIMIZED
+    if has_choices:
+        choices_list = output_data["choices"]
+        if any(isinstance(choice, dict) for choice in choices_list):
+            from inspect_ai.model._model_output import ChatCompletionChoice
+
+            choices = []
+            for choice in choices_list:
+                if isinstance(choice, dict):
+                    # Process ChatMessage in choice efficiently
+                    choice_data = choice.copy()
+                    if "message" in choice_data and isinstance(
+                        choice_data["message"], dict
+                    ):
+                        msg_data = choice_data["message"].copy()
+                        msg_data["id"] = None  # Clear ChatMessage ID
+                        # Convert to proper ChatMessage object
+                        from inspect_ai.log._log import _create_chat_message_optimized
+
+                        choice_data["message"] = _create_chat_message_optimized(
+                            msg_data
+                        )
+                    choices.append(ChatCompletionChoice.model_construct(**choice_data))
+                else:
+                    choices.append(choice)
+            output_data["choices"] = choices
+
+    # Handle usage field (ModelUsage)
+    if has_usage:
+        from inspect_ai.model._model_output import ModelUsage
+
+        output_data["usage"] = ModelUsage.model_construct(**output_data["usage"])
+
+    return output_data
+
+
 class BaseEvent(BaseModel):
     uuid: str | None = Field(default=None)
     """Unique identifer for event."""
@@ -70,13 +285,16 @@ class BaseEvent(BaseModel):
     """Is this event pending?"""
 
     def model_post_init(self, __context: Any) -> None:
-        # check if deserializing
+        # check if deserializing or fast constructing
         is_deserializing = isinstance(__context, dict) and __context.get(
             DESERIALIZING, False
         )
+        is_fast_construct = isinstance(__context, dict) and __context.get(
+            FAST_CONSTRUCT, False
+        )
 
-        # Generate id fields if not deserializing
-        if not is_deserializing:
+        # Generate id fields if not deserializing and not fast constructing
+        if not is_deserializing and not is_fast_construct:
             if self.uuid is None:
                 self.uuid = uuid()
             if self.span_id is None:

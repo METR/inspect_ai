@@ -123,9 +123,13 @@ class JSONRecorder(FileRecorder):
 
     @override
     @classmethod
-    async def read_log(cls, location: str, header_only: bool = False) -> EvalLog:
+    async def read_log(
+        cls,
+        location: str,
+        header_only: bool = False,
+        validate: bool = True,
+    ) -> EvalLog:
         fs = filesystem(location)
-
         if header_only:
             # Fast path: header only
             try:
@@ -153,7 +157,11 @@ class JSONRecorder(FileRecorder):
         with file(location, "r") as f:
             # parse w/ pydantic
             raw_data = from_json(f.read())
-            log = EvalLog.model_validate(raw_data, context=DESERIALIZING_CONTEXT)
+            if validate:
+                log = EvalLog.model_validate(raw_data, context=DESERIALIZING_CONTEXT)
+            else:
+                log = EvalLog.model_construct(**raw_data)
+
             log.location = location
 
             # fail for unknown version

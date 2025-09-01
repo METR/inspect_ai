@@ -17,6 +17,7 @@ from inspect_ai._util.json import to_json_safe
 from inspect_ai._util.trace import trace_action
 
 from .._log import (
+    FAST_CONSTRUCT,
     EvalLog,
     EvalPlan,
     EvalResults,
@@ -179,7 +180,9 @@ class EvalRecorder(FileRecorder):
 
     @classmethod
     @override
-    async def read_log(cls, location: str, header_only: bool = False) -> EvalLog:
+    async def read_log(
+        cls, location: str, header_only: bool = False, validate: bool = False
+    ) -> EvalLog:
         # if the log is not stored in the local filesystem then download it first,
         # and then read it from a temp file (eliminates the possiblity of hundreds
         # of small fetches from the zip file streams)
@@ -193,7 +196,7 @@ class EvalRecorder(FileRecorder):
         # read log (use temp_log if we have it)
         try:
             with file(temp_log or location, "rb") as z:
-                log = _read_log(z, location, header_only)
+                log = _read_log(z, location, header_only, validate)
 
                 if fs.is_s3():
                     file_info = fs.info(location)
@@ -212,6 +215,7 @@ class EvalRecorder(FileRecorder):
         id: str | int | None = None,
         epoch: int = 1,
         uuid: str | None = None,
+        validate: bool = False,
     ) -> EvalSample:
         with file(location, "rb") as z:
             with ZipFile(z, mode="r") as zip:
@@ -235,9 +239,17 @@ class EvalRecorder(FileRecorder):
                         epoch = sample.epoch
 
                     with zip.open(_sample_filename(id, epoch), "r") as f:
-                        return EvalSample.model_validate(
-                            json.load(f), context=DESERIALIZING_CONTEXT
-                        )
+                        sample_data = json.load(f)
+                        if validate:
+                            return EvalSample.model_validate(
+                                sample_data, context=DESERIALIZING_CONTEXT
+                            )
+                        else:
+                            # FAST PATH: Use existing fast construct but optimize UUID generation
+                            context = {FAST_CONSTRUCT: True, **DESERIALIZING_CONTEXT}
+                            return EvalSample.model_validate(
+                                sample_data, context=context
+                            )
                 except KeyError:
                     raise IndexError(
                         f"Sample id {id} for epoch {epoch} not found in log {location}"
@@ -485,7 +497,9 @@ class ZipLogFile:
         )
 
 
-def _read_log(log: BinaryIO, location: str, header_only: bool = False) -> EvalLog:
+def _read_log(
+    log: BinaryIO, location: str, header_only: bool = False, validate: bool = False
+) -> EvalLog:
     with ZipFile(log, mode="r") as zip:
         evalLog = _read_header(zip, location)
         if REDUCTIONS_JSON in zip.namelist():
@@ -505,11 +519,19 @@ def _read_log(log: BinaryIO, location: str, header_only: bool = False) -> EvalLo
             for name in zip.namelist():
                 if name.startswith(f"{SAMPLES_DIR}/") and name.endswith(".json"):
                     with zip.open(name, "r") as f:
-                        samples.append(
-                            EvalSample.model_validate(
-                                json.load(f), context=DESERIALIZING_CONTEXT
-                            ),
-                        )
+                        sample_data = json.load(f)
+                        if validate:
+                            samples.append(
+                                EvalSample.model_validate(
+                                    sample_data, context=DESERIALIZING_CONTEXT
+                                ),
+                            )
+                        else:
+                            # FAST PATH: Use existing fast construct but optimize UUID generation
+                            context = {FAST_CONSTRUCT: True, **DESERIALIZING_CONTEXT}
+                            samples.append(
+                                EvalSample.model_validate(sample_data, context=context),
+                            )
             sort_samples(samples)
             evalLog.samples = samples
         return evalLog

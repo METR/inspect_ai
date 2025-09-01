@@ -42,6 +42,7 @@ class FileRecorder(Recorder):
         id: str | int | None = None,
         epoch: int = 1,
         uuid: str | None = None,
+        validate: bool = False,
     ) -> EvalSample:
         # establish the log to read from (might be cached)
         eval_log = await cls._log_file_maybe_cached(location)

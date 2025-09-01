@@ -14,6 +14,8 @@ from ._reasoning import parse_content_with_reasoning
 
 logger = getLogger(__name__)
 
+FAST_CONSTRUCT = "fast_construct"
+
 
 class ChatMessageBase(BaseModel):
     """Base class for chat messages."""
@@ -45,13 +47,14 @@ class ChatMessageBase(BaseModel):
         return metadata_as(self.metadata, metadata_cls)
 
     def model_post_init(self, __context: Any) -> None:
-        # check if deserializing
+        # check if deserializing or fast constructing
         is_deserializing = isinstance(__context, dict) and __context.get(
             DESERIALIZING, False
         )
-
-        # Generate ID if needed and not deserializing
-        if self.id is None and not is_deserializing:
+        is_fast_construct = isinstance(__context, dict) and __context.get(
+            FAST_CONSTRUCT, False
+        )
+        if self.id is None and not is_deserializing and not is_fast_construct:
             self.id = uuid()
 
     @property
