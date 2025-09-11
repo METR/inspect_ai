@@ -13,7 +13,7 @@ npm install @meridianlabs/log-viewer
 The log viewer requires CSS styles to display correctly. Import the bundled styles:
 
 ```typescript
-import "@meridianlabs/log-viewer/lib/styles/index.css";
+import "@meridianlabs/log-viewer/styles/index.css";
 ```
 
 This includes all required dependencies (Bootstrap, Bootstrap Icons, Prism.js themes).
@@ -32,7 +32,7 @@ import {
 } from "@meridianlabs/log-viewer";
 import "@meridianlabs/log-viewer/lib/styles/index.css";
 
-function App() {
+export function App() {
     const [api, setApi] = useState<ClientAPI | null>(null);
 
     useEffect(() => {
@@ -48,8 +48,9 @@ function App() {
 
             // Create API instance
             const viewServerApi = createViewServerApi({
-                log_dir: logDir,
-                apiBaseUrl: "/api", // or your API base URL
+                // optional params
+                logDir: logDir,
+                apiBaseUrl: "https://mycompany.com/api",
             });
             const clientApiInstance = clientApi(viewServerApi);
 
@@ -83,8 +84,6 @@ function App() {
 
     return <InspectApp api={api} />;
 }
-
-export default App;
 ```
 
 ## Developing
@@ -96,17 +95,21 @@ The Inspect log viewer is built into a bundled JS file using `vite`. For users w
 Run these commands in the `src/inspect_ai/_view/www` directory:
 
 1. **Lint code:**
+
     ```bash
     yarn lint
     ```
+
     Fix any errors reported.
 
 2. **Format code:**
+
     ```bash
     yarn prettier:write
     ```
 
 3. **Build for library distribution:**
+
     ```bash
     yarn build:lib
     ```
