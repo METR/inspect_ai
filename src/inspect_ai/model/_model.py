@@ -65,6 +65,7 @@ from inspect_ai.util._limit import (
     record_model_usage,
 )
 
+from ..hooks._hooks import invalidate_model_cache
 from ._cache import CacheEntry, CachePolicy, cache_fetch, cache_store
 from ._call_tools import (
     disable_parallel_tools,
@@ -1024,7 +1025,8 @@ def get_model(
         )
         cached = cached_model(model_cache_key)
         if cached is not None:
-            return cached
+            if not invalidate_model_cache(cached):
+                return cached
 
     # split model into api name and model name if necessary
     api_name = None
