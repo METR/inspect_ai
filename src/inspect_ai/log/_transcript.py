@@ -1,4 +1,5 @@
 import contextlib
+import math
 from contextvars import ContextVar
 from datetime import datetime
 from logging import getLogger
@@ -7,10 +8,12 @@ from typing import (
     Callable,
     Iterator,
     Literal,
+    Self,
     Sequence,
     Type,
     TypeVar,
     Union,
+    cast,
     overload,
 )
 
@@ -19,7 +22,9 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    ModelWrapValidatorHandler,
     field_serializer,
+    model_validator,
 )
 from shortuuid import uuid
 
@@ -425,6 +430,26 @@ class ScoreEvent(BaseEvent):
 
     intermediate: bool = Field(default=False)
     """Was this an intermediate scoring?"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def convert_nan_intermediate_score(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        data = cast(dict[str, Any], data)
+        if "score" not in data:
+            return data
+
+        score = data["score"]
+        if isinstance(score, Score):
+            return data
+
+        score = cast(dict[str, Any], score)
+        for edit in score.get("history", [score]):
+            if edit["value"] is None:
+                edit["value"] = math.nan
+        return data
 
 
 class ScoreEditEvent(BaseEvent):
