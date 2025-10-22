@@ -323,10 +323,21 @@ def view_server(
     log_dir = fs.info(log_dir).name
 
     # setup server
+    class BaseUrlMappingPolicy(FileMappingPolicy):
+        def __init__(self, base_url:str) -> None:
+            self._base_url = base_url.strip("/")
+
+        async def map(self, request: Request, file: str) -> str:
+            return f"{self._base_url}/{file}"
+
+        async def unmap(self, request: Request, file: str) -> str:
+            return file.removeprefix(f"{self._base_url}/")
+
+    mapping_policy = BaseUrlMappingPolicy(log_dir)
     api = view_server_app(
-        mapping_policy=None,
-        access_policy=OnlyLogDirAccessPolicy(log_dir) if not authorization else None,
-        default_dir=log_dir,
+        mapping_policy=mapping_policy,
+        access_policy=OnlyLogDirAccessPolicy("") if not authorization else None,
+        default_dir="",
         recursive=recursive,
         fs_options=fs_options,
     )
