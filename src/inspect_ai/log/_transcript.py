@@ -103,7 +103,7 @@ class Transcript:
         if self._event_logger:
             self._event_logger(event)
 
-        # condense model event call immediately to prevent O(N) memory usage (call and output are the only changed fields)
+        # condense model event call immediately to prevent O(N) memory usage (call is the only changed fields
         if isinstance(event, ModelEvent):
             ev_condensed = cast(
                 ModelEvent,
