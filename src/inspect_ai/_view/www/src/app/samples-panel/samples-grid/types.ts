@@ -1,6 +1,6 @@
 import { Status } from "../../../@types/log";
+import { LogDetails } from "../../../client/api/types";
 
-// Flattened row data for the grid
 export interface SampleRow {
   logFile: string;
   task: string;
@@ -14,5 +14,13 @@ export interface SampleRow {
   limit?: string;
   retries?: number;
   completed?: boolean;
-  [key: string]: any; // For dynamic score columns
+  evalSetId?: string;
+  [key: string]: any;
+}
+
+export interface SamplesDataProvider {
+  getSamples: () => SampleRow[];
+  getLogDetails: () => Record<string, LogDetails>;
+  isLoading: () => boolean;
+  getTotalCount?: () => number;
 }

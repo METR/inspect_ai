@@ -9,6 +9,7 @@ import { useSamplesRouteParams } from "./url";
  */
 export const SamplesRouter: FC = () => {
   const { sampleId, epoch } = useSamplesRouteParams();
+  console.log("SamplesRouter params:", { sampleId, epoch });
 
   // If we have both sampleId and epoch, show the detail view
   if (sampleId && epoch) {

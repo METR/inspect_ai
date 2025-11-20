@@ -21,23 +21,22 @@ import { useSamplesGridNavigation } from "../../routing/sampleNavigation";
 import { DisplayedSample } from "../../types";
 import { useSampleColumns } from "./hooks";
 import styles from "./SamplesGrid.module.css";
-import { SampleRow } from "./types";
+import { SampleRow, SamplesDataProvider } from "./types";
 
-// Register AG Grid modules
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-// Sample Grid Props
 interface SamplesGridProps {
   samplesPath?: string;
   gridRef?: RefObject<AgGridReact | null>;
+  dataProvider?: SamplesDataProvider;
 }
 
-// Sample Grid
 export const SamplesGrid: FC<SamplesGridProps> = ({
   samplesPath,
   gridRef: externalGridRef,
+  dataProvider,
 }) => {
-  const logDetails = useStore((state) => state.logs.logDetails);
+  const storeLogDetails = useStore((state) => state.logs.logDetails);
   const gridState = useStore((state) => state.logs.samplesListState.gridState);
   const setGridState = useStore((state) => state.logsActions.setGridState);
   const { navigateToSampleDetail } = useSamplesGridNavigation();
@@ -89,34 +88,37 @@ export const SamplesGrid: FC<SamplesGridProps> = ({
     }
   }, [gridState, prevSamplesPath, clearDisplayedSamples]);
 
-  // Filter logDetails based on samplesPath
   const filteredLogDetails = useMemo(() => {
+    if (dataProvider) {
+      return dataProvider.getLogDetails();
+    }
+
     if (!samplesPath) {
-      return logDetails; // Show all samples when no path is specified
+      return storeLogDetails;
     }
 
     const samplesPathAbs = join(samplesPath, logDir);
-
-    return Object.entries(logDetails).reduce(
+    return Object.entries(storeLogDetails).reduce(
       (acc, [logFile, details]) => {
-        // Check if the logFile starts with the samplesPath
         if (logFile.startsWith(samplesPathAbs)) {
           acc[logFile] = details;
         }
         return acc;
       },
-      {} as typeof logDetails,
+      {} as typeof storeLogDetails,
     );
-  }, [logDetails, samplesPath]);
+  }, [dataProvider, storeLogDetails, samplesPath, logDir]);
 
   useEffect(() => {
     gridContainerRef.current?.focus();
   }, []);
 
-  // Transform logDetails into flat rows
   const data = useMemo(() => {
-    const rows: SampleRow[] = [];
+    if (dataProvider) {
+      return dataProvider.getSamples();
+    }
 
+    const rows: SampleRow[] = [];
     Object.entries(filteredLogDetails).forEach(([logFile, details]) => {
       details.sampleSummaries.forEach((sample) => {
         const row: SampleRow = {
@@ -136,7 +138,6 @@ export const SamplesGrid: FC<SamplesGridProps> = ({
           completed: sample.completed || false,
         };
 
-        // Add scores as individual fields
         if (sample.scores) {
           Object.entries(sample.scores).forEach(([scoreName, score]) => {
             row[`score_${scoreName}`] = score.value;
@@ -148,7 +149,7 @@ export const SamplesGrid: FC<SamplesGridProps> = ({
     });
 
     return rows;
-  }, [filteredLogDetails]);
+  }, [dataProvider, filteredLogDetails]);
 
   // Compute the columns
   const columns = useSampleColumns(data, filteredLogDetails);
@@ -438,7 +439,10 @@ export const SamplesGrid: FC<SamplesGridProps> = ({
             selectCurrentSample();
             clearSelectedSample();
           }}
-          loading={data.length === 0 && (loading > 0 || syncing > 0)}
+          loading={
+            data.length === 0 &&
+            (dataProvider ? dataProvider.isLoading() : loading > 0 || syncing > 0)
+          }
         />
       </div>
     </div>
