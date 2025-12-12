@@ -21,7 +21,7 @@ import { basename, dirname } from "../utils/path.ts";
 import { isUri } from "../utils/uri.ts";
 import { AppRouter } from "./routing/AppRouter.tsx";
 
-interface AppProps {
+export interface AppProps {
   api: ClientAPI;
 }
 
