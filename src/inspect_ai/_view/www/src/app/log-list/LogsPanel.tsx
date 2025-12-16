@@ -326,13 +326,6 @@ export const collapseLogItems = (
     return logItems;
   }
 
-  const running = logItems.some(
-    (l) => l.type === "file" && l.logPreview?.status === "started",
-  );
-  if (!running) {
-    return logItems;
-  }
-
   // Group file items by task_id
   const taskIdToItems = new Map<string, FileLogItem[]>();
   const itemsWithoutTaskId: Array<FolderLogItem | FileLogItem> = [];
