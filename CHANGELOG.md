@@ -1,5 +1,15 @@
 ## Unreleased
 
+- Agent Bridge: Consolidate bridged tools implementation into the existing sandbox model proxy service (eliminate Python requirement for using bridged tools).
+- VLLM and SGLang: Don't require API key environment variable to be set when running in local mode.
+- HF Tasks: Require >1.0.0 of huggingface_hub package.
+- Eval Set: Include task version and limits in task identifier hash to prevent incorrect log reuse.
+- Inspect View: Don't attempt to display events when the events are too large for the browser to deserialize (e.g. 350MB+ of events).
+- Inspect View: Improve rendering of tool output with ANSI codes. Support viewing raw/unrendered ANSI output.
+- Bugfix: Prevent component not found error during Human Agent transition.
+
+## 0.3.159 (03 January 2026)
+
 - [Compaction](https://inspect.aisi.org.uk/compaction.html.md): Compacting message histories for long-running agents that exceed the context window.
 - Model API: `count_tokens()` method for estimating token usage for messages.
 - Model API: `ModelInfo` for retrieving information about models (e.g. organization, context window, reasoning, release date, etc.)
@@ -12,6 +22,7 @@
 - Eval Logs: Support reading from `IO[bytes]` via `read_eval_log()`.
 - Inspect View: Properly display dict scores in sample list.
 - Inspect View: Improve display of Codex `shell_command` tool calls.
+- Inspect View: Improve the display of very wide metrics results in the results dialog.
 
 ## 0.3.158 (24 December 2025)
 
