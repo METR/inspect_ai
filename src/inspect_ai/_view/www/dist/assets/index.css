@@ -15573,49 +15573,55 @@ so disabling selection can break that functionality */
 
 /* Bootstrap Dark Mode Support ([data-bs-theme="dark"]) */
 
-/* Nav pills styling for dark mode */
-[data-bs-theme="dark"] button {
-  --bs-nav-pills-link-active-bg: #374151;
-  --bs-nav-pills-link-active-color: white;
-  --bs-nav-link-color: #9ca3af;
+[data-bs-theme="dark"] {
+  --inspect-bg-code: #1e293b;
+  --inspect-bg-secondary: #374151;
+  --inspect-bg-tertiary: #1f2937;
+  --inspect-border-color: #4b5563;
+  --inspect-text-primary: #e2e8f0;
+  --inspect-text-secondary: #e5e7eb;
+  --inspect-text-muted: #9ca3af;
+  --inspect-diff-add-color: #1a4d2e;
+  --inspect-diff-remove-color: #4d1a1a;
 }
 
+/* Nav pills styling for dark mode */
 [data-bs-theme="dark"] .nav-pills {
-  --bs-nav-pills-link-active-bg: #374151;
+  --bs-nav-pills-link-active-bg: var(--inspect-bg-secondary);
   --bs-nav-pills-link-active-color: white;
   background-color: transparent;
 }
 
 [data-bs-theme="dark"] .nav-link {
-  --bs-nav-link-color: #9ca3af;
+  --bs-nav-link-color: var(--inspect-text-muted);
 }
 
 [data-bs-theme="dark"] .nav-link.active {
   color: white !important;
-  background-color: #374151 !important;
+  background-color: var(--inspect-bg-secondary) !important;
 }
 
 /* Tab styling for dark mode */
 [data-bs-theme="dark"] .nav-tabs .nav-link {
-  color: #9ca3af;
+  color: var(--inspect-text-muted);
 }
 
 [data-bs-theme="dark"] .nav-tabs .nav-link.active {
   color: white;
-  background-color: #374151;
-  border-color: #4b5563;
+  background-color: var(--inspect-bg-secondary);
+  border-color: var(--inspect-border-color);
 }
 
 [data-bs-theme="dark"] .nav-tabs .nav-link:hover:not(.active) {
-  color: #e5e7eb;
+  color: var(--inspect-text-secondary);
   border-color: transparent;
 }
 
 /* Prism code styling for dark mode - remove text-shadow that causes doubling effect */
 [data-bs-theme="dark"] code[class*="language-"],
 [data-bs-theme="dark"] pre[class*="language-"] {
-  color: #e2e8f0;
-  background: #1e293b;
+  color: var(--inspect-text-primary);
+  background: var(--inspect-bg-code);
   text-shadow: none;
   font-family: Consolas, Monaco, "Andale Mono", "Ubuntu Mono", monospace;
   font-size: 1em;
@@ -15632,18 +15638,6 @@ so disabling selection can break that functionality */
   -moz-hyphens: none;
   -ms-hyphens: none;
   hyphens: none;
-}
-
-@media print {
-  [data-bs-theme="dark"] code[class*="language-"],
-  [data-bs-theme="dark"] pre[class*="language-"] {
-    text-shadow: none;
-  }
-}
-
-[data-bs-theme="dark"] :not(pre) > code[class*="language-"],
-[data-bs-theme="dark"] pre[class*="language-"] {
-  background: #1e293b;
 }
 
 [data-bs-theme="dark"] pre[class*="language-"] {
@@ -15741,7 +15735,7 @@ so disabling selection can break that functionality */
 [data-bs-theme="dark"] .markdown-content pre[class*="language-"],
 [data-bs-theme="dark"] pre[class*="language-"].tool-output,
 [data-bs-theme="dark"] .tool-output {
-  background-color: #1e293b;
+  background-color: var(--inspect-bg-code);
 }
 
 [data-bs-theme="dark"] .model-call pre[class*="language-"],
@@ -15752,15 +15746,9 @@ so disabling selection can break that functionality */
   border-radius: var(--bs-border-radius) !important;
 }
 
-/* Dark mode diff colors */
-[data-bs-theme="dark"] {
-  --inspect-diff-add-color: #1a4d2e;
-  --inspect-diff-remove-color: #4d1a1a;
-}
-
 /* Dark mode jsondiffpatch */
 [data-bs-theme="dark"] .jsondiffpatch-delta {
-  background: #1f2937;
+  background: var(--inspect-bg-tertiary);
 }
 
 [data-bs-theme="dark"] .jsondiffpatch-added,
