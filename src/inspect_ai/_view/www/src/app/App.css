@@ -1278,3 +1278,208 @@ so disabling selection can break that functionality */
   -moz-user-select: none;
   -ms-user-select: none;
 }
+
+/* Bootstrap Dark Mode Support ([data-bs-theme="dark"]) */
+
+/* Nav pills styling for dark mode */
+[data-bs-theme="dark"] button {
+  --bs-nav-pills-link-active-bg: #374151;
+  --bs-nav-pills-link-active-color: white;
+  --bs-nav-link-color: #9ca3af;
+}
+
+[data-bs-theme="dark"] .nav-pills {
+  --bs-nav-pills-link-active-bg: #374151;
+  --bs-nav-pills-link-active-color: white;
+  background-color: transparent;
+}
+
+[data-bs-theme="dark"] .nav-link {
+  --bs-nav-link-color: #9ca3af;
+}
+
+[data-bs-theme="dark"] .nav-link.active {
+  color: white !important;
+  background-color: #374151 !important;
+}
+
+/* Tab styling for dark mode */
+[data-bs-theme="dark"] .nav-tabs .nav-link {
+  color: #9ca3af;
+}
+
+[data-bs-theme="dark"] .nav-tabs .nav-link.active {
+  color: white;
+  background-color: #374151;
+  border-color: #4b5563;
+}
+
+[data-bs-theme="dark"] .nav-tabs .nav-link:hover:not(.active) {
+  color: #e5e7eb;
+  border-color: transparent;
+}
+
+/* Prism code styling for dark mode - remove text-shadow that causes doubling effect */
+[data-bs-theme="dark"] code[class*="language-"],
+[data-bs-theme="dark"] pre[class*="language-"] {
+  color: #e2e8f0;
+  background: #1e293b;
+  text-shadow: none;
+  font-family: Consolas, Monaco, "Andale Mono", "Ubuntu Mono", monospace;
+  font-size: 1em;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  word-wrap: normal;
+  line-height: 1.5;
+  -moz-tab-size: 4;
+  -o-tab-size: 4;
+  tab-size: 4;
+  -webkit-hyphens: none;
+  -moz-hyphens: none;
+  -ms-hyphens: none;
+  hyphens: none;
+}
+
+@media print {
+  [data-bs-theme="dark"] code[class*="language-"],
+  [data-bs-theme="dark"] pre[class*="language-"] {
+    text-shadow: none;
+  }
+}
+
+[data-bs-theme="dark"] :not(pre) > code[class*="language-"],
+[data-bs-theme="dark"] pre[class*="language-"] {
+  background: #1e293b;
+}
+
+[data-bs-theme="dark"] pre[class*="language-"] {
+  padding: 1em;
+  margin: 0.5em 0;
+  overflow: auto;
+  border-radius: 0.5em;
+  box-shadow: none;
+}
+
+[data-bs-theme="dark"] :not(pre) > code[class*="language-"] {
+  padding: 0.15em 0.2em 0.05em;
+  border-radius: 0.3em;
+  box-shadow: none;
+  white-space: normal;
+}
+
+/* Prism token colors for dark mode */
+[data-bs-theme="dark"] .token.cdata,
+[data-bs-theme="dark"] .token.comment,
+[data-bs-theme="dark"] .token.doctype,
+[data-bs-theme="dark"] .token.prolog {
+  color: #7f8c8d;
+}
+
+[data-bs-theme="dark"] .token.punctuation {
+  color: #abb2bf;
+}
+
+[data-bs-theme="dark"] .token.namespace {
+  opacity: 0.7;
+}
+
+[data-bs-theme="dark"] .token.boolean,
+[data-bs-theme="dark"] .token.constant,
+[data-bs-theme="dark"] .token.number,
+[data-bs-theme="dark"] .token.property,
+[data-bs-theme="dark"] .token.symbol,
+[data-bs-theme="dark"] .token.tag {
+  color: #d19a66;
+}
+
+[data-bs-theme="dark"] .token.attr-name,
+[data-bs-theme="dark"] .token.builtin,
+[data-bs-theme="dark"] .token.char,
+[data-bs-theme="dark"] .token.inserted,
+[data-bs-theme="dark"] .token.selector,
+[data-bs-theme="dark"] .token.string {
+  color: #98c379;
+}
+
+[data-bs-theme="dark"] .language-css .token.string,
+[data-bs-theme="dark"] .style .token.string,
+[data-bs-theme="dark"] .token.entity,
+[data-bs-theme="dark"] .token.operator,
+[data-bs-theme="dark"] .token.url,
+[data-bs-theme="dark"] .token.variable {
+  color: #56b6c2;
+}
+
+[data-bs-theme="dark"] .token.atrule,
+[data-bs-theme="dark"] .token.attr-value,
+[data-bs-theme="dark"] .token.keyword {
+  color: #c678dd;
+}
+
+[data-bs-theme="dark"] .token.function,
+[data-bs-theme="dark"] .token.class-name {
+  color: #61afef;
+}
+
+[data-bs-theme="dark"] .token.important,
+[data-bs-theme="dark"] .token.regex {
+  color: #e5c07b;
+}
+
+[data-bs-theme="dark"] .token.bold,
+[data-bs-theme="dark"] .token.important {
+  font-weight: 700;
+}
+
+[data-bs-theme="dark"] .token.italic {
+  font-style: italic;
+}
+
+[data-bs-theme="dark"] .token.entity {
+  cursor: help;
+}
+
+[data-bs-theme="dark"] .token.deleted {
+  color: #e06c75;
+}
+
+/* Dark mode tool output and markdown code blocks */
+[data-bs-theme="dark"] .markdown-content pre[class*="language-"],
+[data-bs-theme="dark"] pre[class*="language-"].tool-output,
+[data-bs-theme="dark"] .tool-output {
+  background-color: #1e293b;
+}
+
+[data-bs-theme="dark"] .model-call pre[class*="language-"],
+[data-bs-theme="dark"] .markdown-content pre[class*="language-"],
+[data-bs-theme="dark"] pre[class*="language-"].tool-output {
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: var(--bs-border-radius) !important;
+}
+
+/* Dark mode diff colors */
+[data-bs-theme="dark"] {
+  --inspect-diff-add-color: #1a4d2e;
+  --inspect-diff-remove-color: #4d1a1a;
+}
+
+/* Dark mode jsondiffpatch */
+[data-bs-theme="dark"] .jsondiffpatch-delta {
+  background: #1f2937;
+}
+
+[data-bs-theme="dark"] .jsondiffpatch-added,
+[data-bs-theme="dark"] .jsondiffpatch-modified .jsondiffpatch-right-value pre,
+[data-bs-theme="dark"] .jsondiffpatch-textdiff-added {
+  background: var(--inspect-diff-add-color);
+}
+
+[data-bs-theme="dark"] .jsondiffpatch-deleted .jsondiffpatch-property-name,
+[data-bs-theme="dark"] .jsondiffpatch-deleted pre,
+[data-bs-theme="dark"] .jsondiffpatch-modified .jsondiffpatch-left-value pre,
+[data-bs-theme="dark"] .jsondiffpatch-textdiff-deleted {
+  background: var(--inspect-diff-remove-color);
+}
