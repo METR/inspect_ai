@@ -40,6 +40,11 @@ def answer(pattern: Literal["letter", "word", "line"]) -> Scorer:
     the model prefaced with "ANSWER:". This scorer extracts
     answers of this form for comparison with the target.
 
+    When searching for answers, only the last non-blank line of
+    the model completion is considered. This mirrors default
+    prompts that request placing the answer on a dedicated line
+    at the end of the response.
+
     Note that you must specify a `type` for the answer scorer.
 
     Args:
