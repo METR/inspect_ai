@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer
 
 from inspect_ai._util.dateutil import UtcDatetime, datetime_to_iso_format_safe
 from inspect_ai.model._chat_message import ChatMessage
@@ -12,6 +12,22 @@ from inspect_ai.tool._tool_choice import ToolChoice
 from inspect_ai.tool._tool_info import ToolInfo
 
 from ._base import BaseEvent
+
+
+class APIError(BaseModel):
+    """Error from a model API request."""
+
+    error_type: str
+    """Exception class name (e.g., 'RateLimitError', 'APIStatusError')."""
+
+    message: str
+    """The error message."""
+
+    status_code: int | None = Field(default=None)
+    """HTTP status code if available."""
+
+    details: dict[str, Any] | None = Field(default=None)
+    """Additional error details (response body, headers, etc.)."""
 
 
 class ModelEvent(BaseEvent):
@@ -43,6 +59,9 @@ class ModelEvent(BaseEvent):
 
     retries: int | None = Field(default=None)
     """Retries for the model API request."""
+
+    api_error: APIError | None = Field(default=None)
+    """Error that caused the last retry (rate limit, server error, etc.)."""
 
     error: str | None = Field(default=None)
     """Error which occurred during model call."""

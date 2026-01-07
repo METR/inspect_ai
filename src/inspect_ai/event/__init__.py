@@ -4,7 +4,7 @@ from ._event import Event
 from ._info import InfoEvent
 from ._input import InputEvent
 from ._logger import LoggerEvent, LoggingLevel, LoggingMessage
-from ._model import ModelEvent
+from ._model import APIError, ModelEvent
 from ._sample_init import SampleInitEvent
 from ._sample_limit import SampleLimitEvent
 from ._sandbox import SandboxEvent
@@ -20,6 +20,7 @@ from ._tree import EventNode, EventTree, SpanNode, event_sequence, event_tree
 
 __all__ = [
     "Event",
+    "APIError",
     "ApprovalEvent",
     "ErrorEvent",
     "InfoEvent",

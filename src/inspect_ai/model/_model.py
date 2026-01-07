@@ -1676,6 +1676,51 @@ def log_model_retry(model_name: str, retry_state: RetryCallState) -> None:
         f"-> {model_name} retry {retry_state.attempt_number} (retrying in {retry_state.upcoming_sleep:,.0f} seconds)",
     )
 
+    # Update the active ModelEvent with error details
+    ex = retry_state.outcome.exception() if retry_state.outcome else None
+    if ex is not None:
+        from inspect_ai.event._model import APIError
+        from inspect_ai.log._samples import _active_model_event
+
+        model_event = _active_model_event.get()
+        if model_event is not None:
+            model_event.api_error = APIError(
+                error_type=type(ex).__name__,
+                message=str(ex),
+                status_code=_extract_status_code(ex),
+                details=_extract_error_details(ex),
+            )
+
+
+def _extract_status_code(ex: BaseException) -> int | None:
+    """Extract HTTP status code from various exception types."""
+    if hasattr(ex, "status_code"):  # OpenAI/Groq APIStatusError
+        return cast(int, ex.status_code)
+    if hasattr(ex, "status"):  # Anthropic
+        return cast(int, ex.status)
+    if hasattr(ex, "response") and ex.response is not None:
+        return cast(int | None, getattr(ex.response, "status_code", None))
+    return None
+
+
+def _extract_error_details(ex: BaseException) -> dict[str, Any] | None:
+    """Extract additional details from exceptions."""
+    details: dict[str, Any] = {}
+
+    # Exception body (OpenAI, etc.)
+    if hasattr(ex, "body") and ex.body:
+        details["body"] = ex.body
+
+    # Rate limit headers
+    if hasattr(ex, "response") and ex.response is not None:
+        headers = getattr(ex.response, "headers", None)
+        if headers:
+            for key in ["retry-after", "x-ratelimit-reset", "x-ratelimit-remaining"]:
+                if key in headers:
+                    details[key] = headers[key]
+
+    return details if details else None
+
 
 def init_active_model(model: Model, config: GenerateConfig) -> None:
     active_model_context_var.set(model)
