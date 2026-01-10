@@ -64,11 +64,13 @@ export class EventNode<T extends EventType = EventType> {
   event: T;
   children: EventNode<EventType>[] = [];
   depth: number;
+  solverName?: string;
 
-  constructor(id: string, event: T, depth: number) {
+  constructor(id: string, event: T, depth: number, solverName?: string) {
     this.id = id;
     this.event = event;
     this.depth = depth;
+    this.solverName = solverName;
   }
 }
 

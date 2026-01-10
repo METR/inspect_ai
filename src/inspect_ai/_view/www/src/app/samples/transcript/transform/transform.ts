@@ -12,9 +12,16 @@ import {
   TYPE_TOOL,
 } from "./utils";
 
-export const transformTree = (roots: EventNode[]): EventNode[] => {
+export interface TransformOptions {
+  flatView?: boolean;
+}
+
+export const transformTree = (
+  roots: EventNode[],
+  options: TransformOptions = {},
+): EventNode[] => {
   // Gather the transformers that we'll use
-  const treeNodeTransformers: TreeNodeTransformer[] = transformers();
+  const treeNodeTransformers: TreeNodeTransformer[] = transformers(options);
 
   const visitNode = (node: EventNode): EventNode | EventNode[] => {
     // Start with the original node
@@ -70,7 +77,7 @@ export const transformTree = (roots: EventNode[]): EventNode[] => {
   return [...processedRoots, ...flushedNodes];
 };
 
-const transformers = () => {
+const transformers = (options: TransformOptions = {}) => {
   const treeNodeTransformers: TreeNodeTransformer[] = [
     {
       name: "unwrap_tools",
@@ -147,6 +154,17 @@ const transformers = () => {
       },
     },
   ];
+
+  // When flatView is enabled, discard individual solver spans to show events chronologically
+  if (options.flatView) {
+    treeNodeTransformers.push({
+      name: "flatten_solver_spans",
+      matches: (node) =>
+        node.event.event === SPAN_BEGIN && node.event.type === TYPE_SOLVER,
+      process: (node) => discardNodeWithSolverName(node),
+    });
+  }
+
   return treeNodeTransformers;
 };
 
@@ -204,6 +222,33 @@ const skipThisNode = (node: EventNode): EventNode => {
 const discardNode = (node: EventNode): EventNode[] => {
   const nodes = reduceDepth(node.children, 1);
   return nodes;
+};
+
+// Discard a solver span but propagate the solver name to all children
+const discardNodeWithSolverName = (node: EventNode): EventNode[] => {
+  const solverName =
+    node.event.event === SPAN_BEGIN ? node.event.name : undefined;
+  const nodes = reduceDepthWithSolverName(node.children, 1, solverName);
+  return nodes;
+};
+
+// Reduce depth and set solver name on nodes that don't already have one
+const reduceDepthWithSolverName = (
+  nodes: EventNode[],
+  depth: number = 1,
+  solverName?: string,
+): EventNode[] => {
+  return nodes.map((node) => {
+    if (node.children.length > 0) {
+      node.children = reduceDepthWithSolverName(node.children, 1, solverName);
+    }
+    node.depth = node.depth - depth;
+    // Only set solverName if not already set (preserve nested solver names)
+    if (solverName && !node.solverName) {
+      node.solverName = solverName;
+    }
+    return node;
+  });
 };
 
 // Reduce the depth of the children by 1

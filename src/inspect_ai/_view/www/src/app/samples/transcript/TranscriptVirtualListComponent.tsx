@@ -43,6 +43,7 @@ export const TranscriptVirtualListComponent: FC<
   className,
 }) => {
   const useVirtualization = running || eventNodes.length > 100;
+  const flatView = useStore((state) => state.sample.flatView);
   const setNativeFind = useStore((state) => state.appActions.setNativeFind);
   useEffect(() => {
     setNativeFind(!useVirtualization);
@@ -132,6 +133,9 @@ export const TranscriptVirtualListComponent: FC<
             paddingRight: `${item.depth === 0 ? undefined : ".7em"} `,
           }}
         >
+          {flatView && item.solverName && (
+            <div className={styles.solverName}>{item.solverName}</div>
+          )}
           <RenderedEventNode
             node={item}
             next={next}
@@ -146,6 +150,7 @@ export const TranscriptVirtualListComponent: FC<
       hasToolEventsAtCurrentDepth,
       contextWithToolEvents,
       contextWithoutToolEvents,
+      flatView,
     ],
   );
 
