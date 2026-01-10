@@ -47,6 +47,7 @@ export const TranscriptPanel: FC<TranscriptPanelProps> = memo((props) => {
   );
 
   const sampleStatus = useStore((state) => state.sample.sampleStatus);
+  const flatView = useStore((state) => state.sample.flatView);
 
   // Apply the filter
   const filteredEvents = useMemo(() => {
@@ -62,6 +63,7 @@ export const TranscriptPanel: FC<TranscriptPanelProps> = memo((props) => {
   const { eventNodes, defaultCollapsedIds } = useEventNodes(
     filteredEvents,
     running === true,
+    flatView,
   );
 
   // The list of events that have been collapsed
