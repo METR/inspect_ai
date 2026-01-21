@@ -19,6 +19,7 @@ from starlette.status import (
     HTTP_304_NOT_MODIFIED,
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
+    HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
 )
 from typing_extensions import override
 
@@ -146,6 +147,13 @@ def view_server_app(
 
         # Get actual file size to ensure Content-Length is accurate
         file_size = await get_log_size(mapped_file)
+
+        # Return 416 Range Not Satisfiable if start is beyond file size
+        if start >= file_size:
+            raise HTTPException(
+                status_code=HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
 
         # Clamp end to actual file size to prevent Content-Length mismatch
         actual_end = min(end, file_size - 1)

@@ -219,6 +219,33 @@ def test_api_log_bytes_beyond_file_size(
     )
 
 
+def test_api_log_bytes_start_beyond_file_size(
+    test_client: TestClient, mock_s3_eval_file: str
+):
+    """Test that requesting bytes starting beyond file size returns 416.
+
+    When start >= file_size, the server should return HTTP 416 Range Not Satisfiable
+    rather than producing an invalid response with negative Content-Length.
+    """
+    # First, get the actual file size
+    size_response = test_client.request("GET", f"/log-size/{mock_s3_eval_file}")
+    size_response.raise_for_status()
+    file_size = int(size_response.text)
+
+    # Request bytes starting beyond the file size
+    start_beyond = file_size + 100
+    end_beyond = file_size + 200
+    response = test_client.request(
+        "GET", f"/log-bytes/{mock_s3_eval_file}?start={start_beyond}&end={end_beyond}"
+    )
+
+    # Should return 416 Range Not Satisfiable
+    assert response.status_code == 416, (
+        f"Expected 416 Range Not Satisfiable when start ({start_beyond}) >= file_size ({file_size}), "
+        f"got {response.status_code}"
+    )
+
+
 def test_api_log_dir(test_client: TestClient):
     response = test_client.request("GET", "/log-dir?log_dir=eval_set_dir")
     response.raise_for_status()
