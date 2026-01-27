@@ -344,12 +344,46 @@ export function viewServerApi(
     const baseUrl = apiBaseUrl || __VIEW_SERVER_API_URL__;
     const url = `${baseUrl}/log-download/${encodeURIComponent(log_file)}`;
 
+    const headers: Record<string, string> = {};
+    if (headerProvider) {
+      Object.assign(headers, await headerProvider());
+    }
+
+    const isCrossOrigin = (() => {
+      try {
+        return Boolean(
+          baseUrl && new URL(baseUrl).origin !== window.location.origin,
+        );
+      } catch {
+        return false;
+      }
+    })();
+
+    const response = await fetch(url, {
+      headers,
+      credentials: isCrossOrigin ? "include" : "same-origin",
+    });
+
+    if (!response.ok) {
+      const message = (await response.text()) || response.statusText;
+      throw new Error(`Download failed: ${response.status} ${message}`);
+    }
+
+    const blob = await response.blob();
+    const blobUrl = URL.createObjectURL(blob);
+
     const link = document.createElement("a");
-    link.href = url;
-    link.download = "";
+    link.href = blobUrl;
+    // Extract filename from Content-Disposition header or derive from log_file
+    const disposition = response.headers.get("Content-Disposition");
+    const filenameMatch = disposition?.match(/filename="?([^"]+)"?/);
+    link.download =
+      filenameMatch?.[1] || log_file.split("/").pop() || "download.eval";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+
+    URL.revokeObjectURL(blobUrl);
   };
 
   return {
