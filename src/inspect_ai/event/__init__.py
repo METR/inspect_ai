@@ -4,6 +4,7 @@ from ._event import Event
 from ._info import InfoEvent
 from ._input import InputEvent
 from ._logger import LoggerEvent, LoggingLevel, LoggingMessage
+from ._media import MediaContent, MediaEvent
 from ._model import ModelEvent
 from ._sample_init import SampleInitEvent
 from ._sample_limit import SampleLimitEvent
@@ -25,6 +26,8 @@ __all__ = [
     "InfoEvent",
     "InputEvent",
     "LoggerEvent",
+    "MediaContent",
+    "MediaEvent",
     "ModelEvent",
     "SampleInitEvent",
     "SampleLimitEvent",

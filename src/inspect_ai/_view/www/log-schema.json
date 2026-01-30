@@ -2624,6 +2624,9 @@
               },
               {
                 "$ref": "#/$defs/SubtaskEvent"
+              },
+              {
+                "$ref": "#/$defs/MediaEvent"
               }
             ]
           },
@@ -4622,6 +4625,128 @@
         "content"
       ],
       "title": "Logprobs",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "MediaEvent": {
+      "description": "Event with media content (image, audio, or video).",
+      "properties": {
+        "uuid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uuid"
+        },
+        "span_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Span Id"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "working_start": {
+          "title": "Working Start",
+          "type": "number"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metadata"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending"
+        },
+        "event": {
+          "const": "media",
+          "default": "media",
+          "title": "Event",
+          "type": "string"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentImage"
+            },
+            {
+              "$ref": "#/$defs/ContentAudio"
+            },
+            {
+              "$ref": "#/$defs/ContentVideo"
+            }
+          ],
+          "title": "Content"
+        },
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        }
+      },
+      "required": [
+        "uuid",
+        "span_id",
+        "timestamp",
+        "working_start",
+        "metadata",
+        "pending",
+        "event",
+        "content",
+        "caption",
+        "source"
+      ],
+      "title": "MediaEvent",
       "type": "object",
       "additionalProperties": false
     },

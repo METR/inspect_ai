@@ -4,6 +4,7 @@ from logging import getLogger
 from typing import (
     Callable,
     Iterator,
+    Literal,
     Sequence,
     TypeVar,
     overload,
@@ -13,10 +14,12 @@ from pydantic import (
     JsonValue,
 )
 
+from inspect_ai._util.content import ContentAudio, ContentImage, ContentVideo
 from inspect_ai._util.logger import warn_once
 from inspect_ai.event._base import BaseEvent
 from inspect_ai.event._event import Event
 from inspect_ai.event._info import InfoEvent
+from inspect_ai.event._media import MediaContent, MediaEvent
 from inspect_ai.event._model import ModelEvent
 from inspect_ai.event._store import StoreEvent
 from inspect_ai.log._condense import (
@@ -58,6 +61,92 @@ class Transcript:
            source: Optional event source.
         """
         self._event(InfoEvent(source=source, data=data))
+
+    def media(
+        self,
+        content: MediaContent,
+        *,
+        caption: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Add a `MediaEvent` to the transcript.
+
+        Args:
+           content: Media content (ContentImage, ContentAudio, or ContentVideo).
+           caption: Optional caption for the media.
+           source: Optional event source.
+        """
+        self._event(MediaEvent(content=content, caption=caption, source=source))
+
+    def image(
+        self,
+        image: str,
+        *,
+        caption: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Add an image `MediaEvent` to the transcript.
+
+        Args:
+           image: URL of the image or base64 encoded image data.
+           caption: Optional caption for the image.
+           source: Optional event source.
+        """
+        self._event(
+            MediaEvent(
+                content=ContentImage(image=image),
+                caption=caption,
+                source=source,
+            )
+        )
+
+    def video(
+        self,
+        video: str,
+        format: Literal["mp4", "mpeg", "mov"],
+        *,
+        caption: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Add a video `MediaEvent` to the transcript.
+
+        Args:
+           video: Video file path or base64 encoded data URL.
+           format: Format of video data ('mp4', 'mpeg', or 'mov').
+           caption: Optional caption for the video.
+           source: Optional event source.
+        """
+        self._event(
+            MediaEvent(
+                content=ContentVideo(video=video, format=format),
+                caption=caption,
+                source=source,
+            )
+        )
+
+    def audio(
+        self,
+        audio: str,
+        format: Literal["wav", "mp3"],
+        *,
+        caption: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Add an audio `MediaEvent` to the transcript.
+
+        Args:
+           audio: Audio file path or base64 encoded data URL.
+           format: Format of audio data ('mp3' or 'wav').
+           caption: Optional caption for the audio.
+           source: Optional event source.
+        """
+        self._event(
+            MediaEvent(
+                content=ContentAudio(audio=audio, format=format),
+                caption=caption,
+                source=source,
+            )
+        )
 
     @contextlib.contextmanager
     def step(self, name: str, type: str | None = None) -> Iterator[None]:

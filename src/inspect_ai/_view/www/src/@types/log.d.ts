@@ -750,6 +750,18 @@ export type Type22 = string | null;
 export type Events2 = unknown[];
 export type Completed3 = string | null;
 export type WorkingTime2 = number | null;
+export type Uuid18 = string | null;
+export type SpanId18 = string | null;
+export type Timestamp19 = string;
+export type WorkingStart18 = number;
+export type Metadata35 = {
+  [k: string]: unknown;
+} | null;
+export type Pending18 = boolean | null;
+export type Event18 = "media";
+export type Content6 = ContentImage | ContentAudio | ContentVideo;
+export type Caption = string | null;
+export type Source5 = string | null;
 export type Events = (
   | SampleInitEvent
   | SampleLimitEvent
@@ -769,12 +781,13 @@ export type Events = (
   | SpanEndEvent
   | StepEvent
   | SubtaskEvent
+  | MediaEvent
 )[];
 export type StartedAt1 = string | null;
 export type CompletedAt1 = string | null;
 export type TotalTime = number | null;
 export type WorkingTime3 = number | null;
-export type Uuid18 = string | null;
+export type Uuid19 = string | null;
 export type ErrorRetries = EvalError[] | null;
 export type Type23 =
   | "context"
@@ -798,7 +811,7 @@ export type Value3 =
     };
 export type Answer2 = string | null;
 export type Explanation3 = string | null;
-export type Metadata35 = {
+export type Metadata36 = {
   [k: string]: unknown;
 } | null;
 export type History1 = ScoreEdit[];
@@ -1252,7 +1265,7 @@ export interface EvalSample {
   completed_at: CompletedAt1;
   total_time: TotalTime;
   working_time: WorkingTime3;
-  uuid: Uuid18;
+  uuid: Uuid19;
   invalidation: ProvenanceData | null;
   error: EvalError | null;
   error_retries: ErrorRetries;
@@ -1945,6 +1958,21 @@ export interface Input5 {
 export interface Result3 {
   [k: string]: unknown;
 }
+/**
+ * Event with media content (image, audio, or video).
+ */
+export interface MediaEvent {
+  uuid: Uuid18;
+  span_id: SpanId18;
+  timestamp: Timestamp19;
+  working_start: WorkingStart18;
+  metadata: Metadata35;
+  pending: Pending18;
+  event: Event18;
+  content: Content6;
+  caption: Caption;
+  source: Source5;
+}
 export interface ModelUsage3 {
   [k: string]: ModelUsage1;
 }
@@ -1973,7 +2001,7 @@ export interface EvalSampleScore {
   value: Value3;
   answer: Answer2;
   explanation: Explanation3;
-  metadata: Metadata35;
+  metadata: Metadata36;
   history: History1;
   sample_id: SampleId1;
 }

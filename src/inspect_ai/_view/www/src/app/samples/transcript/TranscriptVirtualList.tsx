@@ -5,6 +5,7 @@ import {
   InfoEvent,
   InputEvent,
   LoggerEvent,
+  MediaEvent,
   ModelEvent,
   SampleInitEvent,
   SampleLimitEvent,
@@ -22,6 +23,7 @@ import { ApprovalEventView } from "./ApprovalEventView";
 import { ErrorEventView } from "./ErrorEventView";
 import { InfoEventView } from "./InfoEventView";
 import { InputEventView } from "./InputEventView";
+import { MediaEventView } from "./MediaEventView";
 import { LoggerEventView } from "./LoggerEventView";
 import { ModelEventView } from "./ModelEventView";
 import { SampleInitEventView } from "./SampleInitEventView";
@@ -117,6 +119,14 @@ export const RenderedEventNode: FC<RenderedEventNodeProps> = memo(
         return (
           <InfoEventView
             eventNode={node as EventNode<InfoEvent>}
+            className={className}
+          />
+        );
+
+      case "media":
+        return (
+          <MediaEventView
+            eventNode={node as EventNode<MediaEvent>}
             className={className}
           />
         );

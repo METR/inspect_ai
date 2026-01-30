@@ -5,6 +5,7 @@ import {
   InfoEvent,
   InputEvent,
   LoggerEvent,
+  MediaEvent,
   ModelEvent,
   SampleInitEvent,
   SampleLimitEvent,
@@ -47,6 +48,7 @@ export type EventType =
   | ModelEvent
   | LoggerEvent
   | InfoEvent
+  | MediaEvent
   | StepEvent
   | SubtaskEvent
   | ScoreEvent

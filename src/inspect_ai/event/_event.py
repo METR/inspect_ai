@@ -7,6 +7,7 @@ from ._error import ErrorEvent
 from ._info import InfoEvent
 from ._input import InputEvent
 from ._logger import LoggerEvent
+from ._media import MediaEvent
 from ._model import ModelEvent
 from ._sample_init import SampleInitEvent
 from ._sample_limit import SampleLimitEvent
@@ -38,5 +39,6 @@ Event: TypeAlias = Union[
     SpanEndEvent,
     StepEvent,
     SubtaskEvent,
+    MediaEvent,
 ]
 """Event in a transcript."""
