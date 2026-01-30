@@ -1,4 +1,9 @@
-from inspect_ai._util.content import ContentAudio, ContentImage, ContentVideo
+from inspect_ai._util.content import (
+    ContentAudio,
+    ContentImage,
+    ContentMarkdown,
+    ContentVideo,
+)
 from inspect_ai.event import MediaEvent
 from inspect_ai.log._transcript import Transcript
 
@@ -32,6 +37,18 @@ def test_media_event_audio_serialization():
     deserialized = MediaEvent.model_validate_json(serialized)
     assert original.content == deserialized.content
     assert deserialized.source == "recorder"
+
+
+def test_media_event_markdown_serialization():
+    """Test round-trip serialization of MediaEvent with markdown content."""
+    original = MediaEvent(
+        content=ContentMarkdown(markdown="# Hello\n\nThis is **bold**."),
+        caption="Documentation",
+    )
+    serialized = original.model_dump_json()
+    deserialized = MediaEvent.model_validate_json(serialized)
+    assert original.content == deserialized.content
+    assert deserialized.caption == "Documentation"
 
 
 def test_transcript_image():
@@ -85,3 +102,16 @@ def test_transcript_media_generic():
     assert event.content == content
     assert event.caption == "Generic"
     assert event.source == "test"
+
+
+def test_transcript_markdown():
+    """Test transcript().markdown() convenience method."""
+    t = Transcript()
+    t.markdown("# Title\n\nSome **bold** text.", caption="Notes", source="agent")
+    assert len(t.events) == 1
+    event = t.events[0]
+    assert isinstance(event, MediaEvent)
+    assert event.content.type == "markdown"
+    assert event.content.markdown == "# Title\n\nSome **bold** text."
+    assert event.caption == "Notes"
+    assert event.source == "agent"

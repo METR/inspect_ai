@@ -127,6 +127,16 @@ class ContentVideo(ContentBase):
     """Format of video data ('mp4', 'mpeg', or 'mov')"""
 
 
+class ContentMarkdown(ContentBase):
+    """Markdown content."""
+
+    type: Literal["markdown"] = Field(default="markdown")
+    """Type."""
+
+    markdown: str
+    """Markdown text content."""
+
+
 class ContentDocument(ContentBase):
     """Document content (e.g. a PDF)."""
 

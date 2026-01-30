@@ -2,11 +2,16 @@ from typing import Literal, Union
 
 from pydantic import Field
 
-from inspect_ai._util.content import ContentAudio, ContentImage, ContentVideo
+from inspect_ai._util.content import (
+    ContentAudio,
+    ContentImage,
+    ContentMarkdown,
+    ContentVideo,
+)
 from inspect_ai.event._base import BaseEvent
 
-MediaContent = Union[ContentImage, ContentAudio, ContentVideo]
-"""Media content types (image, audio, or video)."""
+MediaContent = Union[ContentImage, ContentAudio, ContentVideo, ContentMarkdown]
+"""Media content types (image, audio, video, or markdown)."""
 
 
 class MediaEvent(BaseEvent):

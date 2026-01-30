@@ -14,7 +14,12 @@ from pydantic import (
     JsonValue,
 )
 
-from inspect_ai._util.content import ContentAudio, ContentImage, ContentVideo
+from inspect_ai._util.content import (
+    ContentAudio,
+    ContentImage,
+    ContentMarkdown,
+    ContentVideo,
+)
 from inspect_ai._util.logger import warn_once
 from inspect_ai.event._base import BaseEvent
 from inspect_ai.event._event import Event
@@ -143,6 +148,28 @@ class Transcript:
         self._event(
             MediaEvent(
                 content=ContentAudio(audio=audio, format=format),
+                caption=caption,
+                source=source,
+            )
+        )
+
+    def markdown(
+        self,
+        markdown: str,
+        *,
+        caption: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Add a markdown `MediaEvent` to the transcript.
+
+        Args:
+           markdown: Markdown text content.
+           caption: Optional caption for the markdown.
+           source: Optional event source.
+        """
+        self._event(
+            MediaEvent(
+                content=ContentMarkdown(markdown=markdown),
                 caption=caption,
                 source=source,
             )

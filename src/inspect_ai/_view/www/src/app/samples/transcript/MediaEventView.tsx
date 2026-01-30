@@ -3,6 +3,7 @@ import { FC } from "react";
 import {
   ContentAudio,
   ContentImage,
+  ContentMarkdown,
   ContentVideo,
   Format1,
   Format2,
@@ -10,6 +11,7 @@ import {
 } from "../../../@types/log";
 import { formatDateTime } from "../../../utils/format";
 import { ApplicationIcons } from "../../appearance/icons";
+import { RenderedText } from "../../content/RenderedText";
 import { EventPanel } from "./event/EventPanel";
 import { formatTitle } from "./event/utils";
 import styles from "./MediaEventView.module.css";
@@ -38,6 +40,8 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
         return renderAudio(content);
       case "video":
         return renderVideo(content);
+      case "markdown":
+        return renderMarkdown(content);
       default:
         return null;
     }
@@ -73,6 +77,15 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
     );
   };
 
+  const renderMarkdown = (content: ContentMarkdown) => {
+    return (
+      <RenderedText
+        markdown={content.markdown}
+        className={clsx(styles.markdown, "text-size-base")}
+      />
+    );
+  };
+
   const getIcon = () => {
     switch (event.content.type) {
       case "image":
@@ -81,6 +94,8 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
         return "bi bi-music-note-beamed";
       case "video":
         return "bi bi-camera-video";
+      case "markdown":
+        return "bi bi-markdown";
       default:
         return ApplicationIcons.info;
     }

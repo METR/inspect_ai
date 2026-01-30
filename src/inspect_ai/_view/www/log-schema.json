@@ -1085,6 +1085,40 @@
       "type": "object",
       "additionalProperties": false
     },
+    "ContentMarkdown": {
+      "description": "Markdown content.",
+      "properties": {
+        "internal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "type": {
+          "const": "markdown",
+          "default": "markdown",
+          "title": "Type",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "internal",
+        "type",
+        "markdown"
+      ],
+      "title": "ContentMarkdown",
+      "type": "object",
+      "additionalProperties": false
+    },
     "ContentReasoning": {
       "description": "Reasoning content.\n\nSee the specification for [thinking blocks](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#understanding-thinking-blocks) for Claude models.",
       "properties": {
@@ -4705,6 +4739,9 @@
             },
             {
               "$ref": "#/$defs/ContentVideo"
+            },
+            {
+              "$ref": "#/$defs/ContentMarkdown"
             }
           ],
           "title": "Content"

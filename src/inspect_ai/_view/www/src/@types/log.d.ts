@@ -759,7 +759,13 @@ export type Metadata35 = {
 } | null;
 export type Pending18 = boolean | null;
 export type Event18 = "media";
-export type Content6 = ContentImage | ContentAudio | ContentVideo;
+export type Content6 =
+  | ContentImage
+  | ContentAudio
+  | ContentVideo
+  | ContentMarkdown;
+export type Type23 = "markdown";
+export type Markdown = string;
 export type Caption = string | null;
 export type Source5 = string | null;
 export type Events = (
@@ -789,7 +795,7 @@ export type TotalTime = number | null;
 export type WorkingTime3 = number | null;
 export type Uuid19 = string | null;
 export type ErrorRetries = EvalError[] | null;
-export type Type23 =
+export type Type24 =
   | "context"
   | "time"
   | "working"
@@ -1973,6 +1979,14 @@ export interface MediaEvent {
   caption: Caption;
   source: Source5;
 }
+/**
+ * Markdown content.
+ */
+export interface ContentMarkdown {
+  internal: unknown;
+  type: Type23;
+  markdown: Markdown;
+}
 export interface ModelUsage3 {
   [k: string]: ModelUsage1;
 }
@@ -1983,7 +1997,7 @@ export interface Attachments {
  * Limit encountered by sample.
  */
 export interface EvalSampleLimit {
-  type: Type23;
+  type: Type24;
   limit: Limit2;
 }
 /**
