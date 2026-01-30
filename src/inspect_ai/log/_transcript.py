@@ -97,13 +97,7 @@ class Transcript:
            caption: Optional caption for the image.
            source: Optional event source.
         """
-        self._event(
-            MediaEvent(
-                content=ContentImage(image=image),
-                caption=caption,
-                source=source,
-            )
-        )
+        self.media(ContentImage(image=image), caption=caption, source=source)
 
     def video(
         self,
@@ -121,12 +115,8 @@ class Transcript:
            caption: Optional caption for the video.
            source: Optional event source.
         """
-        self._event(
-            MediaEvent(
-                content=ContentVideo(video=video, format=format),
-                caption=caption,
-                source=source,
-            )
+        self.media(
+            ContentVideo(video=video, format=format), caption=caption, source=source
         )
 
     def audio(
@@ -145,12 +135,8 @@ class Transcript:
            caption: Optional caption for the audio.
            source: Optional event source.
         """
-        self._event(
-            MediaEvent(
-                content=ContentAudio(audio=audio, format=format),
-                caption=caption,
-                source=source,
-            )
+        self.media(
+            ContentAudio(audio=audio, format=format), caption=caption, source=source
         )
 
     def markdown(
@@ -167,13 +153,7 @@ class Transcript:
            caption: Optional caption for the markdown.
            source: Optional event source.
         """
-        self._event(
-            MediaEvent(
-                content=ContentMarkdown(markdown=markdown),
-                caption=caption,
-                source=source,
-            )
-        )
+        self.media(ContentMarkdown(markdown=markdown), caption=caption, source=source)
 
     @contextlib.contextmanager
     def step(self, name: str, type: str | None = None) -> Iterator[None]:

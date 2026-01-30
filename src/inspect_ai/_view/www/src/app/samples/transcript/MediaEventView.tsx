@@ -9,7 +9,7 @@ import {
   Format2,
   MediaEvent,
 } from "../../../@types/log";
-import { formatDateTime } from "../../../utils/format";
+import { formatDateTime, toTitleCase } from "../../../utils/format";
 import { ApplicationIcons } from "../../appearance/icons";
 import { RenderedText } from "../../content/RenderedText";
 import { EventPanel } from "./event/EventPanel";
@@ -21,6 +21,21 @@ interface MediaEventViewProps {
   eventNode: EventNode<MediaEvent>;
   className?: string | string[];
 }
+
+const MEDIA_ICONS: Record<string, string> = {
+  image: "bi bi-image",
+  audio: "bi bi-music-note-beamed",
+  video: "bi bi-camera-video",
+  markdown: "bi bi-markdown",
+};
+
+const MIME_TYPES: Record<string, string> = {
+  mov: "video/quicktime",
+  wav: "audio/wav",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  mpeg: "video/mpeg",
+};
 
 /**
  * Renders the MediaEventView component.
@@ -42,8 +57,10 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
         return renderVideo(content);
       case "markdown":
         return renderMarkdown(content);
-      default:
-        return null;
+      default: {
+        const exhaustiveCheck: never = content;
+        throw new Error(`Unhandled content type: ${exhaustiveCheck}`);
+      }
     }
   };
 
@@ -87,23 +104,11 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
   };
 
   const getIcon = () => {
-    switch (event.content.type) {
-      case "image":
-        return "bi bi-image";
-      case "audio":
-        return "bi bi-music-note-beamed";
-      case "video":
-        return "bi bi-camera-video";
-      case "markdown":
-        return "bi bi-markdown";
-      default:
-        return ApplicationIcons.info;
-    }
+    return MEDIA_ICONS[event.content.type] ?? ApplicationIcons.info;
   };
 
   const getTitle = () => {
-    const typeLabel =
-      event.content.type.charAt(0).toUpperCase() + event.content.type.slice(1);
+    const typeLabel = toTitleCase(event.content.type);
     if (event.source) {
       return `${typeLabel}: ${event.source}`;
     }
@@ -135,18 +140,5 @@ export const MediaEventView: FC<MediaEventViewProps> = ({
  * Returns the MIME type for a given format.
  */
 const mimeTypeForFormat = (format: Format1 | Format2): string => {
-  switch (format) {
-    case "mov":
-      return "video/quicktime";
-    case "wav":
-      return "audio/wav";
-    case "mp3":
-      return "audio/mpeg";
-    case "mp4":
-      return "video/mp4";
-    case "mpeg":
-      return "video/mpeg";
-    default:
-      return "video/mp4";
-  }
+  return MIME_TYPES[format] ?? "video/mp4";
 };
