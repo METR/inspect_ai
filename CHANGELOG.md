@@ -11,6 +11,7 @@
 - Inspect View: Show errors in model call events in the transcript.
 - Inspect View: Show tracebacks in model call events in the transcript.
 - Bugfix: `handoff()` now respects `react()` name parameter when creating the transfer_to_X tool name.
+- Bugfix: Correctly handle optional `content` field in Anthropic agent bridge `tool_result`.
 
 ## 0.3.170 (03 February 2026)
 
