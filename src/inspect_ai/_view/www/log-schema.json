@@ -3820,7 +3820,8 @@
               "enum": [
                 "low",
                 "medium",
-                "high"
+                "high",
+                "max"
               ],
               "type": "string"
             },
