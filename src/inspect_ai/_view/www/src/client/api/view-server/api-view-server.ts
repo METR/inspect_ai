@@ -220,17 +220,6 @@ export function viewServerApi(
     return logHeaders.map(toLogPreview);
   };
 
-  const get_log_summary = async (file: string): Promise<LogPreview> => {
-    const params = new URLSearchParams();
-    params.append("file", file);
-    const result = await requestApi.fetchString(
-      "GET",
-      `/log-headers?${params.toString()}`,
-    );
-    const logHeaders: EvalHeader[] = result.parsed;
-    return toLogPreview(logHeaders[0]);
-  };
-
   const get_log_details = async (file: string): Promise<LogDetails> => {
     const params = new URLSearchParams();
     params.append("file", file);
@@ -404,7 +393,6 @@ export function viewServerApi(
     get_log_contents,
     get_log_size,
     get_log_bytes,
-    get_log_summary,
     get_log_details,
     get_log_sample,
     get_log_summaries,

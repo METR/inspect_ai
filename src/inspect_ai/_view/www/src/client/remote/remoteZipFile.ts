@@ -143,20 +143,16 @@ export const openRemoteZipFile = async (
       // Margin for the local header's extra field (typically <64 bytes, ZIP64 needs ~28)
       const extraFieldMargin = 256;
       const estimatedTotal =
-        headerSize +
-        filenameByteLen +
-        extraFieldMargin +
-        entry.compressedSize;
+        headerSize + filenameByteLen + extraFieldMargin + entry.compressedSize;
 
-      if (maxBytes && estimatedTotal > maxBytes) {
-        throw new FileSizeLimitError(file, maxBytes);
-      }
-
-      // Optimistic single read using estimated size
+      // Optimistic single read — clamp to maxBytes to avoid over-fetching
+      const fetchSize = maxBytes
+        ? Math.min(estimatedTotal, maxBytes)
+        : estimatedTotal;
       let fileData = await fetchBytes(
         url,
         entry.fileOffset,
-        entry.fileOffset + estimatedTotal - 1,
+        entry.fileOffset + fetchSize - 1,
       );
 
       // Check actual lengths from the local header
@@ -168,11 +164,12 @@ export const openRemoteZipFile = async (
         actualExtraFieldLen +
         entry.compressedSize;
 
-      if (actualTotal > estimatedTotal) {
+      if (maxBytes && actualTotal > maxBytes) {
+        throw new FileSizeLimitError(file, maxBytes);
+      }
+
+      if (actualTotal > fetchSize) {
         // Estimate was too small (rare: extra field > 256 bytes), re-fetch
-        if (maxBytes && actualTotal > maxBytes) {
-          throw new FileSizeLimitError(file, maxBytes);
-        }
         fileData = await fetchBytes(
           url,
           entry.fileOffset,

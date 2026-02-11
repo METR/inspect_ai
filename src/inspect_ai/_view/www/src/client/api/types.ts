@@ -167,7 +167,6 @@ export interface LogViewAPI {
     start: number,
     end: number,
   ) => Promise<Uint8Array>;
-  get_log_summary?: (log_file: string) => Promise<LogPreview>;
   get_log_details?: (log_file: string) => Promise<LogDetails>;
   get_log_sample?: (
     log_file: string,

@@ -87,10 +87,7 @@ export function useLoadSample() {
           getSamplePolling().stopPolling();
 
           // Helper to apply a loaded sample to state
-          const applySample = (
-            sample: EvalSample,
-            clearCollapsed: boolean,
-          ) => {
+          const applySample = (sample: EvalSample, clearCollapsed: boolean) => {
             if (clearCollapsed) {
               sampleActions.clearCollapsedEvents();
             }
@@ -105,7 +102,11 @@ export function useLoadSample() {
 
           // Phase 1: Try lite sample first (fast, excludes events/attachments/store)
           if (api?.get_log_sample_lite) {
-            const liteSample = await api.get_log_sample_lite(logFile, id, epoch);
+            const liteSample = await api.get_log_sample_lite(
+              logFile,
+              id,
+              epoch,
+            );
             if (liteSample) {
               log.debug(`LOADED LITE SAMPLE: ${id}-${epoch}`);
               applySample(liteSample, isNewSample);
@@ -113,11 +114,14 @@ export function useLoadSample() {
               sampleActions.setEventsLoading(true);
 
               // Phase 2: Load full sample in background
-              api.get_log_sample(logFile, id, epoch)
+              api
+                .get_log_sample(logFile, id, epoch)
                 .then((fullSample) => {
                   if (thisGeneration !== loadGeneration) return;
                   if (fullSample) {
-                    log.debug(`LOADED FULL SAMPLE (background): ${id}-${epoch}`);
+                    log.debug(
+                      `LOADED FULL SAMPLE (background): ${id}-${epoch}`,
+                    );
                     applySample(fullSample, false);
                   }
                 })
