@@ -82,7 +82,7 @@ def view_server_app(
     recursive: bool = True,
     fs_options: dict[str, Any] = {},
 ) -> "FastAPI":
-    app = FastAPI()
+    app = FastAPI(redirect_slashes=False)
 
     async def _map_file(request: Request, file: str) -> str:
         if mapping_policy is not None:
