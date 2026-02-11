@@ -128,6 +128,9 @@ export const clientApi = (
    * Gets a log summary
    */
   const get_log_details = async (log_file: string): Promise<LogDetails> => {
+    if (api.get_log_details) {
+      return api.get_log_details(log_file);
+    }
     if (isEvalFile(log_file)) {
       const remoteLogFile = await remoteEvalFile(log_file);
       if (remoteLogFile) {
@@ -217,6 +220,16 @@ export const clientApi = (
     }
     return undefined;
   };
+
+  const get_log_sample_lite = api.get_log_sample
+    ? async (log_file: string, id: string | number, epoch: number) => {
+        return api.get_log_sample!(log_file, id, epoch, [
+          "events",
+          "attachments",
+          "store",
+        ]);
+      }
+    : undefined;
 
   const read_eval_file_log_summary = async (log_file: string) => {
     // If the API supports this, delegate to it
@@ -388,6 +401,9 @@ export const clientApi = (
     get_log_summaries: middleware("get_log_summaries", get_log_summaries),
     get_log_details: middleware("get_log_details", get_log_details),
     get_log_sample: middleware("get_log_sample", get_log_sample),
+    get_log_sample_lite: get_log_sample_lite
+      ? middleware("get_log_sample_lite", get_log_sample_lite)
+      : undefined,
     open_log_file: middleware("open_log_file", (log_file, log_dir) => {
       return api.open_log_file(log_file, log_dir);
     }),
