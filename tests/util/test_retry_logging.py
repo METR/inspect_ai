@@ -271,31 +271,95 @@ class TestSampleContextFilter:
         assert "/responses" in full_msg
 
 
-class TestInstallSampleContextLogging:
-    def test_installs_filter_on_openai_logger(self) -> None:
+class TestSampleContextFilterOnChildLogger:
+    """Verify filter intercepts records from the actual SDK emitting logger.
+
+    Python logging filters on a parent logger don't run for child logger
+    records during propagation. The OpenAI SDK logs from 'openai._base_client',
+    so the filter must be installed on the actual emitting logger, not 'openai'.
+    """
+
+    def test_filter_intercepts_child_logger_records(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         import inspect_ai._util.retry as retry_module
         from inspect_ai._util.retry import (
             SampleContextFilter,
             install_sample_context_logging,
         )
 
-        # Reset the installed flag so we can test fresh
         retry_module._sample_context_logging_installed = False
-
-        openai_logger = logging.getLogger("openai")
-        # Remove any existing SampleContextFilters from previous test runs
-        openai_logger.filters = [
-            f for f in openai_logger.filters if not isinstance(f, SampleContextFilter)
-        ]
-        original_count = len(openai_logger.filters)
+        for logger_name in ("openai", "openai._base_client"):
+            lgr = logging.getLogger(logger_name)
+            lgr.filters = [
+                f for f in lgr.filters if not isinstance(f, SampleContextFilter)
+            ]
 
         install_sample_context_logging()
 
-        assert len(openai_logger.filters) == original_count + 1
-        assert isinstance(openai_logger.filters[-1], SampleContextFilter)
+        mock_sample = _make_mock_sample()
+        child_logger = logging.getLogger("openai._base_client")
 
-        # Cleanup
-        openai_logger.removeFilter(openai_logger.filters[-1])
+        with (
+            caplog.at_level(logging.INFO),
+            patch("inspect_ai.log._samples.sample_active", return_value=mock_sample),
+        ):
+            child_logger.info(
+                "Retrying request to %s in %f seconds", "/responses", 0.396765
+            )
+
+        assert len(caplog.records) >= 1
+        msg = caplog.records[-1].getMessage()
+        assert "[Abc12xY mmlu/42/1 openai/gpt-4o]" in msg, (
+            f"Filter did not intercept openai._base_client record. Got: {msg}"
+        )
+
+        for logger_name in ("openai", "openai._base_client"):
+            lgr = logging.getLogger(logger_name)
+            lgr.filters = [
+                f for f in lgr.filters if not isinstance(f, SampleContextFilter)
+            ]
+        retry_module._sample_context_logging_installed = False
+
+
+class TestRetryErrorSummaryEdgeCases:
+    def test_integer_code_does_not_crash(self) -> None:
+        ex = Exception("error")
+        ex.code = 429  # type: ignore[attr-defined]
+        state = _make_retry_state(ex)
+        result = retry_error_summary(state)
+        assert "429" in result
+
+    def test_percent_in_task_name_does_not_break_formatting(self) -> None:
+        mock = _make_mock_sample(task="100%_accuracy", sample_id="item%20foo")
+        with patch("inspect_ai.log._samples.sample_active", return_value=mock):
+            prefix = sample_context_prefix()
+        assert "100%_accuracy" in prefix
+        assert "item%20foo" in prefix
+
+
+class TestInstallSampleContextLogging:
+    def test_installs_filter_on_sdk_logger(self) -> None:
+        import inspect_ai._util.retry as retry_module
+        from inspect_ai._util.retry import (
+            SampleContextFilter,
+            install_sample_context_logging,
+        )
+
+        retry_module._sample_context_logging_installed = False
+
+        sdk_logger = logging.getLogger("openai._base_client")
+        sdk_logger.filters = [
+            f for f in sdk_logger.filters if not isinstance(f, SampleContextFilter)
+        ]
+        original_count = len(sdk_logger.filters)
+
+        install_sample_context_logging()
+
+        assert len(sdk_logger.filters) == original_count + 1
+        assert isinstance(sdk_logger.filters[-1], SampleContextFilter)
+
+        sdk_logger.removeFilter(sdk_logger.filters[-1])
         retry_module._sample_context_logging_installed = False
 
     def test_is_idempotent(self) -> None:
@@ -305,23 +369,21 @@ class TestInstallSampleContextLogging:
             install_sample_context_logging,
         )
 
-        # Reset
         retry_module._sample_context_logging_installed = False
 
-        openai_logger = logging.getLogger("openai")
-        openai_logger.filters = [
-            f for f in openai_logger.filters if not isinstance(f, SampleContextFilter)
+        sdk_logger = logging.getLogger("openai._base_client")
+        sdk_logger.filters = [
+            f for f in sdk_logger.filters if not isinstance(f, SampleContextFilter)
         ]
 
         install_sample_context_logging()
         install_sample_context_logging()
 
         new_filters = [
-            f for f in openai_logger.filters if isinstance(f, SampleContextFilter)
+            f for f in sdk_logger.filters if isinstance(f, SampleContextFilter)
         ]
-        assert len(new_filters) == 1  # only one despite two calls
+        assert len(new_filters) == 1
 
-        # Cleanup
         for f in new_filters:
-            openai_logger.removeFilter(f)
+            sdk_logger.removeFilter(f)
         retry_module._sample_context_logging_installed = False
