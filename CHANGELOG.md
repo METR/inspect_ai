@@ -71,7 +71,7 @@
 - VLLM: Don't retry when the error indicates that the VLLM server has crashed.
 - Analysis: Async reading of logs/samples in `samples_df()` (now 50x faster).
 - Sandboxes: Don't require Docker compatible sandboxes to implement `config_deserialize()`.
-- Sandboxes: New `exec_remote()` method for async execution of long-running commands.
+- Sandboxes: New `exec_remote()` method on `SandboxEnvironment` for asynchronous execution of long-running commands with streaming output.
 - Compaction: Add `type` field to `CompactionEvent` to record compaction type.
 - Web Search: Treat Tavily query character limits as ToolErrors.
 - Limits: New `cost_limit()` context manager for scoped application of cost limits.
