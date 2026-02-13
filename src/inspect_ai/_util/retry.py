@@ -63,7 +63,8 @@ def retry_error_summary(retry_state: RetryCallState) -> str:
             status = getattr(response, "status_code", None)
 
     # API error code (e.g. "rate_limit_exceeded", "server_error")
-    code: str | None = getattr(ex, "code", None)
+    raw_code = getattr(ex, "code", None)
+    code: str | None = str(raw_code) if raw_code is not None else None
 
     parts = [type_name]
     if status is not None:
@@ -90,7 +91,8 @@ class SampleContextFilter(logging.Filter):
                 f"[{active.id} {active.task}/{active.sample.id}/{active.epoch} "
                 f"{active.model}] "
             )
-            record.msg = f"{prefix}{record.msg}"
+            record.msg = f"{prefix}{record.getMessage()}"
+            record.args = None
             record.sample_uuid = active.id  # type: ignore[attr-defined]
             record.sample_task = active.task  # type: ignore[attr-defined]
             record.sample_id = active.sample.id  # type: ignore[attr-defined]
@@ -102,16 +104,21 @@ class SampleContextFilter(logging.Filter):
 _sample_context_logging_installed = False
 
 
+_SDK_LOGGERS = ("openai._base_client",)
+
+
 def install_sample_context_logging() -> None:
     """Install SampleContextFilter on SDK loggers.
 
-    Attaches the filter to the ``openai`` logger so that retry messages
-    emitted by the OpenAI SDK are enriched with active sample context.
-    Safe to call multiple times — installs at most once.
+    Attaches the filter to the actual emitting loggers (not parent loggers)
+    so that retry messages from the OpenAI SDK are enriched with active
+    sample context. Safe to call multiple times — installs at most once.
     """
     global _sample_context_logging_installed
     if _sample_context_logging_installed:
         return
     _sample_context_logging_installed = True
 
-    logging.getLogger("openai").addFilter(SampleContextFilter())
+    sample_filter = SampleContextFilter()
+    for name in _SDK_LOGGERS:
+        logging.getLogger(name).addFilter(sample_filter)
