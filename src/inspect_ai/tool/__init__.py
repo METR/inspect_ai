@@ -40,6 +40,12 @@ from ._tool_call import (
     ToolCallViewer,
 )
 from ._tool_choice import ToolChoice, ToolFunction
+from ._tool_cli import (
+    generate_tool_cli_script,
+    install_tool_cli,
+    run_tool_cli_service,
+    tool_cli_service_methods,
+)
 from ._tool_def import ToolDef
 from ._tool_info import ToolInfo
 from ._tool_params import ToolParam, ToolParams
@@ -103,6 +109,10 @@ __all__ = [
     "ToolCallViewer",
     "ToolChoice",
     "ToolDef",
+    "generate_tool_cli_script",
+    "install_tool_cli",
+    "run_tool_cli_service",
+    "tool_cli_service_methods",
     "ToolFunction",
     "ToolInfo",
     "ToolParam",
