@@ -1,12 +1,23 @@
 """Tests for retry log enrichment helpers."""
 
 import logging
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from inspect_ai._util.constants import HTTP
 from inspect_ai._util.retry import retry_error_summary, sample_context_prefix
+
+
+@pytest.fixture(autouse=True)
+def _ensure_log_propagation() -> Iterator[None]:
+    """Counter init_logger() setting propagate=False on inspect_ai logger."""
+    lgr = logging.getLogger("inspect_ai")
+    old_propagate = lgr.propagate
+    lgr.propagate = True
+    yield
+    lgr.propagate = old_propagate
 
 
 def _make_mock_sample(
