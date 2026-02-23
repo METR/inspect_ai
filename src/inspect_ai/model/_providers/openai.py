@@ -140,6 +140,7 @@ class OpenAIAPI(ModelAPI):
             or self.is_codex()
             or self.is_gpt_5()
             or self.is_flamingo()
+            or self.is_mouse()
         ) and config.num_choices is None
 
         # resolve whether we are forcing the responses api
@@ -328,6 +329,7 @@ class OpenAIAPI(ModelAPI):
             or (self.is_gpt_5() and not self.is_gpt_5_chat())
             or self.is_codex()
             or self.is_flamingo()
+            or self.is_mouse()
         )
 
     def is_o_series(self) -> bool:
@@ -347,6 +349,10 @@ class OpenAIAPI(ModelAPI):
     def is_flamingo(self) -> bool:
         name = self.service_model_name()
         return "flamingo" in name
+
+    def is_mouse(self) -> bool:
+        name = self.service_model_name()
+        return "mouse" in name
 
     def is_gpt_5_plus(self) -> bool:
         name = self.service_model_name()
