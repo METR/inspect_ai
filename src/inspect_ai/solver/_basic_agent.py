@@ -13,9 +13,11 @@ from inspect_ai.scorer._score import score
 from inspect_ai.solver._chain import chain
 from inspect_ai.tool._tool import Tool, ToolResult, tool
 from inspect_ai.tool._tool_with import tool_with
+from inspect_ai.tool._tools._execute import bash
 from inspect_ai.util._limit import token_limit as create_token_limit
 
 from ._prompt import system_message
+from ._setting import setting as get_setting
 from ._solver import Generate, Solver, solver
 from ._task_state import TaskState
 from ._use_tools import use_tools
@@ -168,6 +170,33 @@ def basic_agent(
     @solver
     def basic_agent_loop() -> Solver:
         async def solve(state: TaskState, generate: Generate) -> TaskState:
+            # merge setting tools into state.tools
+            s = get_setting()
+            if s is not None:
+                from inspect_ai.tool._tool_def import ToolDef
+
+                # collect setting tools + workspace bash tools
+                setting_tools: list[Tool | ToolDef] = list(s.tools)
+                for ws in s.workspaces:
+                    setting_tools.append(bash(sandbox=ws.sandbox, user=ws.user))
+
+                if setting_tools:
+                    setting_tool_names: set[str] = set()
+                    for st in setting_tools:
+                        setting_tool_names.add(
+                            ToolDef(st).name if not isinstance(st, ToolDef) else st.name
+                        )
+                    filtered = [
+                        t
+                        for t in state.tools
+                        if ToolDef(t).name not in setting_tool_names
+                    ]
+                    merged: list[Tool] = [
+                        t if isinstance(t, Tool) else t.as_tool() for t in setting_tools
+                    ]
+                    merged.extend(filtered)
+                    state.tools = merged
+
             # resolve message_limit -- prefer parameter then fall back to task.
             # if there is no message limit AND no token limit then provide
             # a default message limit of 50 (so that the task can't run forever
@@ -247,6 +276,18 @@ def basic_agent(
                     # no tool calls, urge the model to continue
                     else:
                         state.messages.append(ChatMessageUser(content=continue_message))
+
+                    # fire setting on_turn callback
+                    on_turn_s = get_setting()
+                    if on_turn_s is not None and on_turn_s.on_turn is not None:
+                        on_turn_result = await on_turn_s.on_turn()
+                        if on_turn_result is False:
+                            state.completed = True
+                            break
+                        elif isinstance(on_turn_result, str):
+                            state.messages.append(
+                                ChatMessageUser(content=on_turn_result)
+                            )
 
             return state
 
