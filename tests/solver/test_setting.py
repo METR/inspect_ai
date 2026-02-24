@@ -1,8 +1,8 @@
-from inspect_ai import Task
+from inspect_ai import Task, eval
 from inspect_ai.dataset import Sample
-from inspect_ai.model import ChatMessageUser, ModelName
+from inspect_ai.model import ChatMessageUser, ModelName, ModelOutput, get_model
 from inspect_ai.scorer import includes
-from inspect_ai.solver import Setting, TaskState, Workspace, setting
+from inspect_ai.solver import Setting, TaskState, Workspace, basic_agent, setting
 from inspect_ai.solver._task_state import set_sample_state
 from inspect_ai.tool import tool
 
@@ -116,3 +116,42 @@ def test_task_with_factory_setting():
         scorer=includes(),
     )
     assert callable(task.setting)
+
+
+def test_setting_workspace_creates_bash_in_basic_agent():
+    """Test that workspaces cause scaffolding to create bash tools."""
+    s = Setting(
+        workspaces=(
+            Workspace(sandbox="default", description="Workspace", user="testuser"),
+        ),
+    )
+    task = Task(
+        dataset=[Sample(input="What is 1 + 1?", target=["2", "2.0"])],
+        setting=s,
+        solver=basic_agent(
+            tools=[],
+            message_limit=5,
+        ),
+        scorer=includes(),
+    )
+
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[
+            ModelOutput.for_tool_call(
+                model="mockllm/model",
+                tool_name="submit",
+                tool_arguments={"answer": "2"},
+            )
+        ],
+    )
+
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+
+    model_event = next(
+        event for event in log.samples[0].transcript.events if event.event == "model"
+    )
+    tool_names = {t.name for t in model_event.tools}
+    assert "bash" in tool_names
+    assert "submit" in tool_names
