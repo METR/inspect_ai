@@ -258,9 +258,9 @@ class SandboxEnvironment(abc.ABC):
            proc = await sandbox.exec_remote(["pytest", "-v"])
            async for event in proc:
                match event:
-                   case StdoutChunk(data=data): print(data, end="")
-                   case StderrChunk(data=data): print(data, end="", file=sys.stderr)
-                   case Completed(exit_code=code): print(f"Done: {code}")
+                   case ExecStdout(data=data): print(data, end="")
+                   case ExecStderr(data=data): print(data, end="", file=sys.stderr)
+                   case ExecCompleted(exit_code=code): print(f"Done: {code}")
            ```
 
         2. Fire-and-forget with explicit kill:
@@ -295,6 +295,9 @@ class SandboxEnvironment(abc.ABC):
             If stream=True: ExecRemoteProcess handle with events iterator and kill() method.
                 The process is guaranteed to have been started in the sandbox when this returns.
             If stream=False: ExecResult[str] with success, returncode, stdout, and stderr.
+
+        Raises:
+            TimeoutError: If `timeout` is specified in ExecRemoteAwaitableOptions and the command exceeds it (only applicable when `stream=False`).
         """
         return await (exec_remote_streaming if stream else exec_remote_awaitable)(
             self, cmd, self.default_polling_interval(), options
@@ -537,6 +540,22 @@ def deserialize_sandbox_specific_config(
             "Ensure the plugin is installed in your environment.",
         )
         return config
+    # If the provider is docker compatible and the config is a valid
+    # ComposeConfig, deserialize it automatically so providers don't
+    # need to handle this case in config_deserialize.
+    is_docker_compatible_fn = cast(
+        Callable[..., bool], getattr(sandboxenv_type, "is_docker_compatible")
+    )
+    if is_docker_compatible_fn():
+        from pydantic import ValidationError
+
+        from inspect_ai.util._sandbox.compose import ComposeConfig
+
+        try:
+            return ComposeConfig.model_validate(config)
+        except ValidationError:
+            pass
+
     config_deserialize = cast(
         ConfigDeserialize, getattr(sandboxenv_type, "config_deserialize")
     )
