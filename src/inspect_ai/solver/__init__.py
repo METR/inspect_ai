@@ -15,6 +15,7 @@ from ._prompt import (
     system_message,
     user_message,
 )
+from ._setting import OnTurn, Setting, Workspace, setting
 from ._solver import Generate, Solver, SolverSpec, generate, solver
 from ._task_state import Choice, Choices, TaskState
 from ._use_tools import use_tools
@@ -23,6 +24,10 @@ __all__ = [
     "basic_agent",
     "bridge",
     "human_agent",
+    "OnTurn",
+    "Setting",
+    "Workspace",
+    "setting",
     "chain",
     "fork",
     "generate",
