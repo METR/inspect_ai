@@ -15,6 +15,7 @@ from inspect_ai.agent._human.agent import human_cli
 from inspect_ai.log._metric import recompute_metrics
 from inspect_ai.log._score import edit_score
 from inspect_ai.solver._human_agent import human_agent
+from inspect_ai.solver._setting import Setting, Workspace
 
 __version__ = importlib_version(PKG_NAME)
 
@@ -38,4 +39,6 @@ __all__ = [
     "task",
     "task_with",
     "view",
+    "Setting",
+    "Workspace",
 ]

@@ -2,9 +2,16 @@ from inspect_ai import Task, eval
 from inspect_ai.dataset import Sample
 from inspect_ai.model import ChatMessageUser, ModelName, ModelOutput, get_model
 from inspect_ai.scorer import includes
-from inspect_ai.solver import Setting, TaskState, Workspace, basic_agent, setting
+from inspect_ai.solver import (
+    Setting,
+    TaskState,
+    Workspace,
+    basic_agent,
+    setting,
+    system_message,
+)
 from inspect_ai.solver._task_state import set_sample_state
-from inspect_ai.tool import tool
+from inspect_ai.tool import Tool, tool
 
 
 @tool
@@ -155,3 +162,206 @@ def test_setting_workspace_creates_bash_in_basic_agent():
     tool_names = {t.name for t in model_event.tools}
     assert "bash" in tool_names
     assert "submit" in tool_names
+
+
+def test_setting_tools_merged_into_basic_agent():
+    """Test that Setting.tools are merged into basic_agent."""
+    s = Setting(tools=(addition(),))
+    task = Task(
+        dataset=[Sample(input="What is 1 + 1?", target=["2", "2.0"])],
+        setting=s,
+        solver=basic_agent(
+            init=system_message(
+                "You are a helpful assistant. Call submit() when done."
+            ),
+            tools=[],
+            message_limit=5,
+        ),
+        scorer=includes(),
+    )
+
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[
+            ModelOutput.for_tool_call(
+                model="mockllm/model",
+                tool_name="submit",
+                tool_arguments={"answer": "2"},
+            )
+        ],
+    )
+
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+
+    model_event = next(
+        event for event in log.samples[0].transcript.events if event.event == "model"
+    )
+    tool_names = {t.name for t in model_event.tools}
+    assert "addition" in tool_names
+    assert "submit" in tool_names
+
+
+def test_setting_tool_dedup():
+    """Test that setting tools override solver tools with the same name."""
+
+    @tool(name="addition")
+    def custom_addition():
+        async def execute(x: int, y: int):
+            """Add numbers but returns wrong answer.
+
+            Args:
+                x (int): First number.
+                y (int): Second number.
+            """
+            return x + y + 100
+
+        return execute
+
+    s = Setting(tools=(addition(),))
+    task = Task(
+        dataset=[Sample(input="What is 1 + 1?", target=["2", "2.0"])],
+        setting=s,
+        solver=basic_agent(
+            tools=[custom_addition()],
+            message_limit=5,
+        ),
+        scorer=includes(),
+    )
+
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[
+            ModelOutput.for_tool_call(
+                model="mockllm/model",
+                tool_name="submit",
+                tool_arguments={"answer": "2"},
+            )
+        ],
+    )
+
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+
+
+def test_setting_on_turn_stops():
+    """Test that on_turn returning False stops the agent."""
+    call_count = 0
+
+    async def stop_after_two() -> bool | str | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            return False
+        return None
+
+    s = Setting(on_turn=stop_after_two)
+    task = Task(
+        dataset=[Sample(input="What is 1 + 1?", target="2")],
+        setting=s,
+        solver=basic_agent(
+            tools=[addition()],
+            message_limit=50,
+        ),
+        scorer=includes(),
+    )
+
+    model = get_model("mockllm/model")
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+    model_events = sum(
+        1 for event in log.samples[0].transcript.events if event.event == "model"
+    )
+    assert model_events == 2
+
+
+def test_setting_on_turn_injects_message():
+    """Test that on_turn returning a string injects a user message."""
+    call_count = 0
+
+    async def inject_then_stop() -> bool | str | None:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return "Please try a different approach."
+        return False
+
+    s = Setting(on_turn=inject_then_stop)
+    task = Task(
+        dataset=[Sample(input="What is 1 + 1?", target="2")],
+        setting=s,
+        solver=basic_agent(
+            tools=[addition()],
+            message_limit=50,
+        ),
+        scorer=includes(),
+    )
+
+    model = get_model("mockllm/model")
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+
+    user_messages = [
+        m.content for m in log.samples[0].messages if isinstance(m, ChatMessageUser)
+    ]
+    assert "Please try a different approach." in user_messages
+
+
+def test_factory_setting_per_sample():
+    """Test that callable setting creates per-sample settings."""
+
+    def make_setting(sample: Sample) -> Setting:
+        tools_list: tuple[Tool, ...] = ()
+        if sample.metadata and sample.metadata.get("needs_addition"):
+            tools_list = (addition(),)
+        return Setting(tools=tools_list)
+
+    task = Task(
+        dataset=[
+            Sample(
+                id="with_tool",
+                input="What is 1 + 1?",
+                target="2",
+                metadata={"needs_addition": True},
+            ),
+            Sample(
+                id="without_tool",
+                input="Say hello",
+                target="hello",
+                metadata={"needs_addition": False},
+            ),
+        ],
+        setting=make_setting,
+        solver=basic_agent(
+            tools=[],
+            message_limit=5,
+        ),
+        scorer=includes(),
+    )
+
+    submit_output = ModelOutput.for_tool_call(
+        model="mockllm/model",
+        tool_name="submit",
+        tool_arguments={"answer": "2"},
+    )
+    model = get_model(
+        "mockllm/model",
+        custom_outputs=[submit_output] * 2,
+    )
+
+    log = eval(task, model=model)[0]
+    assert log.status == "success"
+
+    sample_with = next(s for s in log.samples if s.id == "with_tool")
+    model_event = next(
+        event for event in sample_with.transcript.events if event.event == "model"
+    )
+    tool_names = {t.name for t in model_event.tools}
+    assert "addition" in tool_names
+
+    sample_without = next(s for s in log.samples if s.id == "without_tool")
+    model_event = next(
+        event for event in sample_without.transcript.events if event.event == "model"
+    )
+    tool_names = {t.name for t in model_event.tools}
+    assert "addition" not in tool_names
