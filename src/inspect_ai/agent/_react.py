@@ -21,10 +21,12 @@ from inspect_ai.model._compaction import (
 from inspect_ai.model._model import Model, get_model
 from inspect_ai.model._trim import trim_messages
 from inspect_ai.scorer._score import score
+from inspect_ai.solver._setting import setting as get_setting
 from inspect_ai.tool._mcp.connection import mcp_connection
 from inspect_ai.tool._tool import Tool, ToolResult, ToolSource, tool
 from inspect_ai.tool._tool_def import ToolDef
 from inspect_ai.tool._tool_info import parse_tool_info
+from inspect_ai.tool._tools._execute import bash
 
 from ._agent import Agent, AgentState, agent, agent_with, is_agent
 from ._filter import MessageFilter
@@ -39,6 +41,54 @@ from ._types import (
 )
 
 logger = getLogger(__name__)
+
+
+def _merge_sample_tools(
+    tools: list[Tool | ToolDef | ToolSource],
+) -> list[Tool | ToolDef | ToolSource]:
+    """Prepend setting tools (and workspace bash tools) before solver tools, deduplicating by name."""
+    s = get_setting()
+    if s is None:
+        return tools
+
+    # collect setting tools + workspace bash tools
+    setting_tools: list[Tool | ToolDef] = list(s.tools)
+    for ws in s.workspaces:
+        setting_tools.append(bash(sandbox=ws.sandbox, user=ws.user))
+
+    if not setting_tools:
+        return tools
+
+    # build a set of setting tool names
+    setting_tool_names: set[str] = set()
+    for st in setting_tools:
+        setting_tool_names.add(
+            ToolDef(st).name if not isinstance(st, ToolDef) else st.name
+        )
+
+    # filter out solver tools that conflict with setting tools
+    filtered: list[Tool | ToolDef | ToolSource] = []
+    for solver_tool in tools:
+        if isinstance(solver_tool, ToolSource):
+            filtered.append(solver_tool)
+        else:
+            name = (
+                ToolDef(solver_tool).name
+                if not isinstance(solver_tool, ToolDef)
+                else solver_tool.name
+            )
+            if name not in setting_tool_names:
+                filtered.append(solver_tool)
+
+    return list(setting_tools) + filtered
+
+
+async def _call_on_turn_callback() -> bool | str | None:
+    """Call the setting on_turn callback if present."""
+    s = get_setting()
+    if s is None or s.on_turn is None:
+        return None
+    return await s.on_turn()
 
 
 @agent
@@ -145,8 +195,8 @@ def react(
 
         return execute
 
-    # resolve tools
-    tools = list(tools) if tools is not None else []
+    # resolve tools (merge sample-context tools)
+    tools = _merge_sample_tools(list(tools) if tools is not None else [])
 
     # resolve submit tool
     submit_tool = (
@@ -269,6 +319,19 @@ def react(
                                 ChatMessageUser(content=response_message)
                             )
 
+                # fire sample-context on_turn callback
+                on_turn_result = await _call_on_turn_callback()
+                if on_turn_result is False:
+                    from inspect_ai.solver._task_state import sample_state
+
+                    s = sample_state()
+                    if s is not None:
+                        s.completed = True
+                    break
+                elif isinstance(on_turn_result, str):
+                    state.messages.append(ChatMessageUser(content=on_turn_result))
+                    continue
+
                 # call the on_continue hook (if any)
                 if callable(on_continue):
                     do_continue = await _call_on_continue(on_continue, state)
@@ -330,8 +393,8 @@ def react_no_submit(
     compaction: CompactionStrategy | None,
     truncation: Literal["auto", "disabled"] | MessageFilter,
 ) -> Agent:
-    # resolve tools
-    tools = list(tools) if tools is not None else []
+    # resolve tools (merge sample-context tools)
+    tools = _merge_sample_tools(list(tools) if tools is not None else [])
 
     # resolve prompt / system message
     system_message = _prompt_to_system_message(prompt, tools, None)
@@ -370,6 +433,19 @@ def react_no_submit(
                     state.messages.extend(messages)
                     if output:
                         state.output = output
+
+                # fire sample-context on_turn callback
+                on_turn_result = await _call_on_turn_callback()
+                if on_turn_result is False:
+                    from inspect_ai.solver._task_state import sample_state
+
+                    s = sample_state()
+                    if s is not None:
+                        s.completed = True
+                    break
+                elif isinstance(on_turn_result, str):
+                    state.messages.append(ChatMessageUser(content=on_turn_result))
+                    continue
 
                 # call the on_continue hook (if any)
                 if on_continue:
