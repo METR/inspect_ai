@@ -1,4 +1,7 @@
+from inspect_ai import Task
+from inspect_ai.dataset import Sample
 from inspect_ai.model import ChatMessageUser, ModelName
+from inspect_ai.scorer import includes
 from inspect_ai.solver import Setting, TaskState, Workspace, setting
 from inspect_ai.solver._task_state import set_sample_state
 from inspect_ai.tool import tool
@@ -91,3 +94,25 @@ def test_setting_accessor_returns_setting_from_state():
     result = setting()
     assert result is s
     assert len(result.tools) == 1
+
+
+def test_task_with_static_setting():
+    s = Setting(workspaces=(Workspace(description="test"),))
+    task = Task(
+        dataset=[Sample(input="test", target="test")],
+        setting=s,
+        scorer=includes(),
+    )
+    assert task.setting is s
+
+
+def test_task_with_factory_setting():
+    def make_setting(sample: Sample) -> Setting:
+        return Setting(tools=(addition(),))
+
+    task = Task(
+        dataset=[Sample(input="test", target="test")],
+        setting=make_setting,
+        scorer=includes(),
+    )
+    assert callable(task.setting)

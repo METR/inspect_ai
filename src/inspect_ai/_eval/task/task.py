@@ -37,6 +37,7 @@ from inspect_ai.scorer import Metric, Scorer
 from inspect_ai.scorer._reducer import ScoreReducers, create_reducers
 from inspect_ai.solver import Plan, Solver, generate
 from inspect_ai.solver._chain import chain
+from inspect_ai.solver._setting import Setting
 from inspect_ai.solver._task_state import TaskState
 from inspect_ai.util._sandbox.environment import (
     SandboxEnvironmentSpec,
@@ -76,6 +77,7 @@ class Task:
         config: GenerateConfig = GenerateConfig(),
         model_roles: dict[str, str | Model] | None = None,
         sandbox: SandboxEnvironmentType | None = None,
+        setting: Setting | Callable[[Sample], Setting] | None = None,
         approval: str | ApprovalPolicyConfig | list[ApprovalPolicy] | None = None,
         epochs: int | Epochs | None = None,
         fail_on_error: bool | float | None = None,
@@ -107,6 +109,10 @@ class Task:
             config: Model generation config for default model (does not apply to model roles)
             model_roles: Named roles for use in `get_model()`.
             sandbox: Sandbox environment type (or optionally a str or tuple with a shorthand spec)
+            setting: Execution setting for samples. Provides workspaces, custom
+                tools, and per-turn callbacks to agent scaffolding. Pass a `Setting`
+                for all samples or a callable that takes a `Sample` and returns a
+                `Setting` for per-sample configuration.
             approval: Tool use approval policies.
                 Either a path to an approval policy config file, an ApprovalPolicyConfig, or a list of approval policies. Defaults to no approval policy.
             epochs: Epochs to repeat samples for and optional score
@@ -168,6 +174,7 @@ class Task:
         self.config = config
         self.model_roles = resolve_model_roles(model_roles)
         self.sandbox = resolve_sandbox_environment(sandbox)
+        self.setting = setting
         self.approval = resolve_approval(approval)
         epochs = resolve_epochs(epochs)
         self.epochs = epochs.epochs if epochs else None
