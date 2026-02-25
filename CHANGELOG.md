@@ -2,6 +2,7 @@
 
 - vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
 - Sandbox Tools: Increase server startup timeout from 20 seconds to 120 seconds.
+- Inspect View: Presigned URL support for S3 log files, enabling direct browser-to-S3 byte-range fetches with parallel chunk downloads and a determinate progress bar for large samples.
 
 ## 0.3.183 (24 February 2026)
 
