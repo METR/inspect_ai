@@ -7,6 +7,7 @@ from inspect_ai._util._async import run_coroutine
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import exists, filesystem
 from inspect_ai.log import resolve_sample_attachments
+from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._file import (
     log_files_from_ls,
     read_eval_log,
@@ -94,10 +95,10 @@ def convert_eval_logs(
                 )
             )
         else:
-            write_eval_log(
-                read_eval_log(input_file, resolve_attachments=resolve_attachments),
-                output_file,
-            )
+            log = read_eval_log(input_file, resolve_attachments=resolve_attachments)
+            if log.samples:
+                log.samples = [condense_sample(sample) for sample in log.samples]
+            write_eval_log(log, output_file)
 
     if fs.info(path).type == "file":
         convert_file(path)
@@ -135,6 +136,7 @@ async def _stream_convert_file(
             sample = await input_recorder.read_log_sample(input_file, sample_id, epoch)
             if resolve_attachments:
                 sample = resolve_sample_attachments(sample, resolve_attachments)
+            sample = condense_sample(sample)
             await output_recorder.log_sample(
                 log_header.eval,
                 sample,
