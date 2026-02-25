@@ -273,11 +273,17 @@ def resolve_sample_attachments(
         only_core=resolve_attachments == "core",
     )
 
+    # Resolve attachment refs in message pool before using it to populate events
+    resolved_pool = {
+        k: walk_chat_message(v, content_fn, context)
+        for k, v in sample.message_pool.items()
+    }
+
     # Walk events to resolve attachment content references
     resolved_events = walk_events(sample.events, content_fn, context)
 
     # Also resolve message pool references in model events
-    resolved_events = resolve_model_event_inputs(resolved_events, sample.message_pool)
+    resolved_events = resolve_model_event_inputs(resolved_events, resolved_pool)
 
     return sample.model_copy(
         update={
