@@ -15,6 +15,7 @@
 - Testing: Migrate async tests from pytest-asyncio to anyio, enabling dual-backend (asyncio/trio) test execution via `--runtrio` flag.
 - Bugfix: Strip surrounding quotes from S3 ETag in `.eval` header-only reads so it is consistent with full reads.
 - Inspect View: Presigned URL support for S3 log files, enabling direct browser-to-S3 byte-range fetches with parallel chunk downloads and a determinate progress bar for large samples.
+- Eval Logs: Extract reusable `aload_json_exclude()` async streaming JSON utility for efficient partial log reads.
 
 ## 0.3.183 (24 February 2026)
 
