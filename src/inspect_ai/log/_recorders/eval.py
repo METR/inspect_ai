@@ -271,7 +271,12 @@ class EvalRecorder(FileRecorder):
         uuid: str | None = None,
         exclude_fields: set[str] | None = None,
     ) -> EvalSample:
-        with file(location, "rb") as z:
+        # Use readahead caching for S3 to reduce the number of small range
+        # requests during ZipFile initialisation (~7 vs ~11 with cache="none").
+        fs = filesystem(location)
+        fs_options = {"default_cache_type": "readahead"} if fs.is_s3() else {}
+
+        with file(location, "rb", fs_options=fs_options) as z:
             with ZipFile(z, mode="r") as zip:
                 try:
                     # if a uuid was specified then read the summaries and find the matching sample
