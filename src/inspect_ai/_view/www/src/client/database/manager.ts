@@ -11,17 +11,33 @@ const log = createLogger("DatabaseManager");
 export class DatabaseManager {
   private database: AppDatabase | null = null;
   private databaseHandle: string | null = null;
+  private openPromise: Promise<AppDatabase> | null = null;
 
   /**
    * Opens a database for the specified log directory.
    * If already connected to this directory, returns the existing connection.
    * If connected to a different directory, closes the current connection first.
+   * Serialized: concurrent calls for the same handle share a single open operation.
    */
   async openDatabase(databaseHandle: string): Promise<AppDatabase> {
     if (this.databaseHandle === databaseHandle && this.database) {
       return this.database;
     }
 
+    // Serialize concurrent opens for the same handle
+    if (this.openPromise) {
+      return this.openPromise;
+    }
+
+    this.openPromise = this._openDatabase(databaseHandle);
+    try {
+      return await this.openPromise;
+    } finally {
+      this.openPromise = null;
+    }
+  }
+
+  private async _openDatabase(databaseHandle: string): Promise<AppDatabase> {
     log.debug(`Opening database for log directory: ${databaseHandle}`);
 
     // Close current database if switching to a different directory

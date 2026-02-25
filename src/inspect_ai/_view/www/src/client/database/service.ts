@@ -1,3 +1,4 @@
+import { EvalSample } from "../../@types/log";
 import { createLogger } from "../../utils/logger";
 import { LogDetails, LogHandle, LogPreview, SampleSummary } from "../api/types";
 import { DatabaseManager } from "./manager";
@@ -30,6 +31,21 @@ export class DatabaseService {
 
   opened(): boolean {
     return this.manager.getDatabase() !== null;
+  }
+
+  /**
+   * Wait for the database to be opened, with a timeout.
+   * Useful when code needs to read from the DB but may run before
+   * the normal initialization flow completes.
+   */
+  async waitForOpen(timeoutMs: number = 3000): Promise<boolean> {
+    if (this.opened()) return true;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (this.opened()) return true;
+    }
+    return false;
   }
 
   /**
@@ -377,6 +393,101 @@ export class DatabaseService {
     return filtered;
   }
 
+  // === SAMPLE CACHE ===
+
+  async readCachedSample(
+    filePath: string,
+    sampleId: string | number,
+    epoch: number,
+  ): Promise<EvalSample | null> {
+    try {
+      const db = this.getDb();
+      const record = await db.log_samples.get([
+        filePath,
+        String(sampleId),
+        epoch,
+      ]);
+      if (!record) {
+        return null;
+      }
+
+      // Validate mtime against current log handle
+      const logHandle = await db.logs.where("file_path").equals(filePath).first();
+      if (logHandle?.mtime !== undefined && logHandle.mtime !== record.file_mtime) {
+        log.debug(`Sample cache stale for ${filePath} (mtime changed), removing`);
+        await db.log_samples.delete([filePath, String(sampleId), epoch]);
+        return null;
+      }
+
+      log.debug(`Sample cache hit: ${filePath} id=${sampleId} epoch=${epoch}`);
+      return record.sample;
+    } catch (error) {
+      log.error("Error reading cached sample:", error);
+      return null;
+    }
+  }
+
+  async writeCachedSample(
+    filePath: string,
+    sampleId: string | number,
+    epoch: number,
+    sample: EvalSample,
+  ): Promise<void> {
+    try {
+      const db = this.getDb();
+
+      // Get current mtime from log handle
+      const logHandle = await db.logs.where("file_path").equals(filePath).first();
+      const mtime = logHandle?.mtime ?? 0;
+
+      await db.log_samples.put({
+        file_path: filePath,
+        sample_id: String(sampleId),
+        epoch,
+        file_mtime: mtime,
+        cached_at: new Date().toISOString(),
+        sample,
+      });
+
+      log.debug(`Cached sample: ${filePath} id=${sampleId} epoch=${epoch}`);
+    } catch (error) {
+      log.error("Error caching sample:", error);
+    }
+  }
+
+  async clearCachedSamplesForFile(filePath: string): Promise<void> {
+    try {
+      const db = this.getDb();
+      const count = await db.log_samples
+        .where("file_path")
+        .equals(filePath)
+        .delete();
+      if (count > 0) {
+        log.debug(`Cleared ${count} cached samples for: ${filePath}`);
+      }
+    } catch (error) {
+      log.error("Error clearing cached samples:", error);
+    }
+  }
+
+  async cleanupOldSamples(maxAgeDays: number = 30): Promise<void> {
+    try {
+      const db = this.getDb();
+      const cutoff = new Date(
+        Date.now() - maxAgeDays * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      const count = await db.log_samples
+        .where("cached_at")
+        .below(cutoff)
+        .delete();
+      if (count > 0) {
+        log.debug(`Cleaned up ${count} old cached samples (older than ${maxAgeDays} days)`);
+      }
+    } catch (error) {
+      log.error("Error cleaning up old samples:", error);
+    }
+  }
+
   // === MANAGEMENT ===
 
   /**
@@ -390,6 +501,7 @@ export class DatabaseService {
       db.logs.clear(),
       db.log_previews.clear(),
       db.log_details.clear(),
+      db.log_samples.clear(),
     ]);
   }
 
@@ -404,6 +516,7 @@ export class DatabaseService {
       db.logs.where("file_path").equals(filePath).delete(),
       db.log_previews.where("file_path").equals(filePath).delete(),
       db.log_details.where("file_path").equals(filePath).delete(),
+      db.log_samples.where("file_path").equals(filePath).delete(),
     ]);
   }
 

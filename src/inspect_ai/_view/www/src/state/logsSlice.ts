@@ -247,6 +247,8 @@ export const createLogsSlice = (
                 return undefined;
               }
               await databaseService.openDatabase(databaseHandle);
+              // Clean up old cached samples in the background
+              databaseService.cleanupOldSamples(30).catch(() => {});
               return databaseService;
             } catch (e) {
               console.log(e);

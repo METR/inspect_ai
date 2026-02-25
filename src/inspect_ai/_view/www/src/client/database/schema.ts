@@ -1,4 +1,5 @@
 import Dexie from "dexie";
+import { EvalSample } from "../../@types/log";
 import { LogDetails, LogPreview } from "../api/types";
 
 // Logs Table - Basic file listing
@@ -36,8 +37,18 @@ export interface LogDetailsRecord {
   cached_at: string;
 }
 
+// Log Samples Table - Caches parsed samples to avoid re-downloading from S3
+export interface LogSampleRecord {
+  file_path: string;
+  sample_id: string;
+  epoch: number;
+  file_mtime: number;
+  cached_at: string;
+  sample: EvalSample;
+}
+
 // Current database schema version
-export const DB_VERSION = 9;
+export const DB_VERSION = 10;
 
 // Resolves a log dir into a database name
 function resolveDBName(databaseHandle: string): string {
@@ -50,6 +61,7 @@ export class AppDatabase extends Dexie {
   logs!: Dexie.Table<LogHandleRecord, number>;
   log_previews!: Dexie.Table<LogPreviewRecord, string>;
   log_details!: Dexie.Table<LogDetailsRecord, string>;
+  log_samples!: Dexie.Table<LogSampleRecord, [string, string, number]>;
 
   /**
    * Check if an existing database needs to be recreated due to version mismatch.
@@ -59,21 +71,20 @@ export class AppDatabase extends Dexie {
     const dbName = resolveDBName(databaseHandle);
 
     try {
-      // Check if database exists and get its version
-      const existingDb = await Dexie.exists(dbName);
-      if (!existingDb) {
+      // Use indexedDB.databases() to check version without opening a connection.
+      // Opening a temp Dexie connection and closing it leaves the underlying IDB
+      // connection open briefly, which blocks Dexie.delete() from succeeding.
+      const databases = await indexedDB.databases();
+      const existing = databases.find((db) => db.name === dbName);
+      if (!existing) {
         return false;
       }
 
-      // Open with minimal schema to check actual version
-      const tempDb = new Dexie(dbName);
-      await tempDb.open();
-      const currentVersion = tempDb.verno; // Dexie's internal version number
-      tempDb.close();
-
-      if (currentVersion !== DB_VERSION) {
+      // Dexie stores IndexedDB version as dexieVersion * 10
+      const dexieVersion = (existing.version || 0) / 10;
+      if (dexieVersion !== DB_VERSION) {
         console.log(
-          `Database version mismatch (found v${currentVersion}, expected v${DB_VERSION})`,
+          `Database version mismatch (found v${dexieVersion}, expected v${DB_VERSION})`,
         );
         return true;
       }
@@ -97,6 +108,9 @@ export class AppDatabase extends Dexie {
 
       // Complete log info from get_log_details() - includes samples
       log_details: "file_path, details.status, cached_at",
+
+      // Cached parsed samples - avoids re-downloading from S3
+      log_samples: "[file_path+sample_id+epoch], file_path, cached_at",
     });
   }
 }

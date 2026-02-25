@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from "react";
+import { EvalSample } from "../@types/log";
 import { createLogger } from "../utils/logger";
 import { useLogSelection, usePrevious, useSampleData } from "./hooks";
 import { getSamplePolling } from "./samplePollingInstance";
@@ -23,6 +24,7 @@ export function useLoadSample() {
 
   // Get store state and actions
   const api = useStore((state) => state.api);
+  const dbService = useStore((state) => state.databaseService);
   const sampleActions = useStore((state) => state.sampleActions);
   const clearListPosition = useStore(
     (state) => state.appActions.clearListPosition,
@@ -85,20 +87,43 @@ export function useLoadSample() {
           // Stop any existing polling when loading a completed sample
           getSamplePolling().stopPolling();
 
-          sampleActions.setDownloadProgress(undefined);
-          const onProgress = (bytesLoaded: number, bytesTotal: number) => {
-            sampleActions.setDownloadProgress({ bytesLoaded, bytesTotal });
-          };
+          // Check IndexedDB cache first (wait briefly for DB to be ready,
+          // since on page reload the sample load can race with DB initialization)
+          let sample: EvalSample | undefined;
+          if (dbService) {
+            const dbReady = await dbService.waitForOpen(3000);
+            if (dbReady) {
+              const cached = await dbService.readCachedSample(logFile, id, epoch);
+              if (cached) {
+                sample = cached;
+                log.debug(`CACHED SAMPLE HIT: ${id}-${epoch}`);
+              }
+            }
+          }
 
-          // Fetch the sample from the API
-          const sample = await api?.get_log_sample(
-            logFile,
-            id,
-            epoch,
-            onProgress,
-          );
-          sampleActions.setDownloadProgress(undefined);
-          log.debug(`LOADED COMPLETED SAMPLE: ${id}-${epoch}`);
+          if (!sample) {
+            sampleActions.setDownloadProgress(undefined);
+            const onProgress = (bytesLoaded: number, bytesTotal: number) => {
+              sampleActions.setDownloadProgress({ bytesLoaded, bytesTotal });
+            };
+
+            // Fetch the sample from the API
+            sample = await api?.get_log_sample(
+              logFile,
+              id,
+              epoch,
+              onProgress,
+            );
+            sampleActions.setDownloadProgress(undefined);
+            log.debug(`LOADED COMPLETED SAMPLE: ${id}-${epoch}`);
+
+            // Store in IndexedDB cache for future loads
+            if (sample && dbService?.opened()) {
+              dbService.writeCachedSample(logFile, id, epoch, sample).catch((e) => {
+                log.debug(`Failed to cache sample: ${e}`);
+              });
+            }
+          }
 
           // Discard if a newer load has started while we were waiting
           if (thisGeneration !== loadGeneration) {
@@ -138,6 +163,7 @@ export function useLoadSample() {
     },
     [
       api,
+      dbService,
       clearListPosition,
       sampleActions,
       sampleData.selectedSampleIdentifier,
