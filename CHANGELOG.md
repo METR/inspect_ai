@@ -1,6 +1,7 @@
 ## Unreleased
 
 - AzureAI: Pass `max_completion_tokens` to gpt-5 and o-series models.
+- Bugfix: Fix Inspect View showing stale sample data when rapidly switching between samples.
 
 ## 0.3.181 (23 February 2026)
 
