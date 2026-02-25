@@ -77,12 +77,21 @@ def condense_sample(sample: EvalSample, log_images: bool = True) -> EvalSample:
     messages_fn = messages_attachment_fn(attachments, log_images)
 
     context = WalkContext(message_cache={}, only_core=False)
+
+    # First pass: walk events to condense content (attachments)
+    condensed_events = walk_events(sample.events, events_fn, context)
+
+    # Second pass: build message pool from model event inputs
+    message_pool: dict[str, ChatMessage] = {}
+    condensed_events = condense_model_event_inputs(condensed_events, message_pool)
+
     return sample.model_copy(
         update={
             "input": walk_input(sample.input, messages_fn, context),
             "messages": walk_chat_messages(sample.messages, messages_fn, context),
-            "events": walk_events(sample.events, events_fn, context),
+            "events": condensed_events,
             "attachments": attachments,
+            "message_pool": message_pool,
         }
     )
 
@@ -97,6 +106,31 @@ def condense_event(
     if context is None:
         context = WalkContext(message_cache={}, only_core=False)
     return walk_event(event, event_fn, context)
+
+
+def condense_model_event_inputs(
+    events: list[Event],
+    message_pool: dict[str, ChatMessage],
+) -> list[Event]:
+    """Replace ModelEvent.input with message_pool references.
+
+    Collects all messages from ModelEvent inputs into the message_pool dict
+    (keyed by message ID), and replaces each ModelEvent's input with input_refs.
+    """
+    result = []
+    for event in events:
+        if isinstance(event, ModelEvent) and event.input:
+            refs: list[str] = []
+            for msg in event.input:
+                msg_id = msg.id
+                if msg_id is None:
+                    msg_id = f"_anon_{mm3_hash(msg.model_dump_json())}"
+                if msg_id not in message_pool:
+                    message_pool[msg_id] = msg
+                refs.append(msg_id)
+            event = event.model_copy(update={"input": [], "input_refs": refs})
+        result.append(event)
+    return result
 
 
 def events_attachment_fn(
@@ -145,6 +179,30 @@ def attachment_fn(attachments: dict[str, str]) -> Callable[[str], str]:
     return create_attachment
 
 
+def resolve_model_event_inputs(
+    events: list[Event],
+    message_pool: dict[str, ChatMessage],
+) -> list[Event]:
+    """Resolve ModelEvent input_refs back to full input lists."""
+    if not message_pool:
+        return events
+    result = []
+    for event in events:
+        if isinstance(event, ModelEvent) and event.input_refs is not None:
+            resolved_input = []
+            for ref in event.input_refs:
+                msg = message_pool.get(ref)
+                if msg is not None:
+                    resolved_input.append(msg)
+                else:
+                    logger.warning(f"Message pool ref '{ref}' not found")
+            event = event.model_copy(
+                update={"input": resolved_input, "input_refs": None}
+            )
+        result.append(event)
+    return result
+
+
 def resolve_sample_attachments(
     sample: EvalSample,
     resolve_attachments: bool | Literal["full", "core"] = "core",
@@ -181,12 +239,20 @@ def resolve_sample_attachments(
         message_cache={},
         only_core=resolve_attachments == "core",
     )
+
+    # Walk events to resolve attachment content references
+    resolved_events = walk_events(sample.events, content_fn, context)
+
+    # Also resolve message pool references in model events
+    resolved_events = resolve_model_event_inputs(resolved_events, sample.message_pool)
+
     return sample.model_copy(
         update={
             "input": walk_input(sample.input, content_fn, context),
             "messages": walk_chat_messages(sample.messages, content_fn, context),
-            "events": walk_events(sample.events, content_fn, context),
+            "events": resolved_events,
             "attachments": {},
+            "message_pool": {},
         }
     )
 
