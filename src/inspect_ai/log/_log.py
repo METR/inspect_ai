@@ -409,6 +409,13 @@ class EvalSample(BaseModel):
     attachment content) by passing `resolve_attachments=True` to log reading functions.
     """
 
+    message_pool: dict[str, ChatMessage] = Field(default_factory=dict)
+    """Pool of deduplicated messages referenced by model event input_refs.
+
+    Messages are keyed by their stable ID. When populated, ModelEvent.input_refs
+    contains ordered lists of keys into this pool instead of inline messages.
+    """
+
     limit: EvalSampleLimit | None = Field(default=None)
     """The limit that halted the sample"""
 

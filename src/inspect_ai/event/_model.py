@@ -29,6 +29,9 @@ class ModelEvent(BaseEvent):
     input: list[ChatMessage]
     """Model input (list of messages)."""
 
+    input_refs: list[str] | None = Field(default=None)
+    """Message pool references for input (used in v3+ format, replaces inline input)."""
+
     tools: list[ToolInfo]
     """Tools available to the model."""
 
