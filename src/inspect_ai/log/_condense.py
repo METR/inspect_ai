@@ -116,6 +116,7 @@ def condense_model_event_inputs(
 
     Collects all messages from ModelEvent inputs into the message_pool dict
     (keyed by message ID), and replaces each ModelEvent's input with input_refs.
+    Recurses into SubtaskEvent.events and ToolEvent.events for backward compat.
     """
     result = []
     for event in events:
@@ -129,6 +130,12 @@ def condense_model_event_inputs(
                     message_pool[msg_id] = msg
                 refs.append(msg_id)
             event = event.model_copy(update={"input": [], "input_refs": refs})
+        elif isinstance(event, (SubtaskEvent, ToolEvent)) and event.events:
+            event = event.model_copy(
+                update={
+                    "events": condense_model_event_inputs(event.events, message_pool)
+                }
+            )
         result.append(event)
     return result
 
@@ -183,7 +190,10 @@ def resolve_model_event_inputs(
     events: list[Event],
     message_pool: dict[str, ChatMessage],
 ) -> list[Event]:
-    """Resolve ModelEvent input_refs back to full input lists."""
+    """Resolve ModelEvent input_refs back to full input lists.
+
+    Recurses into SubtaskEvent.events and ToolEvent.events for backward compat.
+    """
     if not message_pool:
         return events
     result = []
@@ -199,8 +209,31 @@ def resolve_model_event_inputs(
             event = event.model_copy(
                 update={"input": resolved_input, "input_refs": None}
             )
+        elif isinstance(event, (SubtaskEvent, ToolEvent)) and event.events:
+            event = event.model_copy(
+                update={
+                    "events": resolve_model_event_inputs(event.events, message_pool)
+                }
+            )
         result.append(event)
     return result
+
+
+def resolve_sample_message_pool(sample: EvalSample) -> EvalSample:
+    """Resolve message pool references in model events.
+
+    Always called on read to ensure ModelEvent.input is populated,
+    regardless of the resolve_attachments setting.
+    """
+    if not sample.message_pool:
+        return sample
+    resolved_events = resolve_model_event_inputs(sample.events, sample.message_pool)
+    return sample.model_copy(
+        update={
+            "events": resolved_events,
+            "message_pool": {},
+        }
+    )
 
 
 def resolve_sample_attachments(

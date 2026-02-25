@@ -22,7 +22,10 @@ from inspect_ai._util.file import (
     filesystem,
 )
 from inspect_ai._util.json import to_json_safe
-from inspect_ai.log._condense import resolve_sample_attachments
+from inspect_ai.log._condense import (
+    resolve_sample_attachments,
+    resolve_sample_message_pool,
+)
 from inspect_ai.log._log import EvalSampleSummary
 
 from ._log import EvalLog, EvalMetric, EvalSample, EvalStatus
@@ -337,12 +340,17 @@ async def read_eval_log_async(
             recorder_type = recorder_type_for_format(format)
         log = await recorder_type.read_log(log_file, header_only)
 
-    # resolve attachement if requested
-    if resolve_attachments and log.samples:
-        log.samples = [
-            resolve_sample_attachments(sample, resolve_attachments)
-            for sample in log.samples
-        ]
+    # always resolve message pool refs so ModelEvent.input is populated
+    if log.samples:
+        if resolve_attachments:
+            log.samples = [
+                resolve_sample_attachments(sample, resolve_attachments)
+                for sample in log.samples
+            ]
+        else:
+            log.samples = [
+                resolve_sample_message_pool(sample) for sample in log.samples
+            ]
 
     # provide sample ids if they aren't there
     if log.eval.dataset.sample_ids is None and log.samples is not None:
@@ -513,8 +521,11 @@ async def read_eval_log_sample_async(
         log_file, id, epoch, uuid, exclude_fields, reader
     )
 
+    # always resolve message pool refs so ModelEvent.input is populated
     if resolve_attachments:
         sample = resolve_sample_attachments(sample, resolve_attachments)
+    else:
+        sample = resolve_sample_message_pool(sample)
 
     return sample
 
