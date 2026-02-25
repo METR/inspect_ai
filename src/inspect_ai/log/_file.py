@@ -517,6 +517,10 @@ async def read_eval_log_sample_async(
         recorder_type = recorder_type_for_location(log_file)
     else:
         recorder_type = recorder_type_for_format(format)
+    # message_pool must not be excluded -- it's needed to resolve ModelEvent.input
+    if exclude_fields and "message_pool" in exclude_fields:
+        exclude_fields = exclude_fields - {"message_pool"}
+
     sample = await recorder_type.read_log_sample(
         log_file, id, epoch, uuid, exclude_fields, reader
     )
