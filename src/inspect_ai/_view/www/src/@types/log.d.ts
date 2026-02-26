@@ -1334,6 +1334,10 @@ export interface EvalSample {
   error: EvalError | null;
   error_retries: ErrorRetries;
   attachments: Attachments;
+  message_pool?: Record<
+    string,
+    ChatMessageSystem | ChatMessageUser | ChatMessageAssistant | ChatMessageTool
+  >;
   limit: EvalSampleLimit | null;
 }
 /**
@@ -1724,6 +1728,7 @@ export interface ModelEvent {
   model: Model4;
   role: Role4;
   input: Input3;
+  input_refs?: string[] | null;
   tools: Tools1;
   tool_choice: ToolChoice;
   config: GenerateConfig;
