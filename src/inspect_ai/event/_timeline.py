@@ -150,6 +150,39 @@ class TimelineEvent(BaseModel):
                 return input_tokens + cache_read + cache_write + output_tokens
         return 0
 
+    @property
+    def idle_time(self) -> float:
+        """Seconds of idle time (always 0 for a single event)."""
+        return 0.0
+
+
+def _compute_idle_time(
+    content: Sequence["TimelineEvent | TimelineSpan | TimelineBranch"],
+    start_time: datetime,
+    end_time: datetime,
+) -> float:
+    """Compute idle time for a span from its children's active time.
+
+    For each child, its active time is its wall-clock duration minus its own
+    idle_time. The span's idle time is its wall-clock duration minus the sum
+    of all children's active time, clamped to >= 0.
+
+    Args:
+        content: Child nodes of the span.
+        start_time: Span start time.
+        end_time: Span end time.
+
+    Returns:
+        Idle time in seconds (>= 0).
+    """
+    wall_clock = (end_time - start_time).total_seconds()
+    total_active = 0.0
+    for child in content:
+        child_duration = (child.end_time - child.start_time).total_seconds()
+        child_active = child_duration - child.idle_time
+        total_active += child_active
+    return max(0.0, wall_clock - total_active)
+
 
 def _timeline_content_discriminator(v: Any) -> str:
     """Discriminator function for TimelineSpan.content and TimelineBranch.content."""
@@ -198,6 +231,11 @@ class TimelineSpan(BaseModel):
         """Sum of tokens from all content."""
         return _sum_tokens(self.content)
 
+    @property
+    def idle_time(self) -> float:
+        """Seconds of idle time within this span."""
+        return _compute_idle_time(self.content, self.start_time, self.end_time)
+
 
 class TimelineBranch(BaseModel):
     """A discarded alternative path from a branch point."""
@@ -220,6 +258,11 @@ class TimelineBranch(BaseModel):
     def total_tokens(self) -> int:
         """Sum of tokens from all content."""
         return _sum_tokens(self.content)
+
+    @property
+    def idle_time(self) -> float:
+        """Seconds of idle time within this branch."""
+        return _compute_idle_time(self.content, self.start_time, self.end_time)
 
 
 class OutlineNode(BaseModel):
