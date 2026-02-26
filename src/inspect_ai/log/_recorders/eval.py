@@ -14,7 +14,7 @@ from typing_extensions import override
 from inspect_ai._util.async_bytes_reader import adapt_to_reader
 from inspect_ai._util.async_zip import AsyncZipReader
 from inspect_ai._util.asyncfiles import AsyncFilesystem
-from inspect_ai._util.constants import LOG_SCHEMA_VERSION, get_deserializing_context
+from inspect_ai._util.constants import DESERIALIZING_CONTEXT, LOG_SCHEMA_VERSION
 from inspect_ai._util.error import EvalError, WriteConflictError
 from inspect_ai._util.file import FileSystem, dirname, file, filesystem
 from inspect_ai._util.json import aload_json_exclude, to_json_safe
@@ -307,8 +307,10 @@ class EvalRecorder(FileRecorder):
                         ),
                     )
             else:
-                data = json.loads(await reader.read_member_fully(filename))
-            return EvalSample.model_validate(data, context=get_deserializing_context())
+                data = json.loads(
+                    await reader.read_member_fully(_sample_filename(id, epoch))
+                )
+            return EvalSample.model_validate(data, context=DESERIALIZING_CONTEXT)
         except KeyError:
             raise IndexError(
                 f"Sample id {id} for epoch {epoch} not found in log {location}"
@@ -591,7 +593,7 @@ async def _read_log(
         data = await _read_member_json(reader, REDUCTIONS_JSON)
         reductions = [
             EvalSampleReductions.model_validate(
-                reduction, context=get_deserializing_context()
+                reduction, context=DESERIALIZING_CONTEXT
             )
             for reduction in data
         ]
@@ -606,9 +608,7 @@ async def _read_log(
             ):
                 data = await _read_member_json(reader, entry.filename)
                 samples.append(
-                    EvalSample.model_validate(
-                        data, context=get_deserializing_context()
-                    ),
+                    EvalSample.model_validate(data, context=DESERIALIZING_CONTEXT),
                 )
         sort_samples(samples)
         eval_log.samples = samples
@@ -625,7 +625,7 @@ def _read_log_from_bytes(
             with zip.open(REDUCTIONS_JSON, "r") as f:
                 reductions = [
                     EvalSampleReductions.model_validate(
-                        reduction, context=get_deserializing_context()
+                        reduction, context=DESERIALIZING_CONTEXT
                     )
                     for reduction in json.load(f)
                 ]
@@ -640,7 +640,7 @@ def _read_log_from_bytes(
                     with zip.open(name, "r") as f:
                         samples_list.append(
                             EvalSample.model_validate(
-                                json.load(f), context=get_deserializing_context()
+                                json.load(f), context=DESERIALIZING_CONTEXT
                             ),
                         )
             sort_samples(samples_list)
@@ -657,12 +657,12 @@ async def _read_header_async(
 ) -> EvalLog:
     if HEADER_JSON in entry_names:
         data = await _read_member_json(reader, HEADER_JSON)
-        log = EvalLog.model_validate(data, context=get_deserializing_context())
+        log = EvalLog.model_validate(data, context=DESERIALIZING_CONTEXT)
         log.location = location
         return log
     else:
         data = await _read_member_json(reader, _journal_path(START_JSON))
-        start = LogStart.model_validate(data, context=get_deserializing_context())
+        start = LogStart.model_validate(data, context=DESERIALIZING_CONTEXT)
         return EvalLog(
             version=start.version,
             eval=start.eval,
@@ -696,7 +696,7 @@ async def _read_summary_counter(reader: AsyncZipReader) -> int:
 def _parse_summaries(data: Any, source: str) -> list[EvalSampleSummary]:
     if isinstance(data, list):
         return [
-            EvalSampleSummary.model_validate(value, context=get_deserializing_context())
+            EvalSampleSummary.model_validate(value, context=DESERIALIZING_CONTEXT)
             for value in data
         ]
     else:
@@ -730,16 +730,12 @@ def _read_header(zip: ZipFile, location: str) -> EvalLog:
     # first see if the header is here
     if HEADER_JSON in zip.namelist():
         with zip.open(HEADER_JSON, "r") as f:
-            log = EvalLog.model_validate(
-                json.load(f), context=get_deserializing_context()
-            )
+            log = EvalLog.model_validate(json.load(f), context=DESERIALIZING_CONTEXT)
             log.location = location
             return log
     else:
         with zip.open(_journal_path(START_JSON), "r") as f:
-            start = LogStart.model_validate(
-                json.load(f), context=get_deserializing_context()
-            )
+            start = LogStart.model_validate(json.load(f), context=DESERIALIZING_CONTEXT)
         return EvalLog(
             version=start.version, eval=start.eval, plan=start.plan, location=location
         )

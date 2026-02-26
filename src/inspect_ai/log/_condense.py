@@ -223,14 +223,22 @@ def resolve_sample_message_pool(sample: EvalSample) -> EvalSample:
     """Resolve message pool references in model events.
 
     Always called on read to ensure ModelEvent.input is populated,
-    regardless of the resolve_attachments setting.
+    regardless of the resolve_attachments setting. Also deduplicates
+    sample.messages against the pool so identical messages share
+    the same object reference.
     """
     if not sample.message_pool:
         return sample
     resolved_events = resolve_model_event_inputs(sample.events, sample.message_pool)
+    # Deduplicate sample.messages against pool objects
+    resolved_messages = [
+        sample.message_pool.get(msg.id, msg) if msg.id else msg
+        for msg in sample.messages
+    ]
     return sample.model_copy(
         update={
             "events": resolved_events,
+            "messages": resolved_messages,
             "message_pool": {},
         }
     )
