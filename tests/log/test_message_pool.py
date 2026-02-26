@@ -727,3 +727,46 @@ def test_resolve_sample_message_pool_also_resolves_call_pool():
     assert len(model_events[0].call.request["messages"]) == 1
     assert model_events[0].call.request_message_refs is None
     assert resolved.call_message_pool == {}
+
+
+def test_write_read_round_trip_call_message_pool():
+    """Write a .eval file with call_message_pool and read it back."""
+    sample = _make_sample_with_call_messages()
+    condensed = condense_sample(sample)
+    log = EvalLog(
+        version=LOG_SCHEMA_VERSION,
+        status="success",
+        eval=EvalSpec(
+            task="test_task",
+            task_version=0,
+            task_id="test",
+            model="test-model",
+            dataset=EvalDataset(name="test", samples=1),
+            config=EvalConfig(),
+            created="2025-01-01T00:00:00Z",
+        ),
+        plan=EvalPlan(),
+        results=EvalResults(total_samples=1, completed_samples=1),
+        stats=EvalStats(
+            started_at="2025-01-01T00:00:00Z",
+            completed_at="2025-01-01T00:01:00Z",
+        ),
+        samples=[condensed],
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "test.eval")
+        write_eval_log(log, path)
+
+        read_log = read_eval_log(path, resolve_attachments="full")
+        assert read_log.samples is not None
+        sample = read_log.samples[0]
+
+        # call_message_pool resolved (empty)
+        assert sample.call_message_pool == {}
+
+        # call.request.messages restored
+        model_events = [e for e in sample.events if isinstance(e, ModelEvent)]
+        assert len(model_events[0].call.request["messages"]) == 1
+        assert len(model_events[1].call.request["messages"]) == 3
+        assert model_events[0].call.request_message_refs is None
