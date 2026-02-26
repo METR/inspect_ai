@@ -1,3 +1,4 @@
+import json
 from logging import getLogger
 from typing import (
     Callable,
@@ -85,6 +86,10 @@ def condense_sample(sample: EvalSample, log_images: bool = True) -> EvalSample:
     message_pool: dict[str, ChatMessage] = {}
     condensed_events = condense_model_event_inputs(condensed_events, message_pool)
 
+    # Third pass: deduplicate call.request messages
+    call_message_pool: dict[str, JsonValue] = {}
+    condensed_events = condense_model_event_calls(condensed_events, call_message_pool)
+
     return sample.model_copy(
         update={
             "input": walk_input(sample.input, messages_fn, context),
@@ -92,6 +97,7 @@ def condense_sample(sample: EvalSample, log_images: bool = True) -> EvalSample:
             "events": condensed_events,
             "attachments": attachments,
             "message_pool": message_pool,
+            "call_message_pool": call_message_pool,
         }
     )
 
@@ -134,6 +140,92 @@ def condense_model_event_inputs(
             event = event.model_copy(
                 update={
                     "events": condense_model_event_inputs(event.events, message_pool)
+                }
+            )
+        result.append(event)
+    return result
+
+
+# Known keys for messages array in provider wire formats
+_CALL_MESSAGE_KEYS = ("messages", "contents")
+
+
+def condense_model_event_calls(
+    events: list[Event],
+    call_message_pool: dict[str, JsonValue],
+) -> list[Event]:
+    """Replace call.request messages with call_message_pool references."""
+    result = []
+    for event in events:
+        if isinstance(event, ModelEvent) and event.call:
+            msg_key = next(
+                (k for k in _CALL_MESSAGE_KEYS if k in event.call.request), None
+            )
+            msgs = event.call.request.get(msg_key) if msg_key else None
+            if msgs and isinstance(msgs, list):
+                refs = []
+                for msg in msgs:
+                    h = mm3_hash(json.dumps(msg, sort_keys=True))
+                    if h not in call_message_pool:
+                        call_message_pool[h] = msg
+                    refs.append(h)
+                new_request = {
+                    k: v for k, v in event.call.request.items() if k != msg_key
+                }
+                new_call = event.call.model_copy(
+                    update={
+                        "request": new_request,
+                        "request_message_refs": refs,
+                        "request_message_key": msg_key,
+                    }
+                )
+                event = event.model_copy(update={"call": new_call})
+        elif isinstance(event, (SubtaskEvent, ToolEvent)) and event.events:
+            event = event.model_copy(
+                update={
+                    "events": condense_model_event_calls(
+                        event.events, call_message_pool
+                    )
+                }
+            )
+        result.append(event)
+    return result
+
+
+def resolve_model_event_calls(
+    events: list[Event],
+    call_message_pool: dict[str, JsonValue],
+) -> list[Event]:
+    """Restore call.request messages from call_message_pool references."""
+    if not call_message_pool:
+        return events
+    result = []
+    for event in events:
+        if (
+            isinstance(event, ModelEvent)
+            and event.call
+            and event.call.request_message_refs is not None
+        ):
+            msgs = [
+                call_message_pool[h]
+                for h in event.call.request_message_refs
+                if h in call_message_pool
+            ]
+            msg_key = event.call.request_message_key or "messages"
+            new_request = dict(event.call.request)
+            new_request[msg_key] = msgs
+            new_call = event.call.model_copy(
+                update={
+                    "request": new_request,
+                    "request_message_refs": None,
+                    "request_message_key": None,
+                }
+            )
+            event = event.model_copy(update={"call": new_call})
+        elif isinstance(event, (SubtaskEvent, ToolEvent)) and event.events:
+            event = event.model_copy(
+                update={
+                    "events": resolve_model_event_calls(event.events, call_message_pool)
                 }
             )
         result.append(event)
@@ -227,9 +319,12 @@ def resolve_sample_message_pool(sample: EvalSample) -> EvalSample:
     sample.messages against the pool so identical messages share
     the same object reference.
     """
-    if not sample.message_pool:
+    if not sample.message_pool and not sample.call_message_pool:
         return sample
     resolved_events = resolve_model_event_inputs(sample.events, sample.message_pool)
+    resolved_events = resolve_model_event_calls(
+        resolved_events, sample.call_message_pool
+    )
     # Deduplicate sample.messages against pool objects
     resolved_messages = [
         sample.message_pool.get(msg.id, msg) if msg.id else msg
@@ -240,6 +335,7 @@ def resolve_sample_message_pool(sample: EvalSample) -> EvalSample:
             "events": resolved_events,
             "messages": resolved_messages,
             "message_pool": {},
+            "call_message_pool": {},
         }
     )
 
@@ -287,11 +383,20 @@ def resolve_sample_attachments(
         for k, v in sample.message_pool.items()
     }
 
+    # Resolve attachment refs in call_message_pool values
+    resolved_call_pool: dict[str, JsonValue] = {
+        k: walk_json_value(v, content_fn, context)
+        for k, v in sample.call_message_pool.items()
+    }
+
     # Walk events to resolve attachment content references
     resolved_events = walk_events(sample.events, content_fn, context)
 
     # Also resolve message pool references in model events
     resolved_events = resolve_model_event_inputs(resolved_events, resolved_pool)
+
+    # Resolve call message pool references in model events
+    resolved_events = resolve_model_event_calls(resolved_events, resolved_call_pool)
 
     return sample.model_copy(
         update={
@@ -300,6 +405,7 @@ def resolve_sample_attachments(
             "events": resolved_events,
             "attachments": {},
             "message_pool": {},
+            "call_message_pool": {},
         }
     )
 
@@ -437,12 +543,13 @@ def walk_model_call(
     if context.get("only_core") is True:
         return call
     if call:
-        return ModelCall(
-            request=walk_json_dict(call.request, content_fn, context),
-            response=walk_json_dict(call.response, content_fn, context)
-            if call.response
-            else None,
-            time=call.time,
+        return call.model_copy(
+            update={
+                "request": walk_json_dict(call.request, content_fn, context),
+                "response": walk_json_dict(call.response, content_fn, context)
+                if call.response
+                else None,
+            }
         )
     else:
         return None

@@ -31,6 +31,7 @@ from inspect_ai.model._chat_message import (
     ChatMessageUser,
 )
 from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._model_call import ModelCall
 from inspect_ai.model._model_output import ModelOutput
 
 
@@ -512,3 +513,217 @@ def test_eval_sample_call_message_pool_defaults_empty():
     """call_message_pool should default to an empty dict."""
     sample = EvalSample(id="test", epoch=1, input="test", target="test")
     assert sample.call_message_pool == {}
+
+
+def _make_sample_with_call_messages() -> EvalSample:
+    """Create a sample where model events have call.request.messages with overlap."""
+    msg1 = {"role": "user", "content": "Hello"}
+    msg2 = {"role": "assistant", "content": "Hi"}
+    msg3 = {"role": "user", "content": "How are you?"}
+
+    call1 = ModelCall(
+        request={"model": "test", "messages": [msg1]},
+        response={"choices": []},
+    )
+    call2 = ModelCall(
+        request={"model": "test", "messages": [msg1, msg2, msg3]},
+        response={"choices": []},
+    )
+
+    event1 = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call1,
+    )
+    event2 = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call2,
+    )
+
+    return EvalSample(
+        id="test",
+        epoch=1,
+        input="test",
+        target="test",
+        events=[event1, event2],
+    )
+
+
+def test_condense_call_request_messages():
+    """condense_sample should extract call.request.messages into call_message_pool."""
+    sample = _make_sample_with_call_messages()
+    condensed = condense_sample(sample)
+
+    assert len(condensed.call_message_pool) == 3
+
+    model_events = [e for e in condensed.events if isinstance(e, ModelEvent)]
+    for event in model_events:
+        assert event.call is not None
+        assert event.call.request_message_refs is not None
+        assert "messages" not in event.call.request
+        assert event.call.request_message_key == "messages"
+
+    assert len(model_events[0].call.request_message_refs) == 1
+    assert len(model_events[1].call.request_message_refs) == 3
+
+
+def test_resolve_call_request_messages():
+    """Resolving should restore call.request.messages from refs."""
+    sample = _make_sample_with_call_messages()
+    condensed = condense_sample(sample)
+    resolved = resolve_sample_attachments(condensed, "full")
+
+    model_events = [e for e in resolved.events if isinstance(e, ModelEvent)]
+    assert len(model_events[0].call.request["messages"]) == 1
+    assert len(model_events[1].call.request["messages"]) == 3
+    assert model_events[0].call.request_message_refs is None
+    assert model_events[1].call.request_message_refs is None
+    assert resolved.call_message_pool == {}
+
+
+def test_call_pool_round_trip_content_preserved():
+    """Condense then resolve should preserve message content exactly."""
+    sample = _make_sample_with_call_messages()
+    orig_events = [e for e in sample.events if isinstance(e, ModelEvent)]
+    orig_msgs = [e.call.request["messages"] for e in orig_events]
+
+    condensed = condense_sample(sample)
+    resolved = resolve_sample_attachments(condensed, "full")
+
+    resolved_events = [e for e in resolved.events if isinstance(e, ModelEvent)]
+    for orig, res in zip(orig_msgs, resolved_events):
+        assert orig == res.call.request["messages"]
+
+
+def test_condense_call_nested_in_tool_event():
+    """ModelEvents nested inside ToolEvent.events should have calls condensed."""
+    msg = {"role": "user", "content": "Hello"}
+    call = ModelCall(
+        request={"model": "test", "messages": [msg]},
+        response={"choices": []},
+    )
+    nested = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call,
+    )
+    tool_event = ToolEvent(
+        id="tool-1",
+        function="my_tool",
+        arguments={},
+        events=[nested],
+    )
+    sample = EvalSample(
+        id="test",
+        epoch=1,
+        input="test",
+        target="test",
+        events=[tool_event],
+    )
+    condensed = condense_sample(sample)
+
+    assert len(condensed.call_message_pool) == 1
+    tool_events = [e for e in condensed.events if isinstance(e, ToolEvent)]
+    nested_model = [e for e in tool_events[0].events if isinstance(e, ModelEvent)]
+    assert nested_model[0].call.request_message_refs is not None
+
+
+def test_condense_call_no_messages_key():
+    """If call.request has no messages key, it should be left unchanged."""
+    call = ModelCall(
+        request={"model": "test", "prompt": "hello"},
+        response={"choices": []},
+    )
+    event = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call,
+    )
+    sample = EvalSample(
+        id="test",
+        epoch=1,
+        input="test",
+        target="test",
+        events=[event],
+    )
+    condensed = condense_sample(sample)
+
+    assert condensed.call_message_pool == {}
+    model_events = [e for e in condensed.events if isinstance(e, ModelEvent)]
+    assert model_events[0].call.request_message_refs is None
+    assert model_events[0].call.request["prompt"] == "hello"
+
+
+def test_resolve_call_pool_missing_ref():
+    """Missing hash refs should be silently dropped."""
+    from inspect_ai.log._condense import resolve_model_event_calls
+
+    call = ModelCall(
+        request={"model": "test"},
+        response=None,
+        request_message_refs=["exists", "missing"],
+        request_message_key="messages",
+    )
+    event = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call,
+    )
+    pool = {"exists": {"role": "user", "content": "Hello"}}
+    result = resolve_model_event_calls([event], pool)
+    assert len(result[0].call.request["messages"]) == 1
+
+
+def test_resolve_sample_message_pool_also_resolves_call_pool():
+    """resolve_sample_message_pool should also resolve call_message_pool."""
+    msg = {"role": "user", "content": "Hello"}
+    call = ModelCall(
+        request={"model": "test"},
+        response=None,
+        request_message_refs=["h1"],
+        request_message_key="messages",
+    )
+    event = ModelEvent(
+        model="test-model",
+        input=[],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput(),
+        call=call,
+    )
+    sample = EvalSample(
+        id="test",
+        epoch=1,
+        input="test",
+        target="test",
+        call_message_pool={"h1": msg},
+        events=[event],
+    )
+    resolved = resolve_sample_message_pool(sample)
+
+    model_events = [e for e in resolved.events if isinstance(e, ModelEvent)]
+    assert len(model_events[0].call.request["messages"]) == 1
+    assert model_events[0].call.request_message_refs is None
+    assert resolved.call_message_pool == {}
