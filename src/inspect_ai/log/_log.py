@@ -6,6 +6,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     PrivateAttr,
     model_validator,
 )
@@ -414,6 +415,13 @@ class EvalSample(BaseModel):
 
     Messages are keyed by their stable ID. When populated, ModelEvent.input_refs
     contains ordered lists of keys into this pool instead of inline messages.
+    """
+
+    call_message_pool: dict[str, JsonValue] = Field(default_factory=dict)
+    """Pool of raw API request messages keyed by content hash (mm3_hash of JSON).
+
+    When populated, ModelCall.request_message_refs holds ordered hash lists
+    and call.request omits the messages key. Resolved on read.
     """
 
     limit: EvalSampleLimit | None = Field(default=None)

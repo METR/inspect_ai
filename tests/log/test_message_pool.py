@@ -493,3 +493,22 @@ def test_model_call_request_message_refs_defaults_none():
     call = ModelCall(request={"model": "test"}, response=None)
     assert call.request_message_refs is None
     assert call.request_message_key is None
+
+
+def test_eval_sample_call_message_pool_field():
+    """EvalSample should accept an optional call_message_pool dict."""
+    pool = {"h1": {"role": "user", "content": "Hello"}}
+    sample = EvalSample(
+        id="test",
+        epoch=1,
+        input="test",
+        target="test",
+        call_message_pool=pool,
+    )
+    assert sample.call_message_pool == pool
+
+
+def test_eval_sample_call_message_pool_defaults_empty():
+    """call_message_pool should default to an empty dict."""
+    sample = EvalSample(id="test", epoch=1, input="test", target="test")
+    assert sample.call_message_pool == {}
