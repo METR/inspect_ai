@@ -42,6 +42,12 @@ class ModelCall(BaseModel):
     time: float | None = Field(default=None)
     """Time taken for underlying model call."""
 
+    request_message_refs: list[str] | None = Field(default=None)
+    """Hashes of request messages stored in EvalSample.call_message_pool."""
+
+    request_message_key: str | None = Field(default=None)
+    """Key under which messages lived in call.request ('messages' or 'contents')."""
+
     _filter: ModelCallFilter | None = PrivateAttr(default=None)
 
     @staticmethod

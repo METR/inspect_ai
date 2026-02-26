@@ -470,3 +470,26 @@ def test_resolve_nested_events_in_subtask_event():
     assert len(nested_model[0].input) == 1
     assert nested_model[0].input[0].content == "Hello"
     assert nested_model[0].input_refs is None
+
+
+def test_model_call_request_message_refs_field():
+    """ModelCall should accept optional request_message_refs and request_message_key."""
+    from inspect_ai.model._model_call import ModelCall
+
+    call = ModelCall(
+        request={"model": "test"},
+        response=None,
+        request_message_refs=["hash1", "hash2"],
+        request_message_key="messages",
+    )
+    assert call.request_message_refs == ["hash1", "hash2"]
+    assert call.request_message_key == "messages"
+
+
+def test_model_call_request_message_refs_defaults_none():
+    """request_message_refs and request_message_key should default to None."""
+    from inspect_ai.model._model_call import ModelCall
+
+    call = ModelCall(request={"model": "test"}, response=None)
+    assert call.request_message_refs is None
+    assert call.request_message_key is None
