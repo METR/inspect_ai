@@ -1,5 +1,10 @@
 import { EvalSample } from "../@types/log";
-import { Event, SampleState, SampleStatus } from "../app/types";
+import {
+  DownloadProgress,
+  Event,
+  SampleState,
+  SampleStatus,
+} from "../app/types";
 import { kSampleMessagesTabId } from "../constants";
 import {
   cleanupSamplePolling,
@@ -28,8 +33,15 @@ export interface SampleSlice {
     getSelectedSample: () => EvalSample | undefined;
     clearSelectedSample: () => void;
 
+    prepareForSampleLoad: (
+      logFile: string,
+      id: number | string,
+      epoch: number,
+    ) => void;
+
     setSampleStatus: (status: SampleStatus) => void;
     setSampleError: (error: Error | undefined) => void;
+    setDownloadProgress: (progress: DownloadProgress | undefined) => void;
 
     setCollapsedEvents: (
       scope: string,
@@ -80,6 +92,7 @@ const initialState: SampleState = {
   sampleInState: false,
   sampleStatus: "ok",
   sampleError: undefined,
+  downloadProgress: undefined,
 
   visiblePopover: undefined,
 
@@ -153,6 +166,24 @@ export const createSampleSlice = (
           state.sample.sampleInState = false;
           state.sample.runningEvents = [];
           state.sample.sampleStatus = "ok";
+          state.sample.downloadProgress = undefined;
+          state.log.selectedSampleHandle = undefined;
+        });
+      },
+      prepareForSampleLoad: (
+        logFile: string,
+        id: number | string,
+        epoch: number,
+      ) => {
+        getSamplePolling().stopPolling();
+        selectedSampleRef.current = undefined;
+        set((state) => {
+          state.sample.selectedSampleObject = undefined;
+          state.sample.sampleInState = false;
+          state.sample.runningEvents = [];
+          state.sample.sampleStatus = "loading";
+          state.sample.sampleError = undefined;
+          state.sample.sample_identifier = { logFile, id, epoch };
           state.log.selectedSampleHandle = undefined;
         });
       },
@@ -163,6 +194,10 @@ export const createSampleSlice = (
       setSampleError: (error: Error | undefined) =>
         set((state) => {
           state.sample.sampleError = error;
+        }),
+      setDownloadProgress: (progress: DownloadProgress | undefined) =>
+        set((state) => {
+          state.sample.downloadProgress = progress;
         }),
       setCollapsedEvents: (
         scope: string,

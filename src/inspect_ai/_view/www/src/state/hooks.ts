@@ -250,6 +250,7 @@ export const useSampleData = () => {
   const runningEvents = useStore(
     (state) => state.sample.runningEvents,
   ) as Events;
+  const downloadProgress = useStore((state) => state.sample.downloadProgress);
   return useMemo(() => {
     return {
       selectedSampleIdentifier,
@@ -258,6 +259,7 @@ export const useSampleData = () => {
       error: sampleError,
       getSelectedSample,
       running: runningEvents,
+      downloadProgress,
     };
   }, [
     sampleStatus,
@@ -266,6 +268,7 @@ export const useSampleData = () => {
     selectedSampleIdentifier,
     sampleNeedsReload,
     runningEvents,
+    downloadProgress,
   ]);
 };
 

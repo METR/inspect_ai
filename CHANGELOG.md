@@ -16,6 +16,8 @@
 - Inspect View: Improve virtualized find in transcript by matching event titles as well as contents.
 - Testing: Migrate async tests from pytest-asyncio to anyio, enabling dual-backend (asyncio/trio) test execution via `--runtrio` flag.
 - Bugfix: Strip surrounding quotes from S3 ETag in `.eval` header-only reads so it is consistent with full reads.
+- Inspect View: Presigned URL support for S3 log files, enabling direct browser-to-S3 byte-range fetches with parallel chunk downloads and a determinate progress bar for large samples.
+- Eval Logs: Reduce S3 range requests during sample reads and batch log-headers validation.
 
 ## 0.3.183 (24 February 2026)
 
@@ -28,6 +30,7 @@
 
 - AzureAI: Pass `max_completion_tokens` to gpt-5 and o-series models.
 - Events: Add timeline functions for providing additional structure for event viewing and traversal.
+- Bugfix: Fix Inspect View showing stale sample data when rapidly switching between samples.
 
 ## 0.3.181 (23 February 2026)
 
