@@ -3,6 +3,7 @@
 - Model API: Add SageMaker provider for invoking models hosted on AWS SageMaker endpoints.
 - Model API: Normalize handling of cached tokens in `ModelUsage` (input tokens now excludes cached tokens whereas previously it included them for some providers).
 - Model API: Track model usage by model role in addition to globally.
+- OpenAI: Capture system and user messages in compaction responses.
 - OpenAI: Warn user when reasoning options are passed to non-reasoning model.
 - OpenAI: Pass through `phase` for gpt-5.3-codex models.
 - OpenAI Compatible: Re-create closed httpx client after disconnect.
