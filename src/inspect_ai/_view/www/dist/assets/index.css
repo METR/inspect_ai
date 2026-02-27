@@ -16785,12 +16785,19 @@ button._segment_mhb7y_9 {
   background: var(--inspect-input-background);
 }
 
-#inspect-find-no-results {
-  font-size: 0.9em;
-  opacity: 0;
+.findBand-match-count {
+  font-size: 0.85em;
   margin-top: auto;
   margin-bottom: auto;
   margin-right: 0.5em;
+  white-space: nowrap;
+  color: var(--inspect-find-foreground);
+  opacity: 0.7;
+}
+
+.findBand-no-results {
+  opacity: 1;
+  color: var(--bs-danger, #dc3545);
 }
 
 .findBand .btn.next,
@@ -17841,24 +17848,33 @@ button._segment_mhb7y_9 {
   overflow-wrap: break-word;
   margin-bottom: 0;
 }
-._explanation_1k2k0_1 {
+._scoreHighlight_2le0c_1 {
+  border-left: 3px solid var(--bs-success);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--bs-success) 8%, transparent) 0%,
+    transparent 100%
+  );
+}
+
+._explanation_2le0c_10 {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   column-gap: 1em;
   margin: 0.5em 0;
 }
 
-._wrappingContent_1k2k0_8 {
+._wrappingContent_2le0c_17 {
   word-break: break-word;
   overflow-wrap: anywhere;
 }
 
-._separator_1k2k0_13 {
+._separator_2le0c_22 {
   grid-column: 1 / -1;
   border-bottom: solid 1px var(--bs-light-border-subtle);
 }
 
-._metadata_1k2k0_18 {
+._metadata_2le0c_27 {
   margin: 0.5em 0;
 }
 .ap-default-term-ff {
