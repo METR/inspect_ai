@@ -1,6 +1,32 @@
 ## Unreleased
 
 - Model API: Normalize handling of cached tokens in `ModelUsage` (input tokens now excludes cached tokens whereas previously it included them for some providers).
+- Model API: Track model usage by model role in addition to globally.
+- OpenAI: Warn user when reasoning options are passed to non-reasoning model.
+- OpenAI: Pass through `phase` for gpt-5.3-codex models.
+- OpenAI Compatible: Re-create closed httpx client after disconnect.
+- Anthropic: Support ANTHROPIC_AUTH_TOKEN for OAuth Bearer authentication.
+- vLLM: Support for LoRA (Low-Rank Adaptation) via `--enable-lora` server option and LoRA-tuned server startup logic.
+- OpenRouter: Improved capture of reasoning summaries for Gemini models.
+- Agent Bridge: Only require `openai` package when bridging the openai completions or reaponses API.
+- Sandbox Tools: Increase server startup timeout from 20 seconds to 120 seconds.
+- Timelines: Improve agent detection logic in `timeline_build()`.
+- Performance: Share a single `AsyncFilesystem` via ContextVar within each async context, eliminating redundant S3 client creation and connection pool fragmentation.
+- Inspect View: Improve virtualized find in transcript by matching event titles as well as contents.
+- Testing: Migrate async tests from pytest-asyncio to anyio, enabling dual-backend (asyncio/trio) test execution via `--runtrio` flag.
+- Bugfix: Strip surrounding quotes from S3 ETag in `.eval` header-only reads so it is consistent with full reads.
+
+## 0.3.183 (24 February 2026)
+
+- Improved naming and typeinfo for `exec_remote()` output stream events.
+- Scoring: Don't use task level metric overrides when appending scores to an existing log.
+- Inspect View: Add support for downloading sample JSON.
+- Inspect View: Server returns correct content length for responses.
+
+## 0.3.182 (24 February 2026)
+
+- AzureAI: Pass `max_completion_tokens` to gpt-5 and o-series models.
+- Events: Add timeline functions for providing additional structure for event viewing and traversal.
 
 ## 0.3.181 (23 February 2026)
 
