@@ -365,9 +365,16 @@ class SampleBufferDatabase(SampleBuffer):
         epoch: int,
         after_event_id: int | None = None,
         after_attachment_id: int | None = None,
+        after_message_pool_id: int | None = None,
+        after_call_pool_id: int | None = None,
     ) -> SampleData | None:
         return self._get_sample_data_sync(
-            id, epoch, after_event_id, after_attachment_id
+            id,
+            epoch,
+            after_event_id,
+            after_attachment_id,
+            after_message_pool_id,
+            after_call_pool_id,
         )
 
     @contextmanager
