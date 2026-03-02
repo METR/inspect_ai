@@ -133,6 +133,7 @@ export type MessageLimit = number | null;
 export type TokenLimit = number | null;
 export type TimeLimit = number | null;
 export type WorkingLimit = number | null;
+export type CostLimit = number | null;
 export type MaxSamples = number | null;
 export type MaxTasks = number | null;
 export type MaxSubprocesses = number | null;
@@ -141,6 +142,7 @@ export type SandboxCleanup = boolean | null;
 export type LogSamples = boolean | null;
 export type LogRealtime = boolean | null;
 export type LogImages = boolean | null;
+export type LogModelApi = boolean | null;
 export type LogBuffer = number | null;
 export type LogShared = number | null;
 export type ScoreDisplay = boolean | null;
@@ -224,6 +226,7 @@ export type TotalTokens = number;
 export type InputTokensCacheWrite = number | null;
 export type InputTokensCacheRead = number | null;
 export type ReasoningTokens1 = number | null;
+export type TotalCost = number | null;
 export type Message = string;
 export type Traceback = string;
 export type TracebackAnsi = string;
@@ -500,6 +503,7 @@ export type Type17 =
   | "time"
   | "working"
   | "token"
+  | "cost"
   | "operator"
   | "custom";
 export type Message2 = string;
@@ -563,6 +567,7 @@ export type Input3 = (
   | ChatMessageAssistant
   | ChatMessageTool
 )[];
+export type InputRefs = number[][] | null;
 export type Name9 = string;
 export type Description2 = string;
 export type Type18 = "object";
@@ -582,7 +587,10 @@ export type Cache1 = ("read" | "write") | null;
 export type Response = {
   [k: string]: JsonValue;
 } | null;
+export type Error3 = boolean | null;
 export type Time1 = number | null;
+export type CallRefs = number[][] | null;
+export type CallKey = string | null;
 export type Completed1 = string | null;
 export type WorkingTime = number | null;
 export type Uuid6 = string | null;
@@ -611,6 +619,7 @@ export type Events1 = unknown[];
 export type Completed2 = string | null;
 export type WorkingTime1 = number | null;
 export type Agent = string | null;
+export type AgentSpanId = string | null;
 export type Failed = boolean | null;
 export type MessageId = string | null;
 export type Uuid7 = string | null;
@@ -640,6 +649,7 @@ export type Metadata25 = {
 } | null;
 export type Pending8 = boolean | null;
 export type Event8 = "compaction";
+export type Type20 = "summary" | "edit" | "trim";
 export type TokensBefore = number | null;
 export type TokensAfter = number | null;
 export type Source4 = string | null;
@@ -666,6 +676,9 @@ export type Event10 = "score";
 export type Target2 = string | string[] | null;
 export type Intermediate = boolean;
 export type ModelUsage2 = {
+  [k: string]: ModelUsage1;
+} | null;
+export type RoleUsage1 = {
   [k: string]: ModelUsage1;
 } | null;
 export type Uuid11 = string | null;
@@ -732,7 +745,7 @@ export type Pending15 = boolean | null;
 export type Event15 = "span_begin";
 export type Id10 = string;
 export type ParentId = string | null;
-export type Type20 = string | null;
+export type Type21 = string | null;
 export type Name12 = string;
 export type Uuid16 = string | null;
 export type SpanId16 = string | null;
@@ -754,7 +767,7 @@ export type Metadata34 = {
 export type Pending17 = boolean | null;
 export type Event17 = "step";
 export type Action1 = "begin" | "end";
-export type Type21 = string | null;
+export type Type22 = string | null;
 export type Name13 = string;
 export type Uuid18 = string | null;
 export type SpanId18 = string | null;
@@ -766,7 +779,7 @@ export type Metadata35 = {
 export type Pending18 = boolean | null;
 export type Event18 = "subtask";
 export type Name14 = string;
-export type Type22 = string | null;
+export type Type23 = string | null;
 export type Events2 = unknown[];
 export type Completed3 = string | null;
 export type WorkingTime2 = number | null;
@@ -791,18 +804,64 @@ export type Events = (
   | StepEvent
   | SubtaskEvent
 )[];
+export type Timelines = Timeline[] | null;
+export type Name15 = string;
+export type Description3 = string;
+export type Type24 = "span";
+export type Id12 = string;
+export type Name16 = string;
+export type SpanType = string | null;
+export type Type25 = "event";
+export type Event19 =
+  | SampleInitEvent
+  | SampleLimitEvent
+  | SandboxEvent
+  | StateEvent
+  | StoreEvent
+  | ModelEvent
+  | ToolEvent
+  | ApprovalEvent
+  | CompactionEvent
+  | InputEvent
+  | ScoreEvent
+  | ScoreEditEvent
+  | ErrorEvent
+  | LoggerEvent
+  | InfoEvent
+  | SpanBeginEvent
+  | SpanEndEvent
+  | StepEvent
+  | SubtaskEvent;
+export type Content6 = (TimelineEvent | TimelineSpan)[];
+export type Type26 = "branch";
+export type ForkedAt = string;
+export type Content7 = (TimelineEvent | TimelineSpan)[];
+export type Branches = TimelineBranch[];
+export type Description4 = string | null;
+export type Utility = boolean;
+export type Event20 = string;
+export type Children = OutlineNode[];
+export type Nodes = OutlineNode[];
 export type StartedAt1 = string | null;
 export type CompletedAt1 = string | null;
 export type TotalTime = number | null;
 export type WorkingTime3 = number | null;
 export type Uuid19 = string | null;
 export type ErrorRetries = EvalError[] | null;
-export type Type23 =
+export type MessagePool = (
+  | ChatMessageSystem
+  | ChatMessageUser
+  | ChatMessageAssistant
+  | ChatMessageTool
+)[];
+export type CallPool = JsonValue[];
+export type Type27 =
   | "context"
   | "time"
   | "working"
   | "message"
   | "token"
+  | "cost"
   | "operator"
   | "custom";
 export type Limit2 = number;
@@ -828,7 +887,7 @@ export type Samples2 = EvalSampleScore[];
 export type Location1 = string;
 export type Etag = string | null;
 export type EvalSetId1 = string;
-export type Name15 = string | null;
+export type Name17 = string | null;
 export type TaskId1 = string;
 export type TaskFile1 = string | null;
 export type Model5 = string;
@@ -1039,6 +1098,7 @@ export interface EvalConfig {
   token_limit: TokenLimit;
   time_limit: TimeLimit;
   working_limit: WorkingLimit;
+  cost_limit: CostLimit;
   max_samples: MaxSamples;
   max_tasks: MaxTasks;
   max_subprocesses: MaxSubprocesses;
@@ -1047,6 +1107,7 @@ export interface EvalConfig {
   log_samples: LogSamples;
   log_realtime: LogRealtime;
   log_images: LogImages;
+  log_model_api: LogModelApi;
   log_buffer: LogBuffer;
   log_shared: LogShared;
   score_display: ScoreDisplay;
@@ -1229,6 +1290,7 @@ export interface EvalStats {
   started_at: StartedAt;
   completed_at: CompletedAt;
   model_usage: ModelUsage;
+  role_usage: RoleUsage;
 }
 export interface ModelUsage {
   [k: string]: ModelUsage1;
@@ -1243,6 +1305,10 @@ export interface ModelUsage1 {
   input_tokens_cache_write: InputTokensCacheWrite;
   input_tokens_cache_read: InputTokensCacheRead;
   reasoning_tokens: ReasoningTokens1;
+  total_cost: TotalCost;
+}
+export interface RoleUsage {
+  [k: string]: ModelUsage1;
 }
 /**
  * Eval error details.
@@ -1270,7 +1336,9 @@ export interface EvalSample {
   metadata: Metadata15;
   store: Store;
   events: Events;
+  timelines: Timelines;
   model_usage: ModelUsage3;
+  role_usage: RoleUsage2;
   started_at: StartedAt1;
   completed_at: CompletedAt1;
   total_time: TotalTime;
@@ -1280,6 +1348,8 @@ export interface EvalSample {
   error: EvalError | null;
   error_retries: ErrorRetries;
   attachments: Attachments;
+  message_pool: MessagePool;
+  call_pool: CallPool;
   limit: EvalSampleLimit | null;
 }
 /**
@@ -1670,6 +1740,7 @@ export interface ModelEvent {
   model: Model4;
   role: Role4;
   input: Input3;
+  input_refs: InputRefs;
   tools: Tools1;
   tool_choice: ToolChoice;
   config: GenerateConfig;
@@ -1736,7 +1807,10 @@ export interface ToolFunction {
 export interface ModelCall {
   request: Request;
   response: Response;
+  error: Error3;
   time: Time1;
+  call_refs: CallRefs;
+  call_key: CallKey;
 }
 export interface Request {
   [k: string]: JsonValue;
@@ -1764,6 +1838,7 @@ export interface ToolEvent {
   completed: Completed2;
   working_time: WorkingTime1;
   agent: Agent;
+  agent_span_id: AgentSpanId;
   failed: Failed;
   message_id: MessageId;
 }
@@ -1810,6 +1885,7 @@ export interface CompactionEvent {
   metadata: Metadata25;
   pending: Pending8;
   event: Event8;
+  type: Type20;
   tokens_before: TokensBefore;
   tokens_after: TokensAfter;
   source: Source4;
@@ -1846,6 +1922,7 @@ export interface ScoreEvent {
   target: Target2;
   intermediate: Intermediate;
   model_usage: ModelUsage2;
+  role_usage: RoleUsage1;
 }
 /**
  * Event recorded when a score is edited.
@@ -1926,7 +2003,7 @@ export interface SpanBeginEvent {
   event: Event15;
   id: Id10;
   parent_id: ParentId;
-  type: Type20;
+  type: Type21;
   name: Name12;
 }
 /**
@@ -1954,7 +2031,7 @@ export interface StepEvent {
   pending: Pending17;
   event: Event17;
   action: Action1;
-  type: Type21;
+  type: Type22;
   name: Name13;
 }
 /**
@@ -1969,7 +2046,7 @@ export interface SubtaskEvent {
   pending: Pending18;
   event: Event18;
   name: Name14;
-  type: Type22;
+  type: Type23;
   input: Input5;
   result: Result3;
   events: Events2;
@@ -1982,7 +2059,64 @@ export interface Input5 {
 export interface Result3 {
   [k: string]: unknown;
 }
+/**
+ * A named timeline view over a transcript.
+ *
+ * Multiple timelines allow different interpretations of the same event
+ * stream — e.g. a default agent-centric view alongside an alternative
+ * grouping or filtered view.
+ */
+export interface Timeline {
+  name: Name15;
+  description: Description3;
+  root: TimelineSpan;
+}
+/**
+ * A span of execution — agent, scorer, tool, or root.
+ */
+export interface TimelineSpan {
+  type: Type24;
+  id: Id12;
+  name: Name16;
+  span_type: SpanType;
+  content: Content6;
+  branches: Branches;
+  description: Description4;
+  utility: Utility;
+  outline: Outline | null;
+}
+/**
+ * Wraps a single Event.
+ */
+export interface TimelineEvent {
+  type: Type25;
+  event: Event19;
+}
+/**
+ * A discarded alternative path from a branch point.
+ */
+export interface TimelineBranch {
+  type: Type26;
+  forked_at: ForkedAt;
+  content: Content7;
+}
+/**
+ * Hierarchical outline of events for an agent.
+ */
+export interface Outline {
+  nodes: Nodes;
+}
+/**
+ * A node in an agent's outline, referencing an event by UUID.
+ */
+export interface OutlineNode {
+  event: Event20;
+  children: Children;
+}
 export interface ModelUsage3 {
+  [k: string]: ModelUsage1;
+}
+export interface RoleUsage2 {
   [k: string]: ModelUsage1;
 }
 export interface Attachments {
@@ -1992,7 +2126,7 @@ export interface Attachments {
  * Limit encountered by sample.
  */
 export interface EvalSampleLimit {
-  type: Type23;
+  type: Type27;
   limit: Limit2;
 }
 /**
@@ -2019,7 +2153,7 @@ export interface EvalSet {
   tasks: Tasks;
 }
 export interface EvalSetTask {
-  name: Name15;
+  name: Name17;
   task_id: TaskId1;
   task_file: TaskFile1;
   task_args: TaskArgs1;

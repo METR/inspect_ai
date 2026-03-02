@@ -23,6 +23,7 @@ from inspect_ai._util.file import (
 from inspect_ai._util.json import to_json_safe
 from inspect_ai.log._condense import resolve_sample_attachments
 from inspect_ai.log._log import EvalSampleSummary
+from inspect_ai.log._pool import resolve_sample_message_pool
 
 from ._log import EvalLog, EvalMetric, EvalSample, EvalStatus
 from ._recorders import (
@@ -339,12 +340,14 @@ async def read_eval_log_async(
             recorder_type = recorder_type_for_format(format)
         log = await recorder_type.read_log(log_file, header_only, async_fs)
 
-    # resolve attachement if requested
-    if resolve_attachments and log.samples:
-        log.samples = [
-            resolve_sample_attachments(sample, resolve_attachments)
-            for sample in log.samples
-        ]
+    # always resolve message pool refs so ModelEvent.input is populated
+    if log.samples:
+        log.samples = [resolve_sample_message_pool(sample) for sample in log.samples]
+        if resolve_attachments:
+            log.samples = [
+                resolve_sample_attachments(sample, resolve_attachments)
+                for sample in log.samples
+            ]
 
     # provide sample ids if they aren't there
     if log.eval.dataset.sample_ids is None and log.samples is not None:
@@ -493,10 +496,20 @@ async def read_eval_log_sample_async(
         recorder_type = recorder_type_for_location(log_file)
     else:
         recorder_type = recorder_type_for_format(format)
+    if exclude_fields:
+        if "events" not in exclude_fields:
+            # pools are needed to resolve refs in events
+            exclude_fields = exclude_fields - {"message_pool", "call_pool"}
+        else:
+            # no events means pools are useless
+            exclude_fields = exclude_fields | {"message_pool", "call_pool"}
+
     sample = await recorder_type.read_log_sample(
         log_file, id, epoch, uuid, exclude_fields
     )
 
+    # always resolve message pool refs so ModelEvent.input is populated
+    sample = resolve_sample_message_pool(sample)
     if resolve_attachments:
         sample = resolve_sample_attachments(sample, resolve_attachments)
 
