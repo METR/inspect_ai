@@ -1,10 +1,11 @@
 from contextlib import AbstractAsyncContextManager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from os import stat
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Callable, Coroutine, TypeVar, cast
 from urllib.parse import urlparse
 
+import anyio
 import anyio.to_thread
 import boto3
 from aiobotocore.config import AioConfig
@@ -15,7 +16,7 @@ from botocore.config import Config
 from typing_extensions import override
 
 from inspect_ai._util._async import current_async_backend
-from inspect_ai._util.file import file, filesystem
+from inspect_ai._util.file import FileInfo, file, filesystem
 
 
 class _BytesByteReceiveStream(ByteReceiveStream):
@@ -128,25 +129,34 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
     2. Use boto3 with anyio.to_thread when using s3 under the trio backend
     3. Use fsspec when using any other filesystem
 
-    Call close() when finished with the filesystem (or use it as a context manager)
+    When used as a context manager, the filesystem is registered in a ContextVar
+    so that it is shared with all downstream code within the same async context.
+    If a shared filesystem already exists, the context manager reuses it and does
+    not close it on exit (the original owner handles cleanup).
     """
 
-    _s3_client: Any | None = None
-    _s3_client_async: Any | None = None
+    def __init__(self) -> None:
+        self._s3_client: Any | None = None
+        self._s3_client_async: Any | None = None
+        self._s3_lock = anyio.Lock()
+        self._owns_context: bool = False
 
     async def get_size(self, filename: str) -> int:
+        return (await self.info(filename)).size
+
+    async def info(self, filename: str) -> FileInfo:
         if is_s3_filename(filename):
             bucket, key = s3_bucket_and_key(filename)
             if current_async_backend() == "asyncio":
                 response = await (await self.s3_client_async()).head_object(
                     Bucket=bucket, Key=key
                 )
-                return cast(int, response["ContentLength"])
+                return _s3_head_to_file_info(filename, response)
             return await anyio.to_thread.run_sync(
-                s3_get_size, self.s3_client(), bucket, key
+                s3_info, self.s3_client(), bucket, key, filename
             )
         else:
-            return stat(_local_path(filename)).st_size
+            return filesystem(filename).info(filename)
 
     async def read_file(self, filename: str) -> bytes:
         if is_s3_filename(filename):
@@ -255,20 +265,33 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
                 f.write(content)
 
     @override
+    async def __aenter__(self) -> "AsyncFilesystem":
+        existing = _current_async_fs.get()
+        if existing is not None:
+            self._owns_context = False
+            return existing
+        self._owns_context = True
+        _current_async_fs.set(self)
+        return self
+
+    @override
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        await self.close()
+        if self._owns_context:
+            _current_async_fs.set(None)
+            await self.close()
 
     async def close(
         self,
     ) -> None:
         if self._s3_client_async is not None:
-            await self._s3_client_async.__aexit__(None, None, None)
+            client = self._s3_client_async
             self._s3_client_async = None
+            await client.__aexit__(None, None, None)
 
     def s3_client(self) -> Any:
         if self._s3_client is None:
@@ -282,23 +305,35 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
 
     async def s3_client_async(self) -> Any:
         if self._s3_client_async is None:
-            import aioboto3
-
-            session = aioboto3.Session()
-            config = AioConfig(
-                max_pool_connections=50,
-                retries={"max_attempts": 10, "mode": "adaptive"},
-            )
-            self._s3_client_async = await session.client(
-                "s3", config=config
-            ).__aenter__()
-
+            async with self._s3_lock:
+                if self._s3_client_async is None:
+                    self._s3_client_async = await self._create_s3_client_async()
         return self._s3_client_async
 
+    @staticmethod
+    async def _create_s3_client_async() -> Any:
+        import aioboto3
 
-def s3_get_size(s3: Any, bucket: str, key: str) -> int:
+        session = aioboto3.Session()
+        config = AioConfig(
+            max_pool_connections=50,
+            retries={"max_attempts": 10, "mode": "adaptive"},
+        )
+        return await session.client("s3", config=config).__aenter__()
+
+
+def _s3_head_to_file_info(filename: str, response: dict[str, Any]) -> FileInfo:
+    size = cast(int, response["ContentLength"])
+    last_modified = response.get("LastModified")
+    mtime = last_modified.timestamp() * 1000 if last_modified else None
+    etag_raw = response.get("ETag")
+    etag = cast(str, etag_raw).strip('"') if etag_raw else None
+    return FileInfo(name=filename, type="file", size=size, mtime=mtime, etag=etag)
+
+
+def s3_info(s3: Any, bucket: str, key: str, filename: str) -> FileInfo:
     response = s3.head_object(Bucket=bucket, Key=key)
-    return cast(int, response["ContentLength"])
+    return _s3_head_to_file_info(filename, response)
 
 
 def s3_read_file(s3: Any, bucket: str, key: str) -> bytes:
@@ -343,3 +378,39 @@ def _local_path(filename: str) -> str:
     if filename.startswith("file://"):
         return urlparse(filename).path
     return filename
+
+
+_current_async_fs: ContextVar[AsyncFilesystem | None] = ContextVar(
+    "_current_async_fs", default=None
+)
+
+
+_T = TypeVar("_T")
+
+
+def with_async_fs(
+    main: Callable[[], Coroutine[Any, Any, _T]],
+) -> Callable[[], Coroutine[Any, Any, _T]]:
+    """Wrap an async callable so it runs with a shared AsyncFilesystem."""
+
+    async def wrapper() -> _T:
+        async with AsyncFilesystem():
+            return await main()
+
+    return wrapper
+
+
+def get_async_filesystem() -> AsyncFilesystem:
+    """Get the current shared AsyncFilesystem from the ContextVar.
+
+    Raises:
+        RuntimeError: If no AsyncFilesystem has been established via
+            ``async with AsyncFilesystem()``.
+    """
+    fs = _current_async_fs.get()
+    if fs is None:
+        raise RuntimeError(
+            "No AsyncFilesystem is available. "
+            "Use 'async with AsyncFilesystem()' to establish one."
+        )
+    return fs
