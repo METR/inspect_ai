@@ -1,6 +1,7 @@
 ## Unreleased
 
 - Task view: Extract and print `<summary>` from `<details>` tags in tool views.
+- Eval logs: Deduplicate repeated model event inputs and call messages into shared pools, reducing `.eval` file sizes.
 
 ## 0.3.185 (01 March 2026)
 
