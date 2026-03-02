@@ -349,6 +349,8 @@ export const clientApi = (
     epoch: number,
     last_event?: number,
     last_attachment?: number,
+    last_message_pool?: number,
+    last_call_pool?: number,
   ): Promise<SampleDataResponse | undefined> => {
     if (!api.eval_log_sample_data) {
       throw new Error("API doesn't supported streamed sample data");
@@ -359,6 +361,8 @@ export const clientApi = (
       epoch,
       last_event,
       last_attachment,
+      last_message_pool,
+      last_call_pool,
     );
   };
 

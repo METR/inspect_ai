@@ -82,9 +82,27 @@ export interface PendingSamples {
   etag?: string;
 }
 
+export interface MessagePoolData {
+  id: number;
+  sample_id: string;
+  epoch: number;
+  msg_id: string;
+  data: string;
+}
+
+export interface CallPoolData {
+  id: number;
+  sample_id: string;
+  epoch: number;
+  hash: string;
+  data: string;
+}
+
 export interface SampleData {
   events: EventData[];
   attachments: AttachmentData[];
+  message_pool: MessagePoolData[];
+  call_pool: CallPoolData[];
 }
 
 export interface EventData {
@@ -195,6 +213,8 @@ export interface LogViewAPI {
     epoch: number,
     last_event?: number,
     last_attachment?: number,
+    last_message_pool?: number,
+    last_call_pool?: number,
   ) => Promise<SampleDataResponse | undefined>;
 }
 
@@ -240,6 +260,8 @@ export interface ClientAPI {
     epoch: number,
     last_event?: number,
     last_attachment?: number,
+    last_message_pool?: number,
+    last_call_pool?: number,
   ) => Promise<SampleDataResponse | undefined>;
 
   // Events
