@@ -144,6 +144,7 @@ export interface SampleState {
   sampleError: Error | undefined;
   sampleNeedsReload: number;
   downloadProgress?: DownloadProgress;
+  eventsCleared: boolean;
 
   visiblePopover?: string;
 
