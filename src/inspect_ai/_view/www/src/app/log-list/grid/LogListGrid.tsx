@@ -134,6 +134,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
         completedAt: preview?.completed_at,
         itemCount: item.type === "folder" ? item.itemCount : undefined,
         log: item.type === "file" ? item.log : undefined,
+        fastUrl: item.type === "file" ? item.fastUrl : undefined,
       };
 
       // Add individual scorer columns from results

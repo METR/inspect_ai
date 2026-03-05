@@ -181,7 +181,37 @@ export const LogsPanel: FC<LogsPanelProps> = ({ maybeShowSingleLog }) => {
       }
     }
 
-    const orderedItems = [...folderItems, ...fileItems];
+    // Pair .fast.eval files with their normal .eval counterparts
+    const fastEvalSuffix = ".fast.eval";
+    const fastItemsByBase = new Map<string, FileLogItem>();
+    const normalItems: typeof fileItems = [];
+
+    for (const item of fileItems) {
+      if (item.type === "file" && item.name.endsWith(fastEvalSuffix)) {
+        const baseName = item.name.slice(0, -fastEvalSuffix.length) + ".eval";
+        fastItemsByBase.set(baseName, item);
+      } else {
+        normalItems.push(item);
+      }
+    }
+
+    // Attach fastUrl to paired normal items
+    for (const item of normalItems) {
+      if (item.type === "file") {
+        const fastItem = fastItemsByBase.get(item.name);
+        if (fastItem) {
+          item.fastUrl = fastItem.url;
+          fastItemsByBase.delete(item.name);
+        }
+      }
+    }
+
+    // Keep any unpaired fast items (shouldn't happen, but defensive)
+    for (const fastItem of fastItemsByBase.values()) {
+      normalItems.push(fastItem);
+    }
+
+    const orderedItems = [...folderItems, ...normalItems];
 
     const _logFiles = appendPendingItems(
       evalSet,

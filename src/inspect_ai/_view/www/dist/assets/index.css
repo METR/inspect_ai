@@ -16651,54 +16651,75 @@ button._segment_mhb7y_9 {
   color: var(--bs-link-color);
   font-size: 12.8px;
 }
-._nameCell_mdto2_1 {
+._nameCell_eaf0a_1 {
   display: flex;
   align-items: center;
   min-width: 0;
   flex: 1;
 }
 
-._modelCell_mdto2_8 {
+._modelCell_eaf0a_8 {
   display: flex;
   align-items: center;
   min-width: 0;
   flex: 1;
 }
 
-._scoreCell_mdto2_15 {
+._scoreCell_eaf0a_15 {
   display: flex;
   align-items: center;
   font-size: 0.875rem;
   color: var(--bs-gray-600);
 }
 
-._error_mdto2_22 {
+._error_eaf0a_22 {
   color: var(--bs-danger);
 }
 
-._started_mdto2_26 {
+._started_eaf0a_26 {
   color: var(--bs-secondary);
 }
 
-._success_mdto2_30 {
+._success_eaf0a_30 {
   color: var(--bs-success);
 }
 
-._cancelled_mdto2_34 {
+._cancelled_eaf0a_34 {
   color: var(--bs-secondary);
 }
 
-._statusCell_mdto2_38 {
+._statusCell_eaf0a_38 {
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-._dateCell_mdto2_44 {
+._dateCell_eaf0a_44 {
   display: flex;
   align-items: center;
   min-width: 0;
   flex: 1;
+}
+
+._fastButton_eaf0a_51 {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  margin-left: auto;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--bs-secondary);
+  border: 1px solid var(--bs-gray-400);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+._fastButton_eaf0a_51:hover {
+  color: var(--bs-primary);
+  border-color: var(--bs-primary);
 }
 .findBand {
   position: absolute;
