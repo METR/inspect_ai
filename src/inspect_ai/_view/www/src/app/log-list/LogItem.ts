@@ -16,6 +16,7 @@ export interface FileLogItem extends LogItem {
   type: "file";
   log: LogHandle;
   logPreview?: LogPreview;
+  fastUrl?: string;
 }
 
 export interface PendingTaskItem extends LogItem {

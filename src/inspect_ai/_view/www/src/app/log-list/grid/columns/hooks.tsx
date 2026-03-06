@@ -1,6 +1,7 @@
 import type { ColDef, ICellRendererParams } from "ag-grid-community";
 import clsx from "clsx";
 import { useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { useStore } from "../../../../state/store";
 import { parseLogFileName } from "../../../../utils/evallog";
 import { formatDateTime, formatPrettyDecimal } from "../../../../utils/format";
@@ -30,6 +31,7 @@ export const useLogListColumns = (): {
   const setColumnVisibility = useStore(
     (state) => state.logsActions.setLogsColumnVisibility,
   );
+  const navigate = useNavigate();
   const logDetails = useStore((state) => state.logs.logDetails);
 
   // Detect all unique scorer names across all logs from their results
@@ -276,7 +278,28 @@ export const useLogListColumns = (): {
             return <EmptyCell />;
           }
           const value = basename(item.name);
-          return <div className={styles.nameCell}>{value}</div>;
+          return (
+            <div className={styles.nameCell}>
+              {value}
+              {item.fastUrl && (
+                <button
+                  className={styles.fastButton}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const openInNewWindow =
+                      e.metaKey || e.ctrlKey || e.shiftKey;
+                    if (openInNewWindow) {
+                      window.open(`#${item.fastUrl}`, "_blank");
+                    } else {
+                      navigate(item.fastUrl!);
+                    }
+                  }}
+                >
+                  fast
+                </button>
+              )}
+            </div>
+          );
         },
       },
     ];
@@ -328,7 +351,7 @@ export const useLogListColumns = (): {
     );
 
     return [...baseColumns, ...scorerColumns];
-  }, [scorerMap]);
+  }, [scorerMap, navigate]);
 
   const columns = useMemo((): ColDef<LogListRow>[] => {
     const columnsWithVisibility = allColumns.map((col: ColDef<LogListRow>) => {

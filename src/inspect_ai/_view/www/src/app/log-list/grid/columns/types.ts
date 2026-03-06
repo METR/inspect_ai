@@ -6,6 +6,7 @@ export interface LogListRow {
   type: "file" | "folder" | "pending-task";
   displayIndex?: number;
   url?: string;
+  fastUrl?: string;
   task?: string;
   model?: string;
   score?: number;

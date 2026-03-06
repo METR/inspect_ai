@@ -109,6 +109,7 @@ export const LogListGrid: FC<LogListGridProps> = ({
         completedAt: preview?.completed_at,
         itemCount: item.type === "folder" ? item.itemCount : undefined,
         log: item.type === "file" ? item.log : undefined,
+        fastUrl: item.type === "file" ? item.fastUrl : undefined,
       };
 
       // Add individual scorer columns from results
@@ -131,6 +132,12 @@ export const LogListGrid: FC<LogListGridProps> = ({
   const handleRowClick = useCallback(
     (e: RowClickedEvent<LogListRow>) => {
       if (e.data && e.node && gridRef.current?.api) {
+        // Ignore clicks on interactive elements (e.g. the "fast" button)
+        const target = e.event?.target as HTMLElement | undefined;
+        if (target?.closest("button")) {
+          return;
+        }
+
         gridRef.current.api.deselectAll();
         e.node.setSelected(true);
 
