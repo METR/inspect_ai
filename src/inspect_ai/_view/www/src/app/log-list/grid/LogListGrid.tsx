@@ -163,6 +163,12 @@ export const LogListGrid: FC<LogListGridProps> = ({
   const handleRowClick = useCallback(
     (e: RowClickedEvent<LogListRow>) => {
       if (e.data && e.node && gridRef.current?.api) {
+        // Ignore clicks on interactive elements (e.g. the "fast" button)
+        const target = e.event?.target as HTMLElement | undefined;
+        if (target?.closest("button")) {
+          return;
+        }
+
         gridRef.current.api.deselectAll();
         e.node.setSelected(true);
 
