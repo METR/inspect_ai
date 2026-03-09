@@ -206,10 +206,8 @@ export const LogsPanel: FC<LogsPanelProps> = ({ maybeShowSingleLog }) => {
       }
     }
 
-    // Keep any unpaired fast items (shouldn't happen, but defensive)
-    for (const fastItem of fastItemsByBase.values()) {
-      normalItems.push(fastItem);
-    }
+    // Drop unpaired .fast.eval items — they should only appear as a
+    // "fast" link on an exact-match .eval row, never as standalone rows.
 
     const orderedItems = [...folderItems, ...normalItems];
 
