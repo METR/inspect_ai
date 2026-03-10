@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pwd
+import resource
 import signal
 from asyncio.subprocess import Process as AsyncIOProcess
 from collections.abc import Callable
@@ -44,6 +45,8 @@ def _make_preexec_fn(user: str | None) -> Callable[[], None]:
                 os.environ["USER"] = user
                 os.environ["LOGNAME"] = user
                 os.setuid(pw.pw_uid)
+                # Cap child process count to prevent fork bombs
+                resource.setrlimit(resource.RLIMIT_NPROC, (4096, 4096))
             except (KeyError, OSError) as e:
                 # Never run a child as root when a user was explicitly
                 # requested. A partial setgid/setuid leaves the process in
