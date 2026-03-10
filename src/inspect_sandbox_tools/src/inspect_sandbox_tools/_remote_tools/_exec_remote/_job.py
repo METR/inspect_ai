@@ -62,6 +62,14 @@ class Job:
             cwd=cwd,
         )
 
+        # Make child (and its descendants via fork inheritance) the preferred
+        # OOM-kill target so the server process survives memory pressure.
+        try:
+            with open(f"/proc/{process.pid}/oom_score_adj", "w") as f:
+                f.write("1000")
+        except OSError:
+            pass
+
         job = cls(process, output_limit=output_limit)
 
         # Write initial input if provided
