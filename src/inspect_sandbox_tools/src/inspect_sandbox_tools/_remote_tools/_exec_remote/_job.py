@@ -12,6 +12,21 @@ from .tool_types import PollResult
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
 
 
+def _set_oom_score_adj() -> None:
+    """Set oom_score_adj in the child process before exec.
+
+    Called via preexec_fn so it runs after fork() but before exec(),
+    ensuring the shell and all its descendants inherit the adjusted score.
+    This makes child processes the preferred OOM-kill target, protecting the
+    sandbox tools server from the OOM killer.
+    """
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("1000")
+    except OSError:
+        pass
+
+
 class Job:
     """Manages an async subprocess with separate stdout/stderr streams.
 
@@ -60,6 +75,7 @@ class Job:
             start_new_session=True,
             env=subprocess_env,
             cwd=cwd,
+            preexec_fn=_set_oom_score_adj,
         )
 
         job = cls(process, output_limit=output_limit)
