@@ -1,7 +1,9 @@
 import asyncio
 import os
+import pwd
 import signal
 from asyncio.subprocess import Process as AsyncIOProcess
+from collections.abc import Callable
 from typing import Literal
 
 from inspect_sandbox_tools._util.common_types import ToolException
@@ -12,19 +14,46 @@ from .tool_types import PollResult
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
 
 
-def _set_oom_score_adj() -> None:
-    """Set oom_score_adj in the child process before exec.
+def _make_preexec_fn(user: str | None) -> Callable[[], None]:
+    """Create a preexec_fn that sets OOM score and optionally drops privileges.
 
-    Called via preexec_fn so it runs after fork() but before exec(),
-    ensuring the shell and all its descendants inherit the adjusted score.
-    This makes child processes the preferred OOM-kill target, protecting the
-    sandbox tools server from the OOM killer.
+    Called in the child process after fork() but before exec(). Sets
+    oom_score_adj to make child the preferred OOM target, and when running
+    as root with a target user, drops privileges so the child runs as that user.
+
+    Args:
+        user: Target user to drop privileges to. If None or not running as
+            root, only OOM score adjustment is performed.
     """
-    try:
-        with open("/proc/self/oom_score_adj", "w") as f:
-            f.write("1000")
-    except OSError:
-        pass
+
+    def preexec() -> None:
+        # Make child the preferred OOM-kill target
+        try:
+            with open("/proc/self/oom_score_adj", "w") as f:
+                f.write("1000")
+        except OSError:
+            pass
+
+        # Drop privileges if running as root and a target user is specified
+        if user and os.getuid() == 0:
+            try:
+                pw = pwd.getpwnam(user)
+                os.setgid(pw.pw_gid)
+                os.initgroups(user, pw.pw_gid)
+                os.environ["HOME"] = pw.pw_dir
+                os.environ["USER"] = user
+                os.environ["LOGNAME"] = user
+                os.setuid(pw.pw_uid)
+            except (KeyError, OSError) as e:
+                # Never run a child as root when a user was explicitly
+                # requested. A partial setgid/setuid leaves the process in
+                # an inconsistent state, so fail hard.
+                os.write(
+                    2, f"inspect: privilege drop failed for '{user}': {e}\n".encode()
+                )
+                os._exit(126)
+
+    return preexec
 
 
 class Job:
@@ -45,6 +74,7 @@ class Job:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         output_limit: int | None = None,
+        user: str | None = None,
     ) -> "Job":
         """Create and start a new Job for the given command.
 
@@ -60,6 +90,7 @@ class Job:
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
             output_limit: Max bytes to buffer per stream. None uses server default.
+            user: Target user to drop privileges to before exec.
         """
         # Use stdin=PIPE if we have input to send or if stdin should stay open
         stdin = asyncio.subprocess.PIPE if (input is not None or stdin_open) else None
@@ -75,20 +106,25 @@ class Job:
             start_new_session=True,
             env=subprocess_env,
             cwd=cwd,
-            preexec_fn=_set_oom_score_adj,
+            preexec_fn=_make_preexec_fn(user),
         )
 
         job = cls(process, output_limit=output_limit)
 
-        # Write initial input if provided
-        if input is not None and process.stdin is not None:
-            process.stdin.write(input.encode("utf-8"))
-            await process.stdin.drain()
+        # Write initial input if provided. The write can fail with
+        # BrokenPipeError if the child died in preexec_fn (e.g. privilege
+        # drop failure). That's fine — the caller will see the exit code.
+        try:
+            if input is not None and process.stdin is not None:
+                process.stdin.write(input.encode("utf-8"))
+                await process.stdin.drain()
 
-        # Close stdin unless caller wants it kept open
-        if not stdin_open and process.stdin is not None:
-            process.stdin.close()
-            await process.stdin.wait_closed()
+            # Close stdin unless caller wants it kept open
+            if not stdin_open and process.stdin is not None:
+                process.stdin.close()
+                await process.stdin.wait_closed()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
         return job
 

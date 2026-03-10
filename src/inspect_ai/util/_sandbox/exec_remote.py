@@ -300,6 +300,8 @@ class ExecRemoteProcess:
             params["cwd"] = self._options.cwd
         if output_limit is not None:
             params["output_limit"] = output_limit
+        if self._options.user:
+            params["user"] = self._options.user
 
         result = await self._rpc("exec_remote_start", params, _StartResult)
         self._pid = result.pid

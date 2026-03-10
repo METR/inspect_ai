@@ -22,6 +22,7 @@ class Controller:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         output_limit: int | None = None,
+        user: str | None = None,
     ) -> int:
         """Create a new job and return its PID.
 
@@ -32,6 +33,7 @@ class Controller:
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
             output_limit: Max bytes to buffer per stream. None uses server default.
+            user: Target user to drop privileges to before exec.
         """
         job = await Job.create(
             command,
@@ -40,6 +42,7 @@ class Controller:
             env=env,
             cwd=cwd,
             output_limit=output_limit,
+            user=user,
         )
         self._jobs[job.pid] = job
         return job.pid

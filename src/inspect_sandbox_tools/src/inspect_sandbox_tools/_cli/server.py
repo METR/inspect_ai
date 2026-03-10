@@ -7,7 +7,7 @@ from pathlib import Path
 from aiohttp.web import Application, Request, Response, run_app
 from jsonrpcserver import async_dispatch
 
-from inspect_sandbox_tools._util.constants import SOCKET_PATH
+from inspect_sandbox_tools._util.constants import SOCKET_DIR, SOCKET_PATH
 from inspect_sandbox_tools._util.load_tools import load_tools
 
 # When running as a PyInstaller onefile binary, all bundled shared libs are extracted
@@ -20,8 +20,26 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     os.environ["LD_LIBRARY_PATH"] = new_ld
 
 
+def _ensure_socket_dir() -> None:
+    """Create the socket directory with appropriate permissions.
+
+    When running as root, the directory is owned by root with mode 0o755.
+    This prevents unprivileged users from deleting the socket file (unlinking
+    requires write permission on the parent directory).
+
+    When not running as root, the directory is created with mode 0o755 but
+    offers no protection since the agent runs as the same user.
+    """
+    SOCKET_DIR.mkdir(mode=0o755, exist_ok=True)
+    if os.getuid() == 0:
+        os.chown(SOCKET_DIR, 0, 0)
+        os.chmod(SOCKET_DIR, 0o755)
+
+
 def main():
     load_tools("inspect_sandbox_tools._remote_tools")
+
+    _ensure_socket_dir()
 
     # Remove stale socket file
     SOCKET_PATH.unlink(missing_ok=True)

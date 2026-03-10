@@ -23,7 +23,10 @@ DEFAULT_RPC_TIMEOUT = 10
 
 def cleanup_socket() -> None:
     """Remove any existing socket file."""
-    SOCKET_PATH.unlink(missing_ok=True)
+    try:
+        SOCKET_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _SERVER_PROCESS_PATTERN = "inspect_sandbox_tools._cli.main server"
