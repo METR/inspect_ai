@@ -53,15 +53,13 @@ def main():
     app = Application()
     app.router.add_post("/", handle_request)
 
-    # Set umask to handle dynamic user switching scenarios:
-    # The server is created on-demand by the first client call, but subsequent
-    # calls may come from different users. We must support all combinations:
-    # - root creates socket, non-root clients connect later
-    # - non-root creates socket, root connects later
-    # - non-root1 creates socket, non-root2 connects later
-    # Using umask 0o111 creates socket with 0o666 permissions (rw-rw-rw-)
-    # allowing any user to connect regardless of who created the socket
-    old_umask = os.umask(0o111)
+    # When running as root (privilege separation), restrict the socket to
+    # root-only access (0o600). The only client is the CLI process, which
+    # also runs as root. This prevents the agent from connecting directly
+    # and bypassing privilege separation.
+    # When not root, use 0o666 so that any user can connect (the CLI may
+    # be invoked by different users in non-privilege-separation setups).
+    old_umask = os.umask(0o177 if os.getuid() == 0 else 0o111)
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.bind(str(SOCKET_PATH))

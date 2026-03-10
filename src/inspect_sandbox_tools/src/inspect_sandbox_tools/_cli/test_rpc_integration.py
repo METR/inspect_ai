@@ -107,10 +107,13 @@ def test_socket_creation_and_permissions():
     else:
         pytest.fail("Socket was not created within 5 seconds")
 
-    # Check socket permissions
+    # Check socket permissions: 600 when root, 666 otherwise
     stat_info = SOCKET_PATH.stat()
     permissions = oct(stat_info.st_mode)[-3:]
-    assert permissions == "666", f"Socket permissions should be 666, got {permissions}"
+    expected = "600" if os.getuid() == 0 else "666"
+    assert permissions == expected, (
+        f"Socket permissions should be {expected}, got {permissions}"
+    )
 
 
 def test_invalid_json_request():
