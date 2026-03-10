@@ -29,7 +29,6 @@ class Job:
         stdin_open: bool = False,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-        output_limit: int | None = None,
     ) -> "Job":
         """Create and start a new Job for the given command.
 
@@ -44,7 +43,6 @@ class Job:
                 for later write_stdin()/close_stdin() calls.
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
-            output_limit: Max bytes to buffer per stream. None uses server default.
         """
         # Use stdin=PIPE if we have input to send or if stdin should stay open
         stdin = asyncio.subprocess.PIPE if (input is not None or stdin_open) else None
@@ -62,7 +60,7 @@ class Job:
             cwd=cwd,
         )
 
-        job = cls(process, output_limit=output_limit)
+        job = cls(process)
 
         # Write initial input if provided
         if input is not None and process.stdin is not None:
@@ -76,18 +74,10 @@ class Job:
 
         return job
 
-    def __init__(self, process: AsyncIOProcess, output_limit: int | None) -> None:
+    def __init__(self, process: AsyncIOProcess) -> None:
         self._process = process
-        if output_limit is not None:
-            self._stdout_buffer = _OutputBuffer(output_limit, circular=True)
-            self._stderr_buffer = _OutputBuffer(output_limit, circular=True)
-        else:
-            self._stdout_buffer = _OutputBuffer(
-                _BACKPRESSURE_BUFFER_SIZE, circular=False
-            )
-            self._stderr_buffer = _OutputBuffer(
-                _BACKPRESSURE_BUFFER_SIZE, circular=False
-            )
+        self._stdout_buffer = _OutputBuffer(_BACKPRESSURE_BUFFER_SIZE)
+        self._stderr_buffer = _OutputBuffer(_BACKPRESSURE_BUFFER_SIZE)
         self._state: Literal["running", "completed", "killed"] = "running"
         self._exit_code: int | None = None
 

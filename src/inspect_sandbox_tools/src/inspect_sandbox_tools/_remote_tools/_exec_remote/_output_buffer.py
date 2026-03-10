@@ -1,23 +1,20 @@
-"""Bounded output buffer with circular and backpressure modes."""
+"""Bounded output buffer with backpressure."""
 
 import asyncio
 from collections import deque
 
 
 class _OutputBuffer:
-    """Buffer for subprocess output with configurable overflow behavior.
+    """Buffer for subprocess output with backpressure.
 
-    Two modes:
-    - circular=True: Keeps the most recent max_bytes (tail preservation).
-      Used for stream=False where client wants bounded output.
-    - circular=False: Backpressure mode. Accumulates data up to max_bytes,
-      then signals full. Caller must await wait_for_space() before writing
-      more. Used for stream=True where all data should flow through.
+    Accumulates data up to max_bytes, then signals full. Caller must
+    await wait_for_space() before writing more. When the buffer is full
+    the reader task suspends, the kernel pipe fills, and the subprocess
+    blocks on write — applying backpressure all the way to the source.
     """
 
-    def __init__(self, max_bytes: int, circular: bool) -> None:
+    def __init__(self, max_bytes: int) -> None:
         self._max_bytes = max_bytes
-        self._circular = circular
         self._chunks: deque[bytes] = deque()
         self._total_bytes = 0
         self._has_space = asyncio.Event()
@@ -29,28 +26,11 @@ class _OutputBuffer:
             return
         self._chunks.append(data)
         self._total_bytes += len(data)
-
-        if self._circular:
-            # Drop oldest full chunks until we fit
-            while self._total_bytes > self._max_bytes and len(self._chunks) > 1:
-                removed = self._chunks.popleft()
-                self._total_bytes -= len(removed)
-            # Trim the front of the remaining first chunk if still over
-            if self._total_bytes > self._max_bytes and self._chunks:
-                excess = self._total_bytes - self._max_bytes
-                self._chunks[0] = self._chunks[0][excess:]
-                self._total_bytes = self._max_bytes
-        else:
-            if self._total_bytes >= self._max_bytes:
-                self._has_space.clear()
+        if self._total_bytes >= self._max_bytes:
+            self._has_space.clear()
 
     async def wait_for_space(self) -> None:
-        """Block until buffer has space (backpressure mode only).
-
-        In circular mode this returns immediately.
-        """
-        if self._circular:
-            return
+        """Block until buffer has space."""
         await self._has_space.wait()
 
     def drain(self) -> str:
@@ -60,8 +40,7 @@ class _OutputBuffer:
         result = b"".join(self._chunks).decode("utf-8", errors="replace")
         self._chunks.clear()
         self._total_bytes = 0
-        if not self._circular:
-            self._has_space.set()
+        self._has_space.set()
         return result
 
     def unblock(self) -> None:
