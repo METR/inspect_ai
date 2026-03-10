@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from inspect_sandbox_tools._agent_bridge.proxy import run_model_proxy_server
 from inspect_sandbox_tools._cli.server import main as server_main
 from inspect_sandbox_tools._util.common_types import JSONRPCResponseJSON
-from inspect_sandbox_tools._util.constants import SOCKET_PATH
+from inspect_sandbox_tools._util.constants import SOCKET_DIR, SOCKET_PATH
 from inspect_sandbox_tools._util.json_rpc_helpers import json_rpc_unix_call
 from inspect_sandbox_tools._util.load_tools import load_tools
 
@@ -78,13 +78,15 @@ async def _dispatch_remote_method(request_json_str: str) -> JSONRPCResponseJSON:
     return await json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
 
 
-_SERVER_STDOUT_LOG = "/tmp/sandbox-tools-server-stdout.log"
-_SERVER_STDERR_LOG = "/tmp/sandbox-tools-server-stderr.log"
+_SERVER_STDOUT_LOG = str(SOCKET_DIR / "server-stdout.log")
+_SERVER_STDERR_LOG = str(SOCKET_DIR / "server-stderr.log")
 
 
 def _ensure_server_is_running() -> None:
     if _can_connect_to_socket():
         return  # Server already running and responsive
+
+    SOCKET_DIR.mkdir(mode=0o755, exist_ok=True)
 
     process = subprocess.Popen(
         (
@@ -148,7 +150,10 @@ def _can_connect_to_socket() -> bool:
         return True
     except (OSError, ConnectionRefusedError):
         # Remove stale socket on connection failure
-        SOCKET_PATH.unlink(missing_ok=True)
+        try:
+            SOCKET_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
 
 

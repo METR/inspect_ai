@@ -11,7 +11,10 @@ from inspect_sandbox_tools._util.constants import SOCKET_PATH
 
 def cleanup_socket():
     """Remove any existing socket file."""
-    SOCKET_PATH.unlink(missing_ok=True)
+    try:
+        SOCKET_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def cleanup_server_processes():
