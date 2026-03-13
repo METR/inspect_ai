@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class SubmitParams(BaseModel):
     """Parameters for exec_remote_start."""
 
+    request_id: str | None = None
     command: str
     input: str | None = None
     """Standard input to send to the command (as a string)."""
@@ -23,6 +24,7 @@ class SubmitParams(BaseModel):
 class PollParams(BaseModel):
     """Parameters for exec_remote_poll."""
 
+    request_id: str | None = None
     pid: int
     model_config = {"extra": "forbid"}
 
@@ -30,6 +32,7 @@ class PollParams(BaseModel):
 class KillParams(BaseModel):
     """Parameters for exec_remote_kill."""
 
+    request_id: str | None = None
     pid: int
     model_config = {"extra": "forbid"}
 
@@ -76,6 +79,7 @@ class KillResult(OutputResult):
 class WriteStdinParams(BaseModel):
     """Parameters for exec_remote_write_stdin."""
 
+    request_id: str | None = None
     pid: int
     data: str
     model_config = {"extra": "forbid"}
@@ -90,6 +94,7 @@ class WriteStdinResult(OutputResult):
 class CloseStdinParams(BaseModel):
     """Parameters for exec_remote_close_stdin."""
 
+    request_id: str | None = None
     pid: int
     model_config = {"extra": "forbid"}
 
