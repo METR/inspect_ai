@@ -456,24 +456,16 @@ class ExecRemoteProcess:
             raise
 
     async def _poll(self) -> _PollResult:
-        @retry(
-            wait=wait_exponential_jitter(initial=2),
-            stop=(stop_after_attempt(5) | stop_after_delay(30)),
-            retry=retry_if_exception(lambda e: isinstance(e, RuntimeError)),
-        )
-        async def poll() -> _PollResult:
-            from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+        from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 
-            sandbox_proxy = cast(SandboxEnvironmentProxy, self._transport.sandbox)
-            with sandbox_proxy.no_events():
-                return await self._rpc(
-                    "exec_remote_poll",
-                    {"pid": self._pid},
-                    _PollResult,
-                    retry_policy=_POLL_RETRY,
-                )
-
-        return await poll()
+        sandbox_proxy = cast(SandboxEnvironmentProxy, self._transport.sandbox)
+        with sandbox_proxy.no_events():
+            return await self._rpc(
+                "exec_remote_poll",
+                {"pid": self._pid},
+                _PollResult,
+                retry_policy=_POLL_RETRY,
+            )
 
     def _enqueue_output(self, stdout: str, stderr: str) -> None:
         """Enqueue any non-empty output as pending events for the iterator."""
