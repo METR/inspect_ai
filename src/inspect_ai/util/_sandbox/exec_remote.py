@@ -568,7 +568,7 @@ class ExecRemoteProcess:
             )
             self._enqueue_output(result.stdout, result.stderr)
         except Exception:
-            logging.debug(
+            logger.debug(
                 f"exec_remote kill RPC failed for pid {self._pid}", exc_info=True
             )
 
