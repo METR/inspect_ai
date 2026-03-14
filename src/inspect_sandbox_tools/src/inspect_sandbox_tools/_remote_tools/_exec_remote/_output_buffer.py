@@ -53,26 +53,13 @@ class _OutputBuffer:
             return
         await self._has_space.wait()
 
-    def drain(self, max_bytes: int | None = None) -> str:
-        """Return buffered data as a string and remove it from the buffer.
-
-        Args:
-            max_bytes: Maximum number of bytes to return. If None,
-                drains everything.
-        """
+    def drain(self) -> str:
+        """Return all buffered data as a string and clear the buffer."""
         if not self._chunks:
             return ""
-        all_data = b"".join(self._chunks)
-        if max_bytes is not None and max_bytes < len(all_data):
-            result = all_data[:max_bytes].decode("utf-8", errors="replace")
-            remaining = all_data[max_bytes:]
-            self._chunks.clear()
-            self._chunks.append(remaining)
-            self._total_bytes = len(remaining)
-        else:
-            result = all_data.decode("utf-8", errors="replace")
-            self._chunks.clear()
-            self._total_bytes = 0
+        result = b"".join(self._chunks).decode("utf-8", errors="replace")
+        self._chunks.clear()
+        self._total_bytes = 0
         if not self._circular:
             self._has_space.set()
         return result

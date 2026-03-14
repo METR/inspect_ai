@@ -12,7 +12,6 @@ from ._output_buffer import _OutputBuffer
 from .tool_types import PollResult
 
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
-_MAX_POLL_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB per poll response
 
 
 def _set_oom_score_adj() -> None:
@@ -195,8 +194,7 @@ class Job:
             # Wait for read tasks to finish draining
             await self._wait_for_readers()
 
-        max_bytes = None if self._state != "running" else _MAX_POLL_OUTPUT_BYTES
-        stdout, stderr = self._drain_buffers(max_bytes=max_bytes)
+        stdout, stderr = self._drain_buffers()
 
         return PollResult(
             state=self._state,
@@ -239,20 +237,13 @@ class Job:
 
         return self._drain_buffers()
 
-    def _drain_buffers(self, max_bytes: int | None = None) -> tuple[str, str]:
+    def _drain_buffers(self) -> tuple[str, str]:
         """Collect and clear the stdout/stderr buffers.
-
-        Args:
-            max_bytes: Maximum raw bytes to drain per stream. If None,
-                drains everything.
 
         Returns:
             A tuple of (stdout, stderr) strings accumulated since the last drain.
         """
-        return (
-            self._stdout_buffer.drain(max_bytes),
-            self._stderr_buffer.drain(max_bytes),
-        )
+        return (self._stdout_buffer.drain(), self._stderr_buffer.drain())
 
     async def write_stdin(self, data: str) -> tuple[str, str]:
         """Write data to the process's stdin and return buffered output.
