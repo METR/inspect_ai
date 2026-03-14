@@ -28,7 +28,6 @@ async def exec_remote_start(params: SubmitParams) -> SubmitResult:
         stdin_open=params.stdin_open,
         env=params.env,
         cwd=params.cwd,
-        output_limit=params.output_limit,
         request_id=params.request_id,
         user=params.user,
         can_switch_user=_can_switch_user,

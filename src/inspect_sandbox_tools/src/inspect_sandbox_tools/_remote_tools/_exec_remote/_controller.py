@@ -32,7 +32,6 @@ class Controller:
         stdin_open: bool = False,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-        output_limit: int | None = None,
         request_id: str | None = None,
         user: str | None = None,
         can_switch_user: bool = False,
@@ -45,7 +44,6 @@ class Controller:
             stdin_open: If True, keep stdin open for later writes.
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
-            output_limit: Max bytes to buffer per stream. None uses server default.
             request_id: If provided and matches a previous submit, returns
                 the existing PID without creating a new process.
             user: User to run the command as (requires can_switch_user=True).
@@ -60,7 +58,6 @@ class Controller:
             stdin_open=stdin_open,
             env=env,
             cwd=cwd,
-            output_limit=output_limit,
             user=user,
             can_switch_user=can_switch_user,
         )

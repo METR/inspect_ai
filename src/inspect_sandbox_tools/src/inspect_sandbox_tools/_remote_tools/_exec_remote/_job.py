@@ -8,10 +8,11 @@ from typing import Literal
 
 from inspect_sandbox_tools._util.common_types import ToolException
 
-from ._output_buffer import _OutputBuffer
+from ._output_buffer import BoundedByteBuffer, DecodingBuffer
 from .tool_types import PollResult
 
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
+_MAX_POLL_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB per poll response
 
 
 def _set_oom_score_adj() -> None:
@@ -88,7 +89,6 @@ class Job:
         stdin_open: bool = False,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
-        output_limit: int | None = None,
         user: str | None = None,
         can_switch_user: bool = False,
     ) -> "Job":
@@ -105,7 +105,6 @@ class Job:
                 for later write_stdin()/close_stdin() calls.
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
-            output_limit: Max bytes to buffer per stream. None uses server default.
             user: User to run the command as (requires can_switch_user=True).
             can_switch_user: Whether the server can switch users (running as root).
         """
@@ -142,7 +141,7 @@ class Job:
             preexec_fn=_make_preexec(user),
         )
 
-        job = cls(process, output_limit=output_limit)
+        job = cls(process)
 
         # Write initial input if provided
         if input is not None and process.stdin is not None:
@@ -156,18 +155,12 @@ class Job:
 
         return job
 
-    def __init__(self, process: AsyncIOProcess, output_limit: int | None) -> None:
+    def __init__(self, process: AsyncIOProcess) -> None:
         self._process = process
-        if output_limit is not None:
-            self._stdout_buffer = _OutputBuffer(output_limit, circular=True)
-            self._stderr_buffer = _OutputBuffer(output_limit, circular=True)
-        else:
-            self._stdout_buffer = _OutputBuffer(
-                _BACKPRESSURE_BUFFER_SIZE, circular=False
-            )
-            self._stderr_buffer = _OutputBuffer(
-                _BACKPRESSURE_BUFFER_SIZE, circular=False
-            )
+        self._stdout_buffer = BoundedByteBuffer(_BACKPRESSURE_BUFFER_SIZE)
+        self._stderr_buffer = BoundedByteBuffer(_BACKPRESSURE_BUFFER_SIZE)
+        self._stdout_output = DecodingBuffer(self._stdout_buffer)
+        self._stderr_output = DecodingBuffer(self._stderr_buffer)
         self._state: Literal["running", "completed", "killed"] = "running"
         self._exit_code: int | None = None
 
@@ -194,7 +187,9 @@ class Job:
             # Wait for read tasks to finish draining
             await self._wait_for_readers()
 
-        stdout, stderr = self._drain_buffers()
+        final = self._state != "running"
+        max_bytes = None if final else _MAX_POLL_OUTPUT_BYTES
+        stdout, stderr = self._drain_buffers(final=final, max_bytes=max_bytes)
 
         return PollResult(
             state=self._state,
@@ -235,15 +230,26 @@ class Job:
 
         await self._wait_for_readers()
 
-        return self._drain_buffers()
+        return self._drain_buffers(final=True)
 
-    def _drain_buffers(self) -> tuple[str, str]:
+    def _drain_buffers(
+        self, final: bool = False, max_bytes: int | None = None
+    ) -> tuple[str, str]:
         """Collect and clear the stdout/stderr buffers.
+
+        Args:
+            final: If True, flush any trailing partial UTF-8 sequences
+                as replacement characters.
+            max_bytes: Maximum raw bytes to drain per stream. If None,
+                drains everything.
 
         Returns:
             A tuple of (stdout, stderr) strings accumulated since the last drain.
         """
-        return (self._stdout_buffer.drain(), self._stderr_buffer.drain())
+        return (
+            self._stdout_output.drain(final, max_bytes),
+            self._stderr_output.drain(final, max_bytes),
+        )
 
     async def write_stdin(self, data: str) -> tuple[str, str]:
         """Write data to the process's stdin and return buffered output.
@@ -295,8 +301,8 @@ class Job:
 
     async def _wait_for_readers(self) -> None:
         """Wait for background read tasks to complete."""
-        self._stdout_buffer.unblock()
-        self._stderr_buffer.unblock()
+        self._stdout_buffer.close()
+        self._stderr_buffer.close()
         for task in [self._stdout_task, self._stderr_task]:
             if not task.done():
                 try:
@@ -309,7 +315,7 @@ class Job:
                         pass
 
     async def _read_stream(
-        self, stream: asyncio.StreamReader | None, buffer: _OutputBuffer
+        self, stream: asyncio.StreamReader | None, buffer: BoundedByteBuffer
     ) -> None:
         """Read from a stream and append to buffer up to the output limit."""
         if stream is None:
@@ -317,10 +323,9 @@ class Job:
 
         try:
             while True:
-                await buffer.wait_for_space()
                 data = await stream.read(4096)
                 if not data:
                     break
-                buffer.write(data)
+                await buffer.put(data)
         except asyncio.CancelledError:
             pass
