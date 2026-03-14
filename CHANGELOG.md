@@ -1,5 +1,8 @@
 ## Unreleased
 
+- Sandbox Tools: Support running `exec_remote()` commands as different users via the `user` option.
+
+
 - OpenAI: Detect some additional "content_filter" stop reason conditions.
 - OpenAI: Handle `web_search_call` response witgh no `action` field.
 - Anthropic: Handle continuations that split server tool use and its result across messages.

@@ -1,7 +1,9 @@
 import asyncio
 import os
+import pwd
 import signal
 from asyncio.subprocess import Process as AsyncIOProcess
+from collections.abc import Callable
 from typing import Literal
 
 from inspect_sandbox_tools._util.common_types import ToolException
@@ -27,6 +29,48 @@ def _set_oom_score_adj() -> None:
         pass
 
 
+def _is_current_user(username: str) -> bool:
+    """Check if the given username matches the current process user."""
+    try:
+        return pwd.getpwnam(username).pw_uid == os.getuid()
+    except KeyError:
+        return False
+
+
+def _make_preexec(username: str | None) -> Callable[[], None]:
+    """Build a preexec_fn that sets OOM score and optionally switches user.
+
+    Args:
+        username: If provided, switch to this user via setuid/setgid/initgroups.
+            Requires the current process to be running as root.
+            If the user matches the current process user, setuid is skipped.
+    """
+
+    def _preexec() -> None:
+        _set_oom_score_adj()
+        if username is not None:
+            try:
+                pw = pwd.getpwnam(username)
+            except KeyError:
+                os.write(
+                    2,
+                    f"exec_remote: user {username!r} not found in /etc/passwd\n".encode(),
+                )
+                os._exit(1)
+            try:
+                os.initgroups(username, pw.pw_gid)
+                os.setgid(pw.pw_gid)
+                os.setuid(pw.pw_uid)
+            except PermissionError:
+                os.write(
+                    2,
+                    f"exec_remote: permission denied switching to user {username!r} (server may lack CAP_SETUID/CAP_SETGID)\n".encode(),
+                )
+                os._exit(1)
+
+    return _preexec
+
+
 class Job:
     """Manages an async subprocess with separate stdout/stderr streams.
 
@@ -45,6 +89,8 @@ class Job:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         output_limit: int | None = None,
+        user: str | None = None,
+        can_switch_user: bool = False,
     ) -> "Job":
         """Create and start a new Job for the given command.
 
@@ -60,7 +106,17 @@ class Job:
             env: Additional environment variables (merged with current env).
             cwd: Working directory for command execution.
             output_limit: Max bytes to buffer per stream. None uses server default.
+            user: User to run the command as (requires can_switch_user=True).
+            can_switch_user: Whether the server can switch users (running as root).
         """
+        # If the requested user matches the current process user, no setuid needed
+        if user is not None and _is_current_user(user):
+            user = None
+        if user is not None and not can_switch_user:
+            raise ToolException(
+                f"Cannot switch to user {user!r}: server is not running as root"
+            )
+
         # Use stdin=PIPE if we have input to send or if stdin should stay open
         stdin = asyncio.subprocess.PIPE if (input is not None or stdin_open) else None
 
@@ -75,7 +131,7 @@ class Job:
             start_new_session=True,
             env=subprocess_env,
             cwd=cwd,
-            preexec_fn=_set_oom_score_adj,
+            preexec_fn=_make_preexec(user),
         )
 
         job = cls(process, output_limit=output_limit)

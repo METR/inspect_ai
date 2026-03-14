@@ -34,6 +34,8 @@ class Controller:
         cwd: str | None = None,
         output_limit: int | None = None,
         request_id: str | None = None,
+        user: str | None = None,
+        can_switch_user: bool = False,
     ) -> int:
         """Create a new job and return its PID.
 
@@ -46,6 +48,8 @@ class Controller:
             output_limit: Max bytes to buffer per stream. None uses server default.
             request_id: If provided and matches a previous submit, returns
                 the existing PID without creating a new process.
+            user: User to run the command as (requires can_switch_user=True).
+            can_switch_user: Whether the server can switch users (running as root).
         """
         if request_id and request_id in self._start_request_ids:
             return self._start_request_ids[request_id]
@@ -57,6 +61,8 @@ class Controller:
             env=env,
             cwd=cwd,
             output_limit=output_limit,
+            user=user,
+            can_switch_user=can_switch_user,
         )
         self._jobs[job.pid] = job
         if request_id:
