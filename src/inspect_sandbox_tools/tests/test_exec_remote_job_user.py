@@ -85,6 +85,91 @@ class TestMakePreexec:
         mock_exit.assert_called_once_with(1)
 
 
+class TestJobCreateHomeEnv:
+    """Test that Job.create() sets HOME when switching users."""
+
+    @pytest.mark.asyncio
+    async def test_user_sets_home_from_passwd(self) -> None:
+        """When switching user, HOME should be set from /etc/passwd."""
+        from unittest.mock import AsyncMock
+
+        from inspect_sandbox_tools._remote_tools._exec_remote._job import Job
+
+        pw = MagicMock()
+        pw.pw_uid = 65534
+        pw.pw_gid = 65534
+        pw.pw_dir = "/nonexistent"
+
+        with (
+            patch("pwd.getpwnam", return_value=pw),
+            patch(
+                "asyncio.create_subprocess_shell", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.pid = 1234
+            mock_proc.stdout = None
+            mock_proc.stderr = None
+            mock_proc.stdin = None
+            mock_proc.returncode = None
+            mock_create.return_value = mock_proc
+
+            await Job.create("echo hi", user="nobody", can_switch_user=True)
+
+            _, kwargs = mock_create.call_args
+            assert kwargs["env"]["HOME"] == "/nonexistent"
+
+    @pytest.mark.asyncio
+    async def test_no_user_does_not_override_home(self) -> None:
+        """When not switching user, HOME should not be modified."""
+        from inspect_sandbox_tools._remote_tools._exec_remote._job import Job
+
+        job = await Job.create("echo hi", user=None, can_switch_user=False)
+        await job.kill()
+        # No assertion on env needed — just verify it doesn't crash.
+        # The subprocess inherits os.environ unchanged when env=None.
+
+    @pytest.mark.asyncio
+    async def test_unknown_user_sets_home_to_slash(self) -> None:
+        """When passwd lookup fails for HOME, fall back to '/'."""
+        from unittest.mock import AsyncMock
+
+        from inspect_sandbox_tools._remote_tools._exec_remote._job import Job
+
+        # First call (in _is_current_user) returns a non-matching user,
+        # second call (in create for HOME) raises KeyError
+        call_count = 0
+
+        def mock_getpwnam(name: str) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # _is_current_user check — return non-matching uid
+                pw = MagicMock()
+                pw.pw_uid = 99999
+                return pw
+            raise KeyError(name)
+
+        with (
+            patch("pwd.getpwnam", side_effect=mock_getpwnam),
+            patch(
+                "asyncio.create_subprocess_shell", new_callable=AsyncMock
+            ) as mock_create,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.pid = 1234
+            mock_proc.stdout = None
+            mock_proc.stderr = None
+            mock_proc.stdin = None
+            mock_proc.returncode = None
+            mock_create.return_value = mock_proc
+
+            await Job.create("echo hi", user="ghost", can_switch_user=True)
+
+            _, kwargs = mock_create.call_args
+            assert kwargs["env"]["HOME"] == "/"
+
+
 class TestJobCreateUserValidation:
     """Test that Job.create() rejects user when can_switch_user is False."""
 
