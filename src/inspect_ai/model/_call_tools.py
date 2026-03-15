@@ -145,10 +145,22 @@ async def execute_tools(
                     inner_ex = inner_exception(ex)
                     raise inner_ex.with_traceback(inner_ex.__traceback__)
 
-            except TimeoutError:
+            except TimeoutError as ex:
                 tool_error = ToolCallError(
                     "timeout", "Command timed out before completing."
                 )
+                from inspect_ai.util._sandbox.exec_remote import (
+                    TimeoutExecError,
+                )
+
+                if isinstance(ex, TimeoutExecError):
+                    parts = []
+                    if ex.stdout:
+                        parts.append(ex.stdout)
+                    if ex.stderr:
+                        parts.append(ex.stderr)
+                    if parts:
+                        result = "\n".join(parts)
             except UnicodeDecodeError as ex:
                 tool_error = ToolCallError(
                     "unicode_decode",

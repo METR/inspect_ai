@@ -26,6 +26,16 @@ from inspect_ai._util._json_rpc import GenericJSONRPCErrorMapper, exec_model_req
 from ._cli import SANDBOX_CLI
 from ._json_rpc_transport import SandboxJSONRPCTransport
 
+
+class TimeoutExecError(TimeoutError):
+    """TimeoutError that carries partial stdout/stderr from a timed-out command."""
+
+    def __init__(self, stdout: str, stderr: str) -> None:
+        super().__init__("Command timed out before completing.")
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 if TYPE_CHECKING:
     from .._subprocess import ExecResult
     from .environment import SandboxEnvironment
@@ -561,7 +571,8 @@ async def exec_remote_awaitable(
         ExecResult[str] with success, returncode, stdout, and stderr.
 
     Raises:
-        TimeoutError: If options.timeout is set and the command exceeds it.
+        TimeoutExecError: If options.timeout is set and the command exceeds it.
+            Carries partial stdout/stderr accumulated before the timeout.
     """
     from .._subprocess import CircularByteBuffer
     from .._subprocess import ExecResult as ExecResultClass
@@ -603,7 +614,9 @@ async def exec_remote_awaitable(
         # between iterations rather than inside __anext__)
         with anyio.CancelScope(shield=True):
             await proc.kill()
-        raise
+        stdout = stdout_buffer.getvalue().decode("utf-8", errors="replace")
+        stderr = stderr_buffer.getvalue().decode("utf-8", errors="replace")
+        raise TimeoutExecError(stdout, stderr) from None
 
     # If we get here, the process was killed (no Completed event)
     return ExecResultClass[str](
