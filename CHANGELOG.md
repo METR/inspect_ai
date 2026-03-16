@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Hooks: Add eval context id fields to `ModelUsageData` hook.
+
 - OpenAI: Detect some additional "content_filter" stop reason conditions.
 - OpenAI: Handle `web_search_call` response witgh no `action` field.
 - Anthropic: Handle continuations that split server tool use and its result across messages.
