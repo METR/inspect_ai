@@ -18,6 +18,7 @@
 - Anthropic: Agent bridge now maps native bash tool to standard `bash()` tool.
 - Google: Update to `google-genai` v1.62.0 to fix issue with error handling in proxy configurations.
 - Hooks: Add eval context id fields to `ModelUsageData` hook.
+- Inspect View: Add middle-click support to open tasks and samples in a new browser tab.
 
 ## 0.3.196 (16 March 2026)
 
