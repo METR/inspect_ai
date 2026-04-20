@@ -2,6 +2,7 @@ import types
 from typing import Any
 from unittest.mock import AsyncMock, create_autospec
 
+import httpx
 import pytest
 from test_helpers.utils import skip_if_no_anthropic
 
@@ -136,6 +137,51 @@ def test_anthropic_should_retry():
     # check whether we handle error not being a dict (will raise if we don't)
     ex = APIStatusError("error", response=response, body={"error": "error"})
     model.api.should_retry(ex)
+
+
+def _make_400_error(message: str) -> Any:
+    from anthropic import APIStatusError
+
+    return APIStatusError(
+        "error",
+        response=httpx.Response(
+            status_code=400, request=httpx.Request("POST", "https://example.com")
+        ),
+        body={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        },
+    )
+
+
+@skip_if_no_anthropic
+def test_anthropic_should_retry_truncated_json() -> None:
+    model = get_model("anthropic/claude-sonnet-4-6")
+    ex = _make_400_error(
+        "The request body is not valid JSON: unexpected end of data: "
+        "line 1 column 18030593 (char 18030592)"
+    )
+    assert model.api.should_retry(ex)
+
+
+@skip_if_no_anthropic
+def test_anthropic_should_not_retry_genuine_400() -> None:
+    model = get_model("anthropic/claude-sonnet-4-6")
+    ex = _make_400_error("max_tokens: must be at least 1")
+    assert not model.api.should_retry(ex)
+
+
+@skip_if_no_anthropic
+def test_anthropic_should_not_retry_encoding_error() -> None:
+    model = get_model("anthropic/claude-sonnet-4-6")
+    ex = _make_400_error(
+        "The request body is not valid JSON: invalid high surrogate in string: "
+        "line 1 column 73900 (char 73899)"
+    )
+    assert not model.api.should_retry(ex)
 
 
 @skip_if_no_anthropic
