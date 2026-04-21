@@ -8,7 +8,6 @@ from io import BytesIO
 from logging import getLogger
 from typing import Any, AsyncIterator, Literal, Tuple, cast
 
-import anyio.to_thread
 import fsspec  # type: ignore
 from aiobotocore.response import StreamingBody
 from fsspec.asyn import AsyncFileSystem  # type: ignore
@@ -202,30 +201,16 @@ async def get_direct_url(path: str) -> str | None:
 
 
 async def build_segment_ref(
-    fs: Any,
     seg_path: str,
     seg_id: int,
     member_name: str,
-    seg_size: int | None,
 ) -> SegmentRef:
-    """Build a SegmentRef, resolving size and presigned URL concurrently.
-
-    If the segment file is gone (`FileNotFoundError` from `fs.info`), returns
-    a ref with `direct_url=None` so the client falls back to the legacy path.
-    """
-    direct_url: str | None = None
-    size = seg_size
-    try:
-        if size is None:
-            size = (await anyio.to_thread.run_sync(fs.info, seg_path)).size
-        direct_url = await get_direct_url(seg_path)
-    except FileNotFoundError:
-        pass
+    """Build a SegmentRef with a presigned URL for the segment zip."""
+    direct_url = await get_direct_url(seg_path)
     return SegmentRef(
         id=seg_id,
         member_name=member_name,
         direct_url=direct_url,
-        size=size or 0,
     )
 
 

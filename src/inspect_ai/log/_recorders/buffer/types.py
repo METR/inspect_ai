@@ -63,8 +63,6 @@ class SegmentRef(BaseModel):
     """File inside the segment zip to extract (e.g. "42_0.json")."""
     direct_url: str | None
     """Presigned URL for the segment zip, or None when unavailable."""
-    size: int
-    """Segment zip size in bytes. Used by the client zip reader."""
 
 
 class PendingSampleUrls(BaseModel):

@@ -460,11 +460,9 @@ def view_server_app(
             [
                 partial(
                     build_segment_ref,
-                    fs,
                     f"{store._dir}{segment_name(seg.id)}",
                     seg.id,
                     member_name,
-                    seg.size,
                 )
                 for seg in segments
             ]
