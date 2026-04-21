@@ -1207,3 +1207,39 @@ def test_api_pending_sample_data_urls_has_more_default_false(
     resp.raise_for_status()
     body = resp.json()
     assert body["has_more"] is False
+
+
+def test_api_pending_sample_data_urls_truncates_to_max_segments(
+    view_client: ViewTestClient,
+) -> None:
+    fname = "2025-01-01T00-00-00+00-00_task_taskid.eval"
+    full_path = write_eval_log(view_client.log_dir, fname)
+    _create_multi_segment_sample_buffer(full_path, num_segments=3)
+
+    resp = view_client.request(
+        "GET",
+        f"/pending-sample-data-urls?log={urllib.parse.quote_plus(full_path)}"
+        "&id=sample1&epoch=0&max-segments=2",
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    assert [s["id"] for s in body["segments"]] == [0, 1]
+    assert body["has_more"] is True
+
+
+def test_api_pending_sample_data_urls_max_segments_exact_fit(
+    view_client: ViewTestClient,
+) -> None:
+    fname = "2025-01-01T00-00-00+00-00_task_taskid.eval"
+    full_path = write_eval_log(view_client.log_dir, fname)
+    _create_multi_segment_sample_buffer(full_path, num_segments=3)
+
+    resp = view_client.request(
+        "GET",
+        f"/pending-sample-data-urls?log={urllib.parse.quote_plus(full_path)}"
+        "&id=sample1&epoch=0&max-segments=3",
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    assert [s["id"] for s in body["segments"]] == [0, 1, 2]
+    assert body["has_more"] is False

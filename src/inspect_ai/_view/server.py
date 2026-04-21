@@ -409,6 +409,7 @@ def view_server_app(
             "after-message-pool-id", request, int
         )
         after_call_pool_id = query_param_optional("after-call-pool-id", request, int)
+        max_segments = query_param_optional("max-segments", request, int)
 
         # Only filestore-backed buffers can serve direct URLs; an in-process
         # database buffer (running eval, not yet synced) must fall back.
@@ -432,7 +433,7 @@ def view_server_app(
         if sample is None:
             return web.Response(status=404)
 
-        segments = segments_for_sample_cursor(
+        all_segments = segments_for_sample_cursor(
             manifest,
             sample,
             after_event_id=after_event_id if after_event_id is not None else -1,
@@ -446,6 +447,11 @@ def view_server_app(
             if after_call_pool_id is not None
             else -1,
         )
+        if max_segments is not None and max_segments >= 0:
+            segments = all_segments[:max_segments]
+        else:
+            segments = all_segments
+        has_more = len(segments) < len(all_segments)
 
         fs = filesystem(store._dir)
         etag = ""
@@ -472,6 +478,7 @@ def view_server_app(
             segments=refs,
             etag=etag,
             complete=sample.summary.completed or False,
+            has_more=has_more,
         )
         return web.Response(
             body=body.model_dump_json(), content_type="application/json"
