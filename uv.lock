@@ -1748,6 +1748,11 @@ doc = [
     { name = "types-pyyaml" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "boto3" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "adlfs", marker = "extra == 'dev'", specifier = ">=2025.8.0" },
@@ -1855,6 +1860,9 @@ requires-dist = [
     { name = "zstandard", specifier = ">=0.20.0" },
 ]
 provides-extras = ["dev", "dev-mcp-tests", "doc", "dist"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "boto3", specifier = ">=1.37.3" }]
 
 [[package]]
 name = "inspect-scout"

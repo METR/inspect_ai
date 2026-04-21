@@ -894,7 +894,7 @@ def sync_to_filestore(
 
     # write the segment file and update the manifest
     if len(segment_files) > 0:
-        filestore.write_segment(segment_id, segment_files)
+        segment_size = filestore.write_segment(segment_id, segment_files)
         manifest.segments.append(
             Segment(
                 id=segment_id,
@@ -902,6 +902,7 @@ def sync_to_filestore(
                 last_attachment_id=last_attachment_id,
                 last_message_pool_id=last_message_pool_id,
                 last_call_pool_id=last_call_pool_id,
+                size=segment_size,
             )
         )
 

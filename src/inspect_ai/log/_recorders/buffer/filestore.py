@@ -34,6 +34,7 @@ class Segment(BaseModel):
     last_attachment_id: int
     last_message_pool_id: int = 0
     last_call_pool_id: int = 0
+    size: int | None = None
 
 
 class SegmentFile(BaseModel):
@@ -51,6 +52,32 @@ class Manifest(BaseModel):
     metrics: list[TaskDisplayMetric] = Field(default_factory=list)
     samples: list[SampleManifest] = Field(default_factory=list)
     segments: list[Segment] = Field(default_factory=list)
+
+
+def segments_for_sample_cursor(
+    manifest: Manifest,
+    sample: SampleManifest,
+    *,
+    after_event_id: int,
+    after_attachment_id: int,
+    after_message_pool_id: int,
+    after_call_pool_id: int,
+) -> list[Segment]:
+    """Return segments for `sample` that can contain data newer than the cursors.
+
+    OR-logic across cursor types: a segment qualifies if any of its
+    last_*_id values exceeds the corresponding cursor. Over-inclusive by
+    design; individual items must be post-filtered by the caller.
+    """
+    by_id = [s for s in manifest.segments if s.id in sample.segments]
+    return [
+        s
+        for s in by_id
+        if s.last_event_id > after_event_id
+        or s.last_attachment_id > after_attachment_id
+        or s.last_message_pool_id > after_message_pool_id
+        or s.last_call_pool_id > after_call_pool_id
+    ]
 
 
 MANIFEST = "manifest.json"
@@ -78,7 +105,7 @@ class SampleBufferFilestore(SampleBuffer):
         with file(self._manifest_file(), "wb") as f:
             f.write(to_json_safe(manifest))
 
-    def write_segment(self, id: int, files: list[SegmentFile]) -> None:
+    def write_segment(self, id: int, files: list[SegmentFile]) -> int:
         # write the file locally
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as segment_file:
             name = segment_file.name
@@ -91,6 +118,8 @@ class SampleBufferFilestore(SampleBuffer):
             segment_file.flush()
             os.fsync(segment_file.fileno())
 
+        size = os.path.getsize(name)
+
         # write then move for atomicity
         try:
             with open(name, "rb") as zf:
@@ -99,6 +128,8 @@ class SampleBufferFilestore(SampleBuffer):
                     f.flush()
         finally:
             os.unlink(name)
+
+        return size
 
     def read_manifest(self) -> Manifest | None:
         try:
@@ -212,17 +243,14 @@ class SampleBufferFilestore(SampleBuffer):
         after_call_pool_id = (
             after_call_pool_id if after_call_pool_id is not None else -1
         )
-        segments = [
-            segment for segment in manifest.segments if segment.id in sample.segments
-        ]
-        segments = [
-            segment
-            for segment in segments
-            if segment.last_event_id > after_event_id
-            or segment.last_attachment_id > after_attachment_id
-            or segment.last_message_pool_id > after_message_pool_id
-            or segment.last_call_pool_id > after_call_pool_id
-        ]
+        segments = segments_for_sample_cursor(
+            manifest,
+            sample,
+            after_event_id=after_event_id,
+            after_attachment_id=after_attachment_id,
+            after_message_pool_id=after_message_pool_id,
+            after_call_pool_id=after_call_pool_id,
+        )
 
         if not segments:
             return SampleData(events=[], attachments=[])

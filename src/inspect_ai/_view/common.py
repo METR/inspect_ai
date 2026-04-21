@@ -177,6 +177,27 @@ class LogInfo(BaseModel):
     direct_url: str | None = None
 
 
+async def get_direct_url(path: str) -> str | None:
+    """Return a presigned URL for `path` if it's on S3, else None.
+
+    Swallows exceptions from the presigning path (returns None and logs a
+    warning); callers must assume any S3 path can still land `None` here.
+    """
+    fs = filesystem(path)
+    if not fs.is_s3():
+        return None
+    try:
+        connection = async_connection(path)
+        # _url is the async variant of url() (fsspec convention)
+        return await connection._url(path, expires=3600)
+    except Exception:
+        logger.warning(
+            f"Failed to generate presigned URL for {path}",
+            exc_info=True,
+        )
+        return None
+
+
 async def get_log_info(
     log_file: str,
     generate_direct_url: bool = False,
@@ -189,22 +210,7 @@ async def get_log_info(
             presigned URL in the response.
     """
     size = await get_log_size(log_file)
-    direct_url: str | None = None
-
-    if generate_direct_url:
-        fs = filesystem(log_file)
-        if fs.is_s3():
-            try:
-                connection = async_connection(log_file)
-                # _url is the async variant of url() (fsspec convention)
-                url: str = await connection._url(log_file, expires=3600)
-                direct_url = url
-            except Exception:
-                logger.warning(
-                    f"Failed to generate presigned URL for {log_file}",
-                    exc_info=True,
-                )
-
+    direct_url = await get_direct_url(log_file) if generate_direct_url else None
     return LogInfo(size=size, direct_url=direct_url)
 
 

@@ -27,11 +27,22 @@ from inspect_ai.log._file import (
     read_eval_log_headers_async,
 )
 from inspect_ai.log._recorders.buffer.buffer import sample_buffer
+from inspect_ai.log._recorders.buffer.filestore import (
+    SampleBufferFilestore,
+    segment_file_name,
+    segment_name,
+    segments_for_sample_cursor,
+)
+from inspect_ai.log._recorders.buffer.types import (
+    PendingSampleUrls,
+    SegmentRef,
+)
 
 from ._dist import resolve_dist_directory
 from .common import (
     async_connection,
     delete_log,
+    get_direct_url,
     get_log_bytes,
     get_log_dir,
     get_log_file,
@@ -381,6 +392,88 @@ def view_server_app(
             return web.Response(status=404)
         else:
             return web.Response(body=sample_data.model_dump_json())
+
+    @routes.get("/api/pending-sample-data-urls")
+    async def api_pending_sample_data_urls(request: web.Request) -> web.Response:
+        file = query_param_required("log", request, str)
+        file = urllib.parse.unquote(file)
+        validate_log_file_request(file)
+
+        id = query_param_required("id", request, str)
+        epoch = query_param_required("epoch", request, int)
+
+        after_event_id = query_param_optional("last-event-id", request, int)
+        after_attachment_id = query_param_optional("after-attachment-id", request, int)
+        after_message_pool_id = query_param_optional(
+            "after-message-pool-id", request, int
+        )
+        after_call_pool_id = query_param_optional("after-call-pool-id", request, int)
+
+        store = SampleBufferFilestore(file, create=False)
+        manifest = store.read_manifest()
+        if manifest is None:
+            return web.Response(status=404)
+
+        sample = next(
+            (
+                s
+                for s in manifest.samples
+                if str(s.summary.id) == str(id) and s.summary.epoch == epoch
+            ),
+            None,
+        )
+        if sample is None:
+            return web.Response(status=404)
+
+        segments = segments_for_sample_cursor(
+            manifest,
+            sample,
+            after_event_id=after_event_id if after_event_id is not None else -1,
+            after_attachment_id=after_attachment_id
+            if after_attachment_id is not None
+            else -1,
+            after_message_pool_id=after_message_pool_id
+            if after_message_pool_id is not None
+            else -1,
+            after_call_pool_id=after_call_pool_id
+            if after_call_pool_id is not None
+            else -1,
+        )
+
+        fs = filesystem(store._dir)
+        etag = ""
+        try:
+            info = fs.info(store._manifest_file())
+            etag = info.etag or f"{info.mtime}{info.size}"
+        except FileNotFoundError:
+            pass
+
+        refs: list[SegmentRef] = []
+        for seg in segments:
+            seg_path = f"{store._dir}{segment_name(seg.id)}"
+            if seg.size is not None:
+                size = seg.size
+            else:
+                size = fs.info(seg_path).size
+            refs.append(
+                SegmentRef(
+                    id=seg.id,
+                    member_name=segment_file_name(
+                        sample.summary.id, sample.summary.epoch
+                    ),
+                    direct_url=await get_direct_url(seg_path),
+                    size=size,
+                )
+            )
+
+        body = PendingSampleUrls(
+            segments=refs,
+            etag=etag,
+            complete=sample.summary.completed or False,
+        )
+        return web.Response(
+            body=body.model_dump_json(), content_type="application/json"
+        )
 
     if dist_dir is not None:
 

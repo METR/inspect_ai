@@ -234,6 +234,11 @@ doc = [
 ]
 dist = ["twine", "build"]
 
+[dependency-groups]
+dev = [
+    "boto3>=1.37.3",
+]
+
 [tool.typos.default.extend-words]
 ba = "ba"
 lsat = "lsat"
