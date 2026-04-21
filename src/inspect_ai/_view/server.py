@@ -1,6 +1,7 @@
 import logging
 import os
 import urllib.parse
+from functools import partial
 from io import BytesIO
 from logging import LogRecord, getLogger
 from pathlib import Path
@@ -16,6 +17,7 @@ from pydantic_core import to_jsonable_python
 
 from inspect_ai._display import display
 from inspect_ai._eval.evalset import EvalSet, read_eval_set_info
+from inspect_ai._util._async import tg_collect
 from inspect_ai._util.azure import is_azure_auth_error, is_azure_path
 from inspect_ai._util.constants import DEFAULT_SERVER_HOST, DEFAULT_VIEW_PORT
 from inspect_ai._util.file import filesystem
@@ -35,14 +37,13 @@ from inspect_ai.log._recorders.buffer.filestore import (
 )
 from inspect_ai.log._recorders.buffer.types import (
     PendingSampleUrls,
-    SegmentRef,
 )
 
 from ._dist import resolve_dist_directory
 from .common import (
     async_connection,
+    build_segment_ref,
     delete_log,
-    get_direct_url,
     get_log_bytes,
     get_log_dir,
     get_log_file,
@@ -409,7 +410,13 @@ def view_server_app(
         )
         after_call_pool_id = query_param_optional("after-call-pool-id", request, int)
 
-        store = SampleBufferFilestore(file, create=False)
+        # Only filestore-backed buffers can serve direct URLs; an in-process
+        # database buffer (running eval, not yet synced) must fall back.
+        buffer = sample_buffer(file)
+        if not isinstance(buffer, SampleBufferFilestore):
+            return web.Response(status=404)
+        store = buffer
+
         manifest = store.read_manifest()
         if manifest is None:
             return web.Response(status=404)
@@ -448,23 +455,20 @@ def view_server_app(
         except FileNotFoundError:
             pass
 
-        refs: list[SegmentRef] = []
-        for seg in segments:
-            seg_path = f"{store._dir}{segment_name(seg.id)}"
-            if seg.size is not None:
-                size = seg.size
-            else:
-                size = fs.info(seg_path).size
-            refs.append(
-                SegmentRef(
-                    id=seg.id,
-                    member_name=segment_file_name(
-                        sample.summary.id, sample.summary.epoch
-                    ),
-                    direct_url=await get_direct_url(seg_path),
-                    size=size,
+        member_name = segment_file_name(sample.summary.id, sample.summary.epoch)
+        refs = await tg_collect(
+            [
+                partial(
+                    build_segment_ref,
+                    fs,
+                    f"{store._dir}{segment_name(seg.id)}",
+                    seg.id,
+                    member_name,
+                    seg.size,
                 )
-            )
+                for seg in segments
+            ]
+        )
 
         body = PendingSampleUrls(
             segments=refs,

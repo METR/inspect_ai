@@ -8,6 +8,7 @@ from io import BytesIO
 from logging import getLogger
 from typing import Any, AsyncIterator, Literal, Tuple, cast
 
+import anyio.to_thread
 import fsspec  # type: ignore
 from aiobotocore.response import StreamingBody
 from fsspec.asyn import AsyncFileSystem  # type: ignore
@@ -31,6 +32,7 @@ from inspect_ai.log._file import (
     log_files_from_ls,
     read_eval_log_async,
 )
+from inspect_ai.log._recorders.buffer.types import SegmentRef
 
 logger = getLogger(__name__)
 
@@ -189,13 +191,42 @@ async def get_direct_url(path: str) -> str | None:
     try:
         connection = async_connection(path)
         # _url is the async variant of url() (fsspec convention)
-        return await connection._url(path, expires=3600)
+        url: str = await connection._url(path, expires=3600)
+        return url
     except Exception:
         logger.warning(
             f"Failed to generate presigned URL for {path}",
             exc_info=True,
         )
         return None
+
+
+async def build_segment_ref(
+    fs: Any,
+    seg_path: str,
+    seg_id: int,
+    member_name: str,
+    seg_size: int | None,
+) -> SegmentRef:
+    """Build a SegmentRef, resolving size and presigned URL concurrently.
+
+    If the segment file is gone (`FileNotFoundError` from `fs.info`), returns
+    a ref with `direct_url=None` so the client falls back to the legacy path.
+    """
+    direct_url: str | None = None
+    size = seg_size
+    try:
+        if size is None:
+            size = (await anyio.to_thread.run_sync(fs.info, seg_path)).size
+        direct_url = await get_direct_url(seg_path)
+    except FileNotFoundError:
+        pass
+    return SegmentRef(
+        id=seg_id,
+        member_name=member_name,
+        direct_url=direct_url,
+        size=size or 0,
+    )
 
 
 async def get_log_info(
