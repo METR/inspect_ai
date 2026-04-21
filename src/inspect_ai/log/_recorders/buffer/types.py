@@ -72,6 +72,8 @@ class PendingSampleUrls(BaseModel):
     """Manifest etag for client-side cache validation."""
     complete: bool
     """Whether the sample has completed (matches EvalSampleSummary.completed)."""
+    has_more: bool = False
+    """True when the server truncated the segment list (more remain past this chunk)."""
 
 
 class SampleBuffer(abc.ABC):

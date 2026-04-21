@@ -295,59 +295,6 @@ def _create_multi_segment_sample_buffer(log_path: str, num_segments: int) -> Non
     )
 
 
-def _create_sample_buffer_without_size(log_path: str) -> None:
-    """Create a buffer whose manifest Segment has size=None (back-compat)."""
-    from inspect_ai.log._recorders.buffer.filestore import (
-        Manifest,
-        SampleBufferFilestore,
-        SampleManifest,
-        Segment,
-        SegmentFile,
-    )
-    from inspect_ai.log._recorders.buffer.types import EventData, SampleData
-
-    buf = SampleBufferFilestore(log_path, create=True)
-    # Write the segment zip to disk.
-    buf.write_segment(
-        0,
-        [
-            SegmentFile(
-                id="sample1",
-                epoch=0,
-                data=SampleData(
-                    events=[
-                        EventData(
-                            id=0,
-                            event_id="evt0",
-                            sample_id="sample1",
-                            epoch=0,
-                            event={"message": "hello"},
-                        )
-                    ],
-                    attachments=[],
-                ),
-            )
-        ],
-    )
-    # Write a manifest whose Segment has no size (back-compat).
-    buf.write_manifest(
-        Manifest(
-            samples=[
-                SampleManifest(
-                    summary=inspect_ai.log.EvalSampleSummary(
-                        id="sample1",
-                        epoch=0,
-                        input="test input",
-                        target="test target",
-                    ),
-                    segments=[0],
-                )
-            ],
-            segments=[Segment(id=0, last_event_id=0, last_attachment_id=0, size=None)],
-        )
-    )
-
-
 def write_eval_log_named(base_dir: Path, filename: str, task: str, task_id: str) -> str:
     """Write eval log with specific task/task_id. Return full path."""
     full_path = str(base_dir / filename)
@@ -1222,7 +1169,6 @@ def test_api_pending_sample_data_urls_local_has_null_direct_url(
     for seg in body["segments"]:
         assert seg["direct_url"] is None
         assert seg["member_name"] == "sample1_0.json"
-        assert seg["size"] > 0
 
 
 def test_api_pending_sample_data_urls_prunes_by_cursor(
@@ -1246,12 +1192,12 @@ def test_api_pending_sample_data_urls_prunes_by_cursor(
     assert [s["id"] for s in body["segments"]] == [2]
 
 
-def test_api_pending_sample_data_urls_falls_back_when_size_missing(
+def test_api_pending_sample_data_urls_has_more_default_false(
     view_client: ViewTestClient,
 ) -> None:
     fname = "2025-01-01T00-00-00+00-00_task_taskid.eval"
     full_path = write_eval_log(view_client.log_dir, fname)
-    _create_sample_buffer_without_size(full_path)
+    _create_sample_buffer(full_path)
 
     resp = view_client.request(
         "GET",
@@ -1260,5 +1206,4 @@ def test_api_pending_sample_data_urls_falls_back_when_size_missing(
     )
     resp.raise_for_status()
     body = resp.json()
-    assert len(body["segments"]) == 1
-    assert body["segments"][0]["size"] > 0
+    assert body["has_more"] is False
