@@ -470,6 +470,7 @@ def view_server_app(
         after_attachment_id: int | None = Query(None, alias="after-attachment-id"),
         after_message_pool_id: int | None = Query(None, alias="after-message-pool-id"),
         after_call_pool_id: int | None = Query(None, alias="after-call-pool-id"),
+        max_segments: int | None = Query(None, alias="max-segments"),
     ) -> PendingSampleUrls | Response:
         file = urllib.parse.unquote(log)
         await _validate_read(request, file)
@@ -498,7 +499,7 @@ def view_server_app(
         if sample is None:
             return Response(status_code=HTTP_404_NOT_FOUND)
 
-        segments = segments_for_sample_cursor(
+        all_segments = segments_for_sample_cursor(
             manifest,
             sample,
             after_event_id=last_event_id if last_event_id is not None else -1,
@@ -512,6 +513,11 @@ def view_server_app(
             if after_call_pool_id is not None
             else -1,
         )
+        if max_segments is not None and max_segments >= 0:
+            segments = all_segments[:max_segments]
+        else:
+            segments = all_segments
+        has_more = len(segments) < len(all_segments)
 
         fs = filesystem(store._dir)
         etag = ""
@@ -538,6 +544,7 @@ def view_server_app(
             segments=refs,
             etag=etag,
             complete=sample.summary.completed or False,
+            has_more=has_more,
         )
 
     return app
