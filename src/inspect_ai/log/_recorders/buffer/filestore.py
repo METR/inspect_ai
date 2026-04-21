@@ -53,6 +53,40 @@ class Manifest(BaseModel):
     segments: list[Segment] = Field(default_factory=list)
 
 
+def segments_for_sample_cursor(
+    manifest: Manifest,
+    sample: SampleManifest,
+    *,
+    after_event_id: int | None,
+    after_attachment_id: int | None,
+    after_message_pool_id: int | None,
+    after_call_pool_id: int | None,
+) -> list[Segment]:
+    """Return segments for `sample` that can contain data newer than the cursors.
+
+    OR-logic across cursor types: a segment qualifies if any of its
+    last_*_id values exceeds the corresponding cursor. `None` is treated
+    as `-1` (no cursor yet). Over-inclusive by design; individual items
+    must be post-filtered by the caller.
+    """
+    after_event = after_event_id if after_event_id is not None else -1
+    after_attachment = after_attachment_id if after_attachment_id is not None else -1
+    after_message_pool = (
+        after_message_pool_id if after_message_pool_id is not None else -1
+    )
+    after_call_pool = after_call_pool_id if after_call_pool_id is not None else -1
+
+    by_id = [s for s in manifest.segments if s.id in sample.segments]
+    return [
+        s
+        for s in by_id
+        if s.last_event_id > after_event
+        or s.last_attachment_id > after_attachment
+        or s.last_message_pool_id > after_message_pool
+        or s.last_call_pool_id > after_call_pool
+    ]
+
+
 MANIFEST = "manifest.json"
 
 
@@ -200,8 +234,16 @@ class SampleBufferFilestore(SampleBuffer):
         if sample is None:
             return None
 
-        # determine which segments we need to return in order to
-        # satisfy the cursor parameters
+        segments = segments_for_sample_cursor(
+            manifest,
+            sample,
+            after_event_id=after_event_id,
+            after_attachment_id=after_attachment_id,
+            after_message_pool_id=after_message_pool_id,
+            after_call_pool_id=after_call_pool_id,
+        )
+
+        # defaults for the per-item post-filter below
         after_event_id = after_event_id if after_event_id is not None else -1
         after_attachment_id = (
             after_attachment_id if after_attachment_id is not None else -1
@@ -212,17 +254,6 @@ class SampleBufferFilestore(SampleBuffer):
         after_call_pool_id = (
             after_call_pool_id if after_call_pool_id is not None else -1
         )
-        segments = [
-            segment for segment in manifest.segments if segment.id in sample.segments
-        ]
-        segments = [
-            segment
-            for segment in segments
-            if segment.last_event_id > after_event_id
-            or segment.last_attachment_id > after_attachment_id
-            or segment.last_message_pool_id > after_message_pool_id
-            or segment.last_call_pool_id > after_call_pool_id
-        ]
 
         if not segments:
             return SampleData(events=[], attachments=[])

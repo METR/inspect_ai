@@ -4,6 +4,7 @@ import inspect
 import os
 import urllib.parse
 from collections.abc import AsyncIterable
+from functools import partial
 from io import BytesIO
 from logging import getLogger
 from typing import Any, AsyncIterator, Literal, Tuple, cast
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 from s3fs import S3FileSystem  # type: ignore
 from s3fs.core import _error_wrapper, version_id_kw  # type: ignore
 
+from inspect_ai._util._async import tg_collect
 from inspect_ai._util.file import default_fs_options, dirname, filesystem, size_in_mb
 from inspect_ai._view.azure import (
     azure_warning_hint,
@@ -31,6 +33,14 @@ from inspect_ai.log._file import (
     log_files_from_ls,
     read_eval_log_async,
 )
+from inspect_ai.log._recorders.buffer.buffer import sample_buffer
+from inspect_ai.log._recorders.buffer.filestore import (
+    SampleBufferFilestore,
+    segment_file_name,
+    segment_name,
+    segments_for_sample_cursor,
+)
+from inspect_ai.log._recorders.buffer.types import PendingSampleUrls, SegmentRef
 
 logger = getLogger(__name__)
 
@@ -177,6 +187,121 @@ class LogInfo(BaseModel):
     direct_url: str | None = None
 
 
+async def get_direct_url(path: str) -> str | None:
+    """Return a presigned URL for `path` if it's on S3, else None.
+
+    Swallows exceptions from the presigning path (returns None and logs a
+    warning); callers must assume any S3 path can still land `None` here.
+    """
+    fs = filesystem(path)
+    if not fs.is_s3():
+        return None
+    try:
+        connection = async_connection(path)
+        # _url is the async variant of url() (fsspec convention)
+        url: str = await connection._url(path, expires=3600)
+        return url
+    except Exception:
+        logger.warning(
+            f"Failed to generate presigned URL for {path}",
+            exc_info=True,
+        )
+        return None
+
+
+async def build_segment_ref(
+    seg_path: str,
+    seg_id: int,
+    member_name: str,
+) -> SegmentRef:
+    """Build a SegmentRef with a presigned URL for the segment zip."""
+    direct_url = await get_direct_url(seg_path)
+    return SegmentRef(
+        id=seg_id,
+        member_name=member_name,
+        direct_url=direct_url,
+    )
+
+
+async def build_pending_sample_urls(
+    file: str,
+    id: str,
+    epoch: int,
+    after_event_id: int | None,
+    after_attachment_id: int | None,
+    after_message_pool_id: int | None,
+    after_call_pool_id: int | None,
+    max_segments: int | None,
+) -> PendingSampleUrls | None:
+    """Build the `/pending-sample-data-urls` response, or None for 404.
+
+    Returns None when the buffer is not filestore-backed (in-process database
+    buffer for a running eval, not yet synced), the manifest is missing, or
+    the requested sample is not in the manifest. Callers map None to 404.
+    """
+    buffer = sample_buffer(file)
+    if not isinstance(buffer, SampleBufferFilestore):
+        return None
+    store = buffer
+
+    manifest = store.read_manifest()
+    if manifest is None:
+        return None
+
+    sample = next(
+        (
+            s
+            for s in manifest.samples
+            if str(s.summary.id) == str(id) and s.summary.epoch == epoch
+        ),
+        None,
+    )
+    if sample is None:
+        return None
+
+    all_segments = segments_for_sample_cursor(
+        manifest,
+        sample,
+        after_event_id=after_event_id,
+        after_attachment_id=after_attachment_id,
+        after_message_pool_id=after_message_pool_id,
+        after_call_pool_id=after_call_pool_id,
+    )
+    if max_segments is not None and max_segments >= 0:
+        segments = all_segments[:max_segments]
+    else:
+        segments = all_segments
+    has_more = len(segments) < len(all_segments)
+
+    fs = filesystem(store._dir)
+    etag = ""
+    try:
+        info = fs.info(store._manifest_file())
+        etag = info.etag or f"{info.mtime}{info.size}"
+    except FileNotFoundError:
+        pass
+
+    member_name = segment_file_name(sample.summary.id, sample.summary.epoch)
+    refs = await tg_collect(
+        [
+            partial(
+                build_segment_ref,
+                f"{store._dir}{segment_name(seg.id)}",
+                seg.id,
+                member_name,
+            )
+            for seg in segments
+        ]
+    )
+
+    return PendingSampleUrls(
+        segments=refs,
+        etag=etag,
+        complete=sample.summary.completed or False,
+        has_more=has_more,
+    )
+
+
 async def get_log_info(
     log_file: str,
     generate_direct_url: bool = False,
@@ -189,22 +314,7 @@ async def get_log_info(
             presigned URL in the response.
     """
     size = await get_log_size(log_file)
-    direct_url: str | None = None
-
-    if generate_direct_url:
-        fs = filesystem(log_file)
-        if fs.is_s3():
-            try:
-                connection = async_connection(log_file)
-                # _url is the async variant of url() (fsspec convention)
-                url: str = await connection._url(log_file, expires=3600)
-                direct_url = url
-            except Exception:
-                logger.warning(
-                    f"Failed to generate presigned URL for {log_file}",
-                    exc_info=True,
-                )
-
+    direct_url = await get_direct_url(log_file) if generate_direct_url else None
     return LogInfo(size=size, direct_url=direct_url)
 
 
