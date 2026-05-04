@@ -16,12 +16,10 @@ from google.genai import Client
 from google.genai.errors import APIError, ClientError
 from google.genai.types import (
     Candidate,
-    CodeExecutionResult,
     Content,
     ContentListUnion,
     ContentListUnionDict,
     ContentUnion,
-    ExecutableCode,
     File,
     FinishReason,
     FunctionCall,
@@ -49,6 +47,7 @@ from google.genai.types import (
     ToolCodeExecution,
     ToolConfig,
     ToolListUnion,
+    ToolType,
 )
 from pydantic import JsonValue
 from shortuuid import uuid
@@ -128,6 +127,18 @@ GOOGLE_API_KEY = "GOOGLE_API_KEY"
 VERTEX_API_KEY = "VERTEX_API_KEY"
 
 SAFETY_SETTINGS = "safety_settings"
+
+# Key under ContentReasoning.internal that links a redacted reasoning block
+# to the function_call whose thought_signature it carries. Used to preserve
+# part ordering on replay when a function_call appears at a specific position
+# relative to other content blocks (visible thought, server tool calls).
+_GEMINI_FUNCTION_CALL_ID_KEY = "gemini_function_call_id"
+
+# Server-side tool_call types that we round-trip as ContentToolUse(tool_type="web_search").
+# Anything outside this set is warned-and-skipped by server_tool_use_from_tool_call.
+_SUPPORTED_SERVER_TOOL_TYPES: frozenset[ToolType] = frozenset(
+    {ToolType.GOOGLE_SEARCH_WEB, ToolType.GOOGLE_SEARCH_IMAGE}
+)
 DEFAULT_SAFETY_SETTINGS: list[SafetySettingDict] = [
     {
         "category": HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
@@ -1121,7 +1132,7 @@ async def content(
                         # to the next part (don't emit a separate thought part during replay)
                         if content.redacted:
                             function_call_id = (
-                                content.internal.get("gemini_function_call_id")
+                                content.internal.get(_GEMINI_FUNCTION_CALL_ID_KEY)
                                 if isinstance(content.internal, dict)
                                 else None
                             )
@@ -1219,11 +1230,17 @@ async def content(
                     apply_reasoning_signature(part, working_reasoning_block)
                     working_reasoning_block = None
                 elif server_tool_signature is not None:
-                    # Gemini can omit a signature on a client function_call when
-                    # the same step also includes signed server-side tool calls.
-                    # On replay, Gemini still validates the client function_call,
-                    # so use the step's server-side signature for the first
-                    # unsigned client function_call.
+                    # EMPIRICAL: gemini-3.1-pro-preview occasionally returns a
+                    # client function_call without a thought_signature in a step
+                    # that also contains a signed server-side tool_call. The
+                    # validator on the next turn still requires a signature on
+                    # that function_call. Reusing the server-tool's signature
+                    # in the same step has been observed to satisfy the
+                    # validator. This is NOT documented behavior; revisit when
+                    # Gemini 3 ships GA. If the unsigned-client-call case stops
+                    # occurring, drop this branch and let the validator's 400
+                    # surface naturally rather than papering over a real schema
+                    # mismatch.
                     part.thought_signature = server_tool_signature
                     server_tool_signature = None
 
@@ -1477,7 +1494,7 @@ def completion_choice_from_candidate(
                         ContentReasoning(
                             reasoning=base64.b64encode(part.thought_signature).decode(),
                             redacted=True,
-                            internal={"gemini_function_call_id": function_call_id},
+                            internal={_GEMINI_FUNCTION_CALL_ID_KEY: function_call_id},
                         )
                     )
                     working_reasoning_block = None
@@ -1551,6 +1568,26 @@ def completion_choice_from_candidate(
                 )
                 content.append(working_reasoning_block)
             else:
+                # executable_code is its own branch: the originating Parts (and
+                # their thought_signature, in mixed mode) are serialized into
+                # ContentToolUse.internal["gemini_parts"] so replay can re-attach
+                # the signature directly to the executable_code part. Mirrors
+                # how function_call anchors are handled, and avoids overwriting
+                # any preceding visible thought-text via _consolidate_thought_signature.
+                if part.executable_code is not None:
+                    # lookahead for execution result Part (carries its own signature)
+                    result_part = (
+                        parts[i + 1]
+                        if i + 1 < len(parts)
+                        and parts[i + 1].code_execution_result is not None
+                        else None
+                    )
+                    content.append(
+                        server_tool_use_from_executable_code(part, result_part)
+                    )
+                    working_reasoning_block = None
+                    continue
+
                 # Check if this block has an associated thought_signature and
                 # whether it corresponds to the previous ContentReasoning block.
                 if part.thought_signature is not None:
@@ -1560,19 +1597,6 @@ def completion_choice_from_candidate(
 
                 if part.text is not None:
                     content.append(ContentText(text=part.text))
-                if part.executable_code is not None:
-                    # lookahead for execution result
-                    code_execution_result = (
-                        parts[i + 1].code_execution_result
-                        if i + 1 < len(parts)
-                        else None
-                    )
-                    # append tool use
-                    content.append(
-                        server_tool_use_from_executable_code(
-                            part.executable_code, code_execution_result
-                        )
-                    )
 
     # distribute citations to individual ContentText parts with adjusted indexes
     citations = get_candidate_citations(candidate)
@@ -1782,8 +1806,12 @@ def usage_metadata_to_model_usage(
 
 
 def server_tool_use_from_executable_code(
-    executable_code: ExecutableCode, result: CodeExecutionResult | None
+    executable_code_part: Part, result_part: Part | None
 ) -> ContentToolUse:
+    executable_code = executable_code_part.executable_code
+    assert executable_code is not None
+    result = result_part.code_execution_result if result_part is not None else None
+
     # parse out output and error
     if result is not None:
         result_output = result.output or ""
@@ -1795,7 +1823,17 @@ def server_tool_use_from_executable_code(
         result_output = ""
         result_error = None
 
-    # return tool use
+    # serialize the originating Parts so we can replay them verbatim — this
+    # preserves any thought_signature carried on either part, which Gemini 3
+    # mixed-mode requires on the next turn (mirrors the web_search path).
+    internal_parts = [
+        executable_code_part.model_dump(exclude_none=True, by_alias=True, mode="json")
+    ]
+    if result_part is not None:
+        internal_parts.append(
+            result_part.model_dump(exclude_none=True, by_alias=True, mode="json")
+        )
+
     return ContentToolUse(
         tool_type="code_execution",
         id="",
@@ -1803,6 +1841,7 @@ def server_tool_use_from_executable_code(
         arguments=executable_code.code or "",
         result=result_output,
         error=result_error,
+        internal={"gemini_parts": cast(JsonValue, internal_parts)},
     )
 
 
@@ -1822,17 +1861,16 @@ def server_tool_use_from_tool_call(
         internal_parts.append(
             tool_response_part.model_dump(exclude_none=True, by_alias=True, mode="json")
         )
-    tool_type = str(tool_call.tool_type or "")
-    if "SEARCH" not in tool_type:
+    if tool_call.tool_type not in _SUPPORTED_SERVER_TOOL_TYPES:
         warn_once(
             logger,
-            f"Skipping unsupported Google server-side tool call type: {tool_type}.",
+            f"Skipping unsupported Google server-side tool call type: {tool_call.tool_type!r}.",
         )
         return None
     return ContentToolUse(
         tool_type="web_search",
         id=tool_call.id or "",
-        name=tool_type,
+        name=tool_call.tool_type.value,
         arguments=json.dumps(tool_call.args or {}),
         result=json.dumps(tool_response.response if tool_response else {}),
         internal={"gemini_parts": cast(JsonValue, internal_parts)},
@@ -1863,6 +1901,20 @@ def parts_from_server_tool_use(tool: ContentToolUse) -> list[Part]:
     if tool.tool_type != "code_execution":
         return []
 
+    # Prefer the verbatim parts captured at response time — they preserve any
+    # thought_signature carried on executable_code / code_execution_result,
+    # which Gemini 3 mixed-mode requires on the next turn.
+    if (
+        isinstance(tool.internal, dict)
+        and (gemini_parts := tool.internal.get("gemini_parts")) is not None
+        and isinstance(gemini_parts, list)
+    ):
+        return [Part.model_validate(part) for part in gemini_parts]
+
+    # Legacy fallback for eval logs captured before signatures were preserved
+    # on executable_code: reconstruct from the typed fields. No signature is
+    # available, so this only round-trips correctly in single-tool (non-mixed)
+    # mode where Gemini does not require a signature on these parts.
     code_execution_parts: list[Part] = [
         Part.from_executable_code(code=tool.arguments, language=Language(tool.name))
     ]
