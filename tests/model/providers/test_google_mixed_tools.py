@@ -791,10 +791,15 @@ def test_gemini_executable_code_legacy_log_fallback() -> None:
 
 @pytest.mark.anyio
 async def test_gemini_parallel_function_calls_first_signed() -> None:
-    """Per Gemini docs, parallel function_calls in one step have the signature
+    """Function-only parallel siblings: only the first call carries a signature.
 
-    on the first call only. After capture → replay, the first call carries the
-    signature and the second is unsigned.
+    Per Gemini docs, parallel function_call siblings of a signed first call
+    stay unsigned. The fallback borrow is intentionally scoped to messages
+    that contain a signed server-tool part — a function-only response has no
+    server signature to borrow, and the verifier accepts unsigned siblings in
+    that case (this matches Google's "first parallel call only" guidance).
+    Mixed-mode behavior (siblings alongside a server tool) is exercised by
+    the parallel_unsigned_sibling_keeps_original_position test below.
     """
     candidate = Candidate(
         finish_reason=FinishReason.STOP,
@@ -827,7 +832,309 @@ async def test_gemini_parallel_function_calls_first_signed() -> None:
     assert google_content.parts[1].thought_signature == b"sig"
     assert google_content.parts[2].function_call is not None
     assert google_content.parts[2].function_call.id == "f-2"
+    # No server tool in the message → no fallback signature → f-2 unsigned.
     assert google_content.parts[2].thought_signature is None
+
+
+@pytest.mark.anyio
+async def test_gemini_parallel_unsigned_sibling_keeps_original_position() -> None:
+    """Reviewer reproduction (high): parallel-sibling ordering must be preserved.
+
+    Original parts [f1(sig), f2(no_sig), search_call(sig), search_resp(sig)]
+    must replay with f2 at its original position (between f1 and the search
+    call), NOT appended at the end after the server tool. Anchor-all in the
+    capture path is what locks f2's position into the content list.
+
+    f2 is left UNSIGNED on replay: its anchor processes before the
+    server-tool ContentToolUse, so no in-flight server_tool_signature is
+    available, and we deliberately do NOT borrow from later parts —
+    cross-position borrows produce "Corrupted thought signature" 400s.
+    Live verification confirms the verifier accepts f2 unsigned at its
+    original position (the docs' "first parallel call only" rule).
+    """
+    candidate = Candidate(
+        finish_reason=FinishReason.STOP,
+        content=Content(
+            role="model",
+            parts=[
+                Part(
+                    thought_signature=b"f1-sig",
+                    function_call=FunctionCall(
+                        id="f-1", name="days_in_year", args={"year": 2024}
+                    ),
+                ),
+                Part(
+                    function_call=FunctionCall(
+                        id="f-2", name="days_in_year", args={"year": 2025}
+                    ),
+                ),
+                Part(
+                    thought_signature=b"search-sig",
+                    tool_call=GeminiToolCall(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        args={"queries": ["leap year"]},
+                    ),
+                ),
+                Part(
+                    thought_signature=b"search-resp-sig",
+                    tool_response=ToolResponse(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        response={"hits": ["yes"]},
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    choice = completion_choice_from_candidate("gemini-3.1-pro-preview", candidate)
+    google_content = await content(MagicMock(), choice.message, emulate_reasoning=False)
+
+    assert google_content.parts is not None
+    # Order preserved: f1 at 0, f2 at 1, search_call at 2, search_resp at 3.
+    assert google_content.parts[0].function_call is not None
+    assert google_content.parts[0].function_call.id == "f-1"
+    assert google_content.parts[0].thought_signature == b"f1-sig"
+    assert google_content.parts[1].function_call is not None
+    assert google_content.parts[1].function_call.id == "f-2"
+    # f2 stays unsigned at its original position. Borrowing the search-tool
+    # signature here was tried and rejected by the verifier with "Corrupted
+    # thought signature." Unsigned-at-original-position is what the verifier
+    # actually accepts.
+    assert google_content.parts[1].thought_signature is None
+    assert google_content.parts[2].tool_call is not None
+    assert google_content.parts[2].tool_call.id == "search-1"
+    assert google_content.parts[2].thought_signature == b"search-sig"
+    assert google_content.parts[3].tool_response is not None
+    assert google_content.parts[3].tool_response.id == "search-1"
+
+
+@pytest.mark.anyio
+async def test_gemini_parallel_sibling_after_signed_function_call_does_not_borrow() -> (
+    None
+):
+    """Intervening signed function_call clears the borrow for later siblings.
+
+    A signed function_call BETWEEN a server tool and an unsigned sibling
+    consumes the server signature so the sibling stays unsigned.
+
+    Original parts [search_call(sig), search_resp(sig), f1(sig), f2(no_sig)].
+    f2 is a parallel sibling of f1. The borrow is scoped to the immediately
+    adjacent "lone unsigned function_call after a signed server tool" case;
+    once an intervening signed function_call (f1) consumes the in-flight
+    server_tool_signature, f2 cannot borrow it. f2 stays unsigned at its
+    original position — verified by live tests to be accepted by the
+    verifier (cross-context borrows produce "Corrupted thought signature"
+    400s).
+    """
+    candidate = Candidate(
+        finish_reason=FinishReason.STOP,
+        content=Content(
+            role="model",
+            parts=[
+                Part(
+                    thought_signature=b"search-sig",
+                    tool_call=GeminiToolCall(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        args={"queries": ["x"]},
+                    ),
+                ),
+                Part(
+                    thought_signature=b"search-resp-sig",
+                    tool_response=ToolResponse(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        response={"hits": ["y"]},
+                    ),
+                ),
+                Part(
+                    thought_signature=b"f1-sig",
+                    function_call=FunctionCall(
+                        id="f-1", name="days_in_year", args={"year": 2024}
+                    ),
+                ),
+                Part(
+                    function_call=FunctionCall(
+                        id="f-2", name="days_in_year", args={"year": 2025}
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    choice = completion_choice_from_candidate("gemini-3.1-pro-preview", candidate)
+    google_content = await content(MagicMock(), choice.message, emulate_reasoning=False)
+
+    assert google_content.parts is not None
+    # Search emitted first at original position with its sig.
+    assert google_content.parts[0].tool_call is not None
+    assert google_content.parts[0].tool_call.id == "search-1"
+    assert google_content.parts[0].thought_signature == b"search-sig"
+    # f1 at its anchor position with its own sig — applying it clears
+    # server_tool_signature.
+    assert google_content.parts[2].function_call is not None
+    assert google_content.parts[2].function_call.id == "f-1"
+    assert google_content.parts[2].thought_signature == b"f1-sig"
+    # f2 at its anchor position UNSIGNED — does NOT borrow the now-stale
+    # server-tool sig that was already consumed semantically by f1.
+    assert google_content.parts[3].function_call is not None
+    assert google_content.parts[3].function_call.id == "f-2"
+    assert google_content.parts[3].thought_signature is None
+
+
+@pytest.mark.anyio
+async def test_gemini_anchors_skipped_under_emulate_reasoning() -> None:
+    """Gemini position anchors must NOT leak into the prompt as <think> tags.
+
+    Anchors are protocol state (a function_call ID and an optional signature),
+    not human-readable reasoning. content(emulate_reasoning=True) targets
+    older Gemini models (1.5 / 2.0) that need <think> emulation; anchors
+    should be skipped in that path so they don't show up as empty or
+    base64-garbage <think> blocks in the prompt.
+    """
+    candidate = Candidate(
+        finish_reason=FinishReason.STOP,
+        content=Content(
+            role="model",
+            parts=[
+                Part(text="Plan", thought=True),
+                Part(
+                    thought_signature=b"f1-sig",
+                    function_call=FunctionCall(
+                        id="f-1", name="days_in_year", args={"year": 2024}
+                    ),
+                ),
+                Part(
+                    function_call=FunctionCall(
+                        id="f-2", name="days_in_year", args={"year": 2025}
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    choice = completion_choice_from_candidate("gemini-3.1-pro-preview", candidate)
+    google_content = await content(MagicMock(), choice.message, emulate_reasoning=True)
+
+    assert google_content.parts is not None
+    # Visible thought-text DOES emit as a <think> tag (it's actual reasoning).
+    text_parts = [p.text for p in google_content.parts if p.text is not None]
+    assert any("Plan" in t for t in text_parts), (
+        "Visible reasoning should still emulate"
+    )
+    # No empty or signature-bearing anchor leaks into the prompt as text.
+    for t in text_parts:
+        assert "<think></think>" not in t, "Empty anchor leaked as <think> tag"
+        assert "<think redacted=" not in t
+    # function_calls still emit (in the tool_calls loop) — they're not blocked.
+    fc_ids = {
+        p.function_call.id
+        for p in google_content.parts
+        if p.function_call is not None and p.function_call.id is not None
+    }
+    assert fc_ids == {"f-1", "f-2"}
+
+
+@pytest.mark.anyio
+async def test_gemini_unsigned_anchor_does_not_apply_empty_signature() -> None:
+    """Position-only anchor must produce thought_signature=None on replay.
+
+    A position-only anchor (empty reasoning string) emits the function_call
+    with thought_signature=None, NOT thought_signature=b"". Empty bytes would
+    not satisfy Gemini's verifier any more than the missing field would and
+    would also fail any 'is not None' check downstream.
+    """
+    candidate = Candidate(
+        finish_reason=FinishReason.STOP,
+        content=Content(
+            role="model",
+            parts=[
+                Part(
+                    function_call=FunctionCall(
+                        id="f-1", name="days_in_year", args={"year": 2024}
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    choice = completion_choice_from_candidate("gemini-3.1-pro-preview", candidate)
+    google_content = await content(MagicMock(), choice.message, emulate_reasoning=False)
+
+    assert google_content.parts is not None
+    assert google_content.parts[0].function_call is not None
+    assert google_content.parts[0].function_call.id == "f-1"
+    assert google_content.parts[0].thought_signature is None
+    assert google_content.parts[0].thought_signature != b""
+
+
+@pytest.mark.anyio
+async def test_gemini_lone_unsigned_function_call_with_server_tool_borrows_signature() -> (
+    None
+):
+    """Lone unsigned function_call after a server tool inherits the server's sig.
+
+    With anchor-all in capture, f-1 has a position-only anchor (empty
+    reasoning). At replay time, server_tool_signature is set after the
+    search ContentToolUse is processed and the empty anchor for f-1 borrows
+    it. This narrow case is the only safe in-flight borrow:
+
+    - The borrow does NOT extend to parallel siblings of a signed
+      function_call (intervening signed anchor clears server_tool_signature
+      — see test_gemini_parallel_sibling_after_signed_function_call_does_not_borrow).
+    - The borrow does NOT cross arbitrary positions (cross-context borrows
+      produce "Corrupted thought signature" 400s — see
+      test_gemini_parallel_unsigned_sibling_keeps_original_position which
+      leaves f-2 unsigned at its original position).
+
+    Empirically the verifier accepts the lone-unsigned-after-server-tool
+    pattern with the borrowed sig; unsigned function_calls at other
+    positions stay unsigned and are accepted at their original positions
+    per Google's "first parallel call only" rule.
+    """
+    candidate = Candidate(
+        finish_reason=FinishReason.STOP,
+        content=Content(
+            role="model",
+            parts=[
+                Part(
+                    thought_signature=b"search-sig",
+                    tool_call=GeminiToolCall(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        args={"queries": ["x"]},
+                    ),
+                ),
+                Part(
+                    thought_signature=b"search-resp-sig",
+                    tool_response=ToolResponse(
+                        id="search-1",
+                        tool_type=ToolType.GOOGLE_SEARCH_WEB,
+                        response={"hits": ["y"]},
+                    ),
+                ),
+                Part(
+                    function_call=FunctionCall(
+                        id="f-1", name="days_in_year", args={"year": 2024}
+                    ),
+                ),
+            ],
+        ),
+    )
+
+    choice = completion_choice_from_candidate("gemini-3.1-pro-preview", candidate)
+    google_content = await content(MagicMock(), choice.message, emulate_reasoning=False)
+
+    assert google_content.parts is not None
+    # Server tool emitted at original position.
+    assert google_content.parts[0].tool_call is not None
+    assert google_content.parts[0].tool_call.id == "search-1"
+    # Function_call emitted at its original position with borrowed signature.
+    assert google_content.parts[2].function_call is not None
+    assert google_content.parts[2].function_call.id == "f-1"
+    assert google_content.parts[2].thought_signature == b"search-sig"
 
 
 @pytest.mark.anyio
@@ -1354,6 +1661,161 @@ def test_gemini_3_native_search_react_loop_parallel_calls() -> None:
 
     assert result.status == "success"
     assert result.samples
+
+
+def _has_server_tool(assistant: ChatMessageAssistant) -> bool:
+    if not isinstance(assistant.content, list):
+        return False
+    return any(isinstance(c, ContentToolUse) for c in assistant.content)
+
+
+def _has_unsigned_anchor(assistant: ChatMessageAssistant) -> bool:
+    if not isinstance(assistant.content, list):
+        return False
+    return any(
+        isinstance(c, ContentReasoning)
+        and c.redacted
+        and not c.reasoning
+        and isinstance(c.internal, dict)
+        and "gemini_function_call_id" in c.internal
+        for c in assistant.content
+    )
+
+
+@pytest.mark.anyio
+@skip_if_no_google
+async def test_gemini_3_parallel_unsigned_sibling_with_search_replays() -> None:
+    """Live counterpart to the offline reviewer-repro test.
+
+    Captures a Gemini 3 response in a context likely to produce parallel
+    function_calls + native search, then replays the captured assistant
+    message in a continuation turn. The verifier must accept the message
+    even though the original response contained an unsigned parallel
+    sibling.
+
+    Skips with an informative message if the model didn't actually emit
+    the relevant pattern (server tool present + at least one unsigned
+    function_call anchor) — without that precondition the test cannot
+    exercise the anchor/order-preservation path the fix targets.
+    """
+    api = GoogleGenAIAPI(
+        model_name="gemini-3.1-pro-preview",
+        base_url=None,
+        api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    user = ChatMessageUser(
+        content=(
+            "In one step, call days_in_year(2024) AND days_in_year(2025) AND "
+            "web search 'leap year days'. Then a one-line answer."
+        )
+    )
+
+    first_output, _ = await api.generate(
+        input=[user],
+        tools=[_create_gemini_web_search_tool(), _create_days_in_year_tool()],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=2048),
+    )
+    assert isinstance(first_output, ModelOutput)
+    assistant = first_output.choices[0].message
+
+    if not assistant.tool_calls:
+        pytest.skip("Model did not emit any tool_calls; cannot exercise the path")
+    if not _has_server_tool(assistant):
+        pytest.skip(
+            "Model did not invoke the native server tool; "
+            "anchor/order-preservation path requires server tool present in this turn"
+        )
+    if not _has_unsigned_anchor(assistant):
+        pytest.skip(
+            "Model emitted no unsigned-function_call anchor; "
+            "anchor/order-preservation path requires an empty anchor "
+            "(parallel sibling) "
+            "alongside the server tool"
+        )
+
+    # Answer all tool_calls and replay; verifier must accept the captured
+    # message including the unsigned anchor.
+    follow_up: list[Any] = [user, assistant]
+    for tool_call in assistant.tool_calls:
+        follow_up.append(
+            ChatMessageTool(
+                content=f"{tool_call.arguments.get('year', 'unknown')} has 365 days.",
+                tool_call_id=tool_call.id,
+                function=tool_call.function,
+            )
+        )
+
+    second_output, _ = await api.generate(
+        input=follow_up,
+        tools=[_create_gemini_web_search_tool(), _create_days_in_year_tool()],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=2048),
+    )
+    assert isinstance(second_output, ModelOutput)
+    assert second_output.choices[0].stop_reason in ("stop", "tool_calls")
+
+
+@pytest.mark.anyio
+@skip_if_no_google
+async def test_gemini_3_lone_unsigned_function_call_with_search_replays() -> None:
+    """Live counterpart to the offline empirical-borrow test.
+
+    Targets the case where Gemini emits a single client function_call alongside
+    a signed server-side search tool_call where the function_call lacks its
+    own signature. The replay path must produce a signed function_call (via
+    the borrow fallback) so the verifier accepts the message.
+
+    Skips if the captured response does not actually contain a server tool
+    AND an unsigned anchor — the borrow path can't be exercised without both.
+    """
+    api = GoogleGenAIAPI(
+        model_name="gemini-3.1-pro-preview",
+        base_url=None,
+        api_key=os.environ["GOOGLE_API_KEY"],
+    )
+    user = ChatMessageUser(
+        content=(
+            "Use web search to find Earth's diameter, then call "
+            "days_in_year(2024). One-line answer."
+        )
+    )
+
+    first_output, _ = await api.generate(
+        input=[user],
+        tools=[_create_gemini_web_search_tool(), _create_days_in_year_tool()],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=2048),
+    )
+    assert isinstance(first_output, ModelOutput)
+    assistant = first_output.choices[0].message
+    if not assistant.tool_calls:
+        pytest.skip("Model did not emit a function_call; cannot exercise borrow")
+    if not _has_server_tool(assistant):
+        pytest.skip(
+            "Model did not invoke the native server tool; "
+            "borrow path requires server tool present in this turn"
+        )
+    if not _has_unsigned_anchor(assistant):
+        pytest.skip(
+            "Model signed every function_call; borrow path requires an unsigned anchor"
+        )
+
+    tool_call = assistant.tool_calls[0]
+    tool_result = ChatMessageTool(
+        content="2024 has 366 days.",
+        tool_call_id=tool_call.id,
+        function=tool_call.function,
+    )
+
+    second_output, _ = await api.generate(
+        input=[user, assistant, tool_result],
+        tools=[_create_gemini_web_search_tool(), _create_days_in_year_tool()],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=2048),
+    )
+    assert isinstance(second_output, ModelOutput)
+    assert second_output.choices[0].stop_reason in ("stop", "tool_calls")
 
 
 @pytest.mark.anyio

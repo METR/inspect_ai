@@ -17978,13 +17978,13 @@ button._segment_13qph_10._compact_13qph_31 i {
   margin-top: -0.1rem;
   margin-bottom: -0.1rem;
 }
-._gridWrapper_1ljdd_1 {
+._gridWrapper_gp0n4_1 {
   height: 100%;
   width: 100%;
   position: relative;
 }
 
-._gridContainer_1ljdd_7 {
+._gridContainer_gp0n4_7 {
   position: absolute;
   top: 0;
   left: 0;
@@ -17995,7 +17995,7 @@ button._segment_13qph_10._compact_13qph_31 i {
 /* Shared chrome — applied to all sample/log grids. Other ag-grids in the
  * app (e.g. the small score-summary table in title-view) intentionally opt
  * out by not adding this class. */
-._gridChrome_1ljdd_18 .ag-row {
+._gridChrome_gp0n4_18 .ag-row {
   cursor: pointer;
   border-bottom: 1px solid var(--bs-border-color);
   background-color: var(--bs-body-bg);
@@ -18007,38 +18007,42 @@ button._segment_13qph_10._compact_13qph_31 i {
 
 /* Match container so rows' min-width: 100% has the full viewport to
  * stretch into. Pinned containers are unaffected. */
-._gridChrome_1ljdd_18 .ag-center-cols-container {
+._gridChrome_gp0n4_18 .ag-center-cols-container {
   min-width: 100%;
 }
 
-._gridChrome_1ljdd_18 .ag-row.ag-row-selected {
+._gridChrome_gp0n4_18 .ag-row.ag-row-selected {
   box-shadow: inset 0 0 0 2px var(--bs-focus-ring-color);
 }
 
-._gridChrome_1ljdd_18 .ag-header-cell {
-  padding: 0;
+._gridChrome_gp0n4_18 .ag-header-cell {
+  /* Right gutter gives the active-filter icon (sibling of the header
+   * label inside `.ag-cell-label-container`) breathing room from the
+   * column boundary. Left padding is handled via the `::before` flex
+   * item below so it shrinks on narrow cells. */
+  padding: 0 4px 0 0;
 }
 
-._gridChrome_1ljdd_18 .ag-header-cell-label::before {
+._gridChrome_gp0n4_18 .ag-header-cell-label::before {
   content: "";
   flex: 0 1 var(--ag-cell-horizontal-padding);
 }
 
-._gridChrome_1ljdd_18 .ag-header-cell-text {
+._gridChrome_gp0n4_18 .ag-header-cell-text {
   font-size: var(--inspect-font-size-smallestest);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 400;
 }
 
-._gridChrome_1ljdd_18 .ag-sort-order {
+._gridChrome_gp0n4_18 .ag-sort-order {
   font-size: var(--inspect-font-size-smallestest);
   align-self: center;
   margin-right: -10px;
 }
 
 /* List mode — multi-line wrapping cells with vertical padding. */
-._listMode_1ljdd_61 .ag-cell {
+._listMode_gp0n4_65 .ag-cell {
   align-items: flex-start;
   padding-top: 0.5rem;
   padding-bottom: 0.5rem;
@@ -18046,31 +18050,31 @@ button._segment_13qph_10._compact_13qph_31 i {
 }
 
 /* Grid mode — vertically centered cells; column renderers handle ellipsis. */
-._gridMode_1ljdd_69 .ag-cell {
+._gridMode_gp0n4_73 .ag-cell {
   align-items: center;
 }
 
 /* Cell helpers exposed for column renderers. */
-._cell_1ljdd_74 {
+._cell_gp0n4_78 {
   line-height: var(--bs-body-line-height);
 }
 
-._wrapAnywhere_1ljdd_78 {
+._wrapAnywhere_gp0n4_82 {
   overflow-wrap: break-word;
 }
 
-._noLeft_1ljdd_82 {
+._noLeft_gp0n4_86 {
   padding-left: 0;
 }
 
-._score_1ljdd_86 {
+._score_gp0n4_90 {
   text-align: center;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-._centered_1ljdd_93 {
+._centered_gp0n4_97 {
   display: flex;
   justify-content: center;
 }

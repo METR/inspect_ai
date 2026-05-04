@@ -1111,7 +1111,12 @@ async def content(
         def apply_reasoning_signature(
             part: Part, reasoning_block: ContentReasoning
         ) -> None:
-            if reasoning_block.reasoning is not None and reasoning_block.redacted:
+            # Position-only anchors carry empty reasoning — they mark a function_call's
+            # original position without a signature. Caller borrows a signature
+            # from elsewhere if the verifier requires one.
+            if not reasoning_block.reasoning:
+                return
+            if reasoning_block.redacted:
                 part.thought_signature = base64.b64decode(
                     reasoning_block.reasoning.encode()
                 )
@@ -1126,6 +1131,16 @@ async def content(
             for i, content in enumerate(message.content):
                 if isinstance(content, ContentReasoning):
                     if emulate_reasoning:
+                        # Gemini position anchors are protocol state (a function_call
+                        # ID + an optional thought_signature), not human-readable
+                        # reasoning text. Skip them under emulate_reasoning so they
+                        # don't leak into the prompt as empty <think> tags on older
+                        # models (Gemini 1.5/2.0) that rely on text emulation.
+                        if (
+                            isinstance(content.internal, dict)
+                            and _GEMINI_FUNCTION_CALL_ID_KEY in content.internal
+                        ):
+                            continue
                         content_parts.append(Part(text=reasoning_to_think_tag(content)))
                     else:
                         # if this is encrypted reasoning, save it for applying the thought_signature
@@ -1150,7 +1165,39 @@ async def content(
                                 )
                                 if tool_call is not None:
                                     part = part_from_tool_call(tool_call)
-                                    apply_reasoning_signature(part, content)
+                                    if content.reasoning:
+                                        # Signed anchor — apply its signature.
+                                        # Clear any in-flight server_tool_signature
+                                        # so a later unsigned anchor doesn't
+                                        # borrow it across an intervening signed
+                                        # function_call. The borrow is only
+                                        # valid for a lone unsigned function_call
+                                        # IMMEDIATELY following a signed server
+                                        # tool — once another signed Part
+                                        # intervenes, the signature is no longer
+                                        # context-adjacent.
+                                        apply_reasoning_signature(part, content)
+                                        server_tool_signature = None
+                                    elif server_tool_signature is not None:
+                                        # Position-only anchor with no signature.
+                                        # Borrow the in-flight server-tool sig
+                                        # (works when the server tool was
+                                        # processed IMMEDIATELY before this
+                                        # anchor in iteration order, with no
+                                        # intervening signed function_calls).
+                                        part.thought_signature = server_tool_signature
+                                        server_tool_signature = None
+                                    # else: leave the function_call unsigned. An
+                                    # empty anchor with no in-flight signature
+                                    # corresponds to a parallel sibling at its
+                                    # original position; the verifier accepts
+                                    # unsigned siblings in their original
+                                    # positions per Google's "first parallel
+                                    # call only" rule. Borrowing an unrelated
+                                    # signature here has been observed to
+                                    # produce "Corrupted thought signature"
+                                    # 400s — the safe path is to leave it
+                                    # unsigned.
                                     content_parts.append(part)
                                     emitted_tool_call_ids.add(tool_call.id)
                                     working_reasoning_block = None
@@ -1212,12 +1259,24 @@ async def content(
 
         # Now handle tool calls
         if message.tool_calls is not None:
-            # Per Gemini API docs: thought_signature goes on the first tool call in a message.
-            # For parallel function calls, only the first FC gets the signature.
-            # For sequential function calls (multi-step), each step is a separate message,
-            # so each will have its own reasoning block and signature.
-            # The loop below applies the signature to the first tool call (when working_reasoning_block
-            # is not None), then clears it so subsequent tool calls don't get it.
+            # New captures anchor every function_call by id in the content list,
+            # so this loop is a fallback path for tool_calls that did NOT get
+            # an anchor — typically legacy eval logs from before
+            # anchors-for-all, or any captured function_call without a name.
+            #
+            # Signature handling:
+            #   - If a working_reasoning_block is in flight (visible
+            #     thought-text consolidation), apply its signature.
+            #   - Else, if the in-flight server_tool_signature is available
+            #     (a ContentToolUse was processed earlier in iteration),
+            #     borrow it. This handles legacy logs where an unsigned
+            #     function_call followed a signed server tool in the original
+            #     response. We do NOT borrow when the server tool would come
+            #     LATER in iteration: borrowing across mismatched contexts
+            #     produces "Corrupted thought signature" 400s.
+            #   - Else, leave the function_call unsigned. The verifier
+            #     accepts unsigned parallel siblings at their original
+            #     positions per Google's "first parallel call only" rule.
             for tool_call in message.tool_calls:
                 if tool_call.id in emitted_tool_call_ids:
                     continue
@@ -1226,21 +1285,25 @@ async def content(
 
                 # handle reasoning block if available
                 if working_reasoning_block is not None:
-                    # tool call reasoning should always use a thought_signature
+                    # Apply the in-flight working signature. Also clear
+                    # server_tool_signature so a later unsigned tool_call in
+                    # this loop doesn't borrow a stale server-tool sig across
+                    # this now-signed function_call.
                     apply_reasoning_signature(part, working_reasoning_block)
                     working_reasoning_block = None
+                    server_tool_signature = None
                 elif server_tool_signature is not None:
-                    # EMPIRICAL: gemini-3.1-pro-preview occasionally returns a
-                    # client function_call without a thought_signature in a step
-                    # that also contains a signed server-side tool_call. The
-                    # validator on the next turn still requires a signature on
-                    # that function_call. Reusing the server-tool's signature
-                    # in the same step has been observed to satisfy the
-                    # validator. This is NOT documented behavior; revisit when
-                    # Gemini 3 ships GA. If the unsigned-client-call case stops
-                    # occurring, drop this branch and let the validator's 400
-                    # surface naturally rather than papering over a real schema
-                    # mismatch.
+                    # Borrow the in-flight server-tool signature for an
+                    # unanchored unsigned function_call — empirically observed
+                    # to satisfy the verifier when the unsigned function_call
+                    # follows a signed server tool with no intervening signed
+                    # function_call. Cross-context borrows (intervening signed
+                    # parts, or server tool processed AFTER this point) have
+                    # been observed to produce "Corrupted thought signature"
+                    # 400s; both the anchor-replay path above and the
+                    # working_reasoning_block branch clear server_tool_signature
+                    # whenever a signed signature is consumed, keeping the
+                    # borrow scoped to the immediately-adjacent case.
                     part.thought_signature = server_tool_signature
                     server_tool_signature = None
 
@@ -1276,6 +1339,14 @@ async def content(
         parts: list[Part] = [Part(function_response=response)]
         # For non-computer tools, include images as sibling content parts
         # since most models don't support multimodal function responses.
+        #
+        # KNOWN LIMITATION: Gemini 3 docs prefer multimodal function responses
+        # to be nested inside FunctionResponse.parts (FunctionResponsePart with
+        # inline_data) rather than emitted as siblings. This sibling-Part path
+        # is a deliberate workaround for Gemini 2.x and predates the Gemini 3
+        # mixed-tools work. A follow-up PR should gate on is_gemini_3_plus()
+        # and convert ContentImage / ContentDocument into FunctionResponsePart
+        # values for newer models, falling back to siblings on Gemini 2.x.
         if message.function != "computer" and isinstance(message.content, list):
             for item in message.content:
                 if isinstance(item, ContentImage):
@@ -1485,14 +1556,35 @@ def completion_choice_from_candidate(
                 continue  # We pickup tool responses with part.tool_call
 
             if part.function_call is not None:
-                if part.thought_signature is not None and part.function_call.name:
+                # Anchor every function_call (signed AND unsigned) so replay
+                # preserves the exact original part ordering. Empty-string
+                # reasoning marks the anchor as position-only with no signature
+                # of its own.
+                #
+                # Empirically (gemini-3.1-pro-preview): unsigned function_calls
+                # are accepted by the verifier when emitted at their ORIGINAL
+                # position (matching Google's documented "first parallel call
+                # only" rule); reordering an unsigned function_call to a
+                # different position produces a 400 "missing thought_signature".
+                # That is what anchor-all guards against — the anchor pins the
+                # position so the unsigned sibling is replayed where the model
+                # emitted it. The replay path will only borrow a signature
+                # from an immediately-adjacent signed server-side tool, never
+                # across positions, since cross-context borrows trigger
+                # "Corrupted thought signature" 400s.
+                if part.function_call.name:
                     function_call_id = part.function_call.id or (
                         f"{part.function_call.name}_{uuid()}"
                     )
                     function_call_ids[i] = function_call_id
+                    signature_b64 = (
+                        base64.b64encode(part.thought_signature).decode()
+                        if part.thought_signature is not None
+                        else ""
+                    )
                     content.append(
                         ContentReasoning(
-                            reasoning=base64.b64encode(part.thought_signature).decode(),
+                            reasoning=signature_b64,
                             redacted=True,
                             internal={_GEMINI_FUNCTION_CALL_ID_KEY: function_call_id},
                         )
