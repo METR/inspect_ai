@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.218 (06 May 2026)
 
 - Google: Support Gemini 3+ native web search and code execution alongside function tools.
 - HuggingFace: Add `trust_remote_code` model argument (defaults to `False`).
