@@ -105,7 +105,7 @@ Both scorers provide two built-in metrics:
 -   `perplexity_per_token()` — standard corpus-level perplexity weighted by token count. Longer samples contribute proportionally more.
 -   `perplexity_per_seq()` — equal weight per sample regardless of length (geometric mean of per-sample perplexities).
 
-### Model provider
+### Model Provider
 
 Use the `vllm-completions` provider for perplexity evaluation. It routes through the `/v1/completions` endpoint, sending raw text without any chat template. This avoids contamination from role markers and special tokens that would distort logprob-based metrics.
 
