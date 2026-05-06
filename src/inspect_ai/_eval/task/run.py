@@ -1115,6 +1115,7 @@ async def task_run_sample(
                             transcript()._event(ErrorEvent(error=error))
 
                     except Exception as ex:
+                        # handle error
                         error, raise_error = handle_error(ex)
 
                     # mark completed
@@ -1243,6 +1244,17 @@ async def task_run_sample(
                                 transcript()._event(ErrorEvent(error=error))
 
                         except Exception as ex:
+                            # If scoring fails after an operator interrupt,
+                            # wrap the error so the interrupt context is
+                            # visible (the scorer may crash because setup
+                            # didn't finish, and without this the root cause
+                            # is hidden).
+                            if limit and limit.type == "operator":
+                                wrapped = RuntimeError(
+                                    f"Scoring failed after operator interrupt: {ex}"
+                                )
+                                wrapped.__cause__ = ex
+                                ex = wrapped
                             # handle error
                             error, raise_error = handle_error(ex)
                         finally:
