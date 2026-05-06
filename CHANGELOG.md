@@ -2,6 +2,7 @@
 
 - Google: Support Gemini 3+ native web search and code execution alongside function tools.
 - HuggingFace: Add `trust_remote_code` model argument (defaults to `False`).
+- VLLM: New `vllm-completions` model provider that uses completions rather than chat endpoint.
 - OpenRouter: Coalesce adjacent system messages before request.
 - Bedrock: Preserve maxTokens when reasoning effort is less than "high".
 - Eval Set: `retry_immediate` now defaults to True. Pass `retry_immediate=False` (or `--no-retry-immediate`) to restore the previous batch-retry behavior.
