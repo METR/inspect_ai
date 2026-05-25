@@ -183,6 +183,16 @@ class FileSystem:
     def touch(self, path: str) -> None:
         self.fs.touch(path)
 
+    def open(
+        self,
+        path: str,
+        mode: OpenTextMode | OpenBinaryMode,
+        encoding: str = "utf-8",
+    ) -> Any:
+        if "b" in mode:
+            return self.fs.open(path, mode=mode)
+        return self.fs.open(path, mode=mode, encoding=encoding)
+
     def rm(
         self, path: str, recursive: bool = False, maxdepth: int | None = None
     ) -> None:
