@@ -1260,12 +1260,21 @@ class SampleBufferDatabase(SampleBuffer):
 def sync_to_filestore(
     db: SampleBufferDatabase, filestore: SampleBufferFilestore
 ) -> None:
+    started = time.monotonic()
+
     # read existing manifest (create an empty one if there is none)
     manifest = filestore.read_manifest() or Manifest()
 
     # prepare a list of buffered samples from the db
     samples = db.get_samples()
     if samples is None:
+        logger.info(
+            "TEMPORARY buffer sync skipped: reason=no_samples duration_ms=%s "
+            "thread=%s tid=%s",
+            int((time.monotonic() - started) * 1000),
+            threading.current_thread().name,
+            threading.get_ident(),
+        )
         return
     assert isinstance(samples, Samples)
 
@@ -1307,6 +1316,11 @@ def sync_to_filestore(
     last_message_pool_id = 0
     last_call_pool_id = 0
     segment_files: list[SegmentFile] = []
+    segment_event_count = 0
+    segment_attachment_count = 0
+    segment_message_pool_count = 0
+    segment_call_pool_count = 0
+    segment_json_bytes = 0
     segment_by_id = {seg.id: seg for seg in manifest.segments}
     for manifest_sample in manifest.samples:
         # take the max of last_*_id across all of this sample's segments, not
@@ -1353,6 +1367,12 @@ def sync_to_filestore(
             # update manifest
             manifest_sample.segments.append(segment_id)
 
+            segment_event_count += len(sample_data.events)
+            segment_attachment_count += len(sample_data.attachments)
+            segment_message_pool_count += len(sample_data.message_pool)
+            segment_call_pool_count += len(sample_data.call_pool)
+            segment_json_bytes += len(to_json_str_safe(sample_data).encode("utf-8"))
+
             # update maximums
             (
                 last_event_id,
@@ -1382,6 +1402,25 @@ def sync_to_filestore(
 
     # write the manifest (do this even if we had no segments to pickup adds/deletes)
     filestore.write_manifest(manifest)
+
+    logger.info(
+        "TEMPORARY buffer sync complete: samples=%s previous_segments=%s "
+        "wrote_segment=%s segment_id=%s segment_files=%s events=%s attachments=%s "
+        "message_pool=%s call_pool=%s json_bytes=%s duration_ms=%s thread=%s tid=%s",
+        len(samples.samples),
+        last_segment_id,
+        len(segment_files) > 0,
+        segment_id if len(segment_files) > 0 else None,
+        len(segment_files),
+        segment_event_count,
+        segment_attachment_count,
+        segment_message_pool_count,
+        segment_call_pool_count,
+        segment_json_bytes,
+        int((time.monotonic() - started) * 1000),
+        threading.current_thread().name,
+        threading.get_ident(),
+    )
 
 
 def maximum_ids(
