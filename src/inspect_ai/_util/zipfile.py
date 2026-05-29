@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+import time
 import zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -40,12 +42,12 @@ zipfile_compress_kwargs: dict[str, Any] = {
 
 # 200 MiB. Well under fzstd's 256 MiB (2^28) compressed-frame overflow
 # threshold, applied to *input* bytes which compress smaller.
-_MAX_INPUT_PER_FRAME = 200 * 1024 * 1024
+_MAX_INPUT_PER_FRAME = 16 * 1024 * 1024
 
 # Matches zipfile_zstd's hardcoded default so multi-frame and single-frame zip
 # writes use the same thread count. If zipfile_zstd ever changes its default,
 # update here too.
-_ZSTD_THREADS = 12
+_ZSTD_THREADS = 1
 
 
 class _MultiFrameZstdCompressObj:
@@ -63,10 +65,12 @@ class _MultiFrameZstdCompressObj:
         self._input_bytes = 0
 
     def compress(self, data: bytes) -> bytes:
+        started = time.monotonic()
         view = memoryview(data)
         pieces: list[bytes] = []
         offset = 0
         n = len(view)
+        flush_count = 0
         while offset < n:
             remaining_cap = _MAX_INPUT_PER_FRAME - self._input_bytes
             end = min(offset + remaining_cap, n)
@@ -76,9 +80,23 @@ class _MultiFrameZstdCompressObj:
             offset = end
             if self._input_bytes >= _MAX_INPUT_PER_FRAME:
                 pieces.append(self._obj.flush())
+                flush_count += 1
                 self._obj = self._factory()
                 self._input_bytes = 0
-        return b"".join(pieces)
+        output = b"".join(pieces)
+        if n or output:
+            logger.info(
+                "TEMPORARY zstd compress: input_bytes=%s output_bytes=%s "
+                "pieces=%s frame_flushes=%s duration_ms=%s thread=%s tid=%s",
+                n,
+                len(output),
+                len(pieces),
+                flush_count,
+                int((time.monotonic() - started) * 1000),
+                threading.current_thread().name,
+                threading.get_ident(),
+            )
+        return output
 
     def flush(self) -> bytes:
         # If the last ``compress()`` call landed exactly on the frame boundary,
