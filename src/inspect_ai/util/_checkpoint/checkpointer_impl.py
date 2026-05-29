@@ -12,6 +12,7 @@ initial inspect_ai package load — only at sample-run time, via the
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from collections.abc import (
     AsyncIterator,
@@ -60,6 +61,9 @@ from .config import ResolvedCheckpointConfig
 from .hydrate import HydrationResult, hydrate
 
 logger = getLogger(__name__)
+
+_CHECKPOINT_MEM_DIAGNOSTICS = "INSPECT_CHECKPOINT_MEM_DIAGNOSTICS"
+_CHECKPOINT_SKIP_RESTIC = "INSPECT_CHECKPOINT_SKIP_RESTIC"
 
 T = TypeVar("T")
 
@@ -112,6 +116,8 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
             hydration=result,
             resume_checkpoint=self._resume_checkpoint,
             reset_transcript_store=reset_transcript_store,
+            sample_id=self._sample_id,
+            epoch=self._epoch,
         )
         self._reset_transcript_store_on_next_enter = False
         return self._cached
@@ -151,8 +157,12 @@ class _EnteredCheckpointer:
         hydration: HydrationResult,
         resume_checkpoint: ResumeCheckpoint | None,
         reset_transcript_store: bool,
+        sample_id: int | str = "unknown",
+        epoch: int = 0,
     ) -> None:
         self._config = config
+        self._sample_id = sample_id
+        self._epoch = epoch
         self._sample_checkpoints_dir = hydration.sample_checkpoints_dir
         self._sample_staging_dir = hydration.sample_staging_dir
         self._sample_root = hydration.sample_root
@@ -374,10 +384,14 @@ class _EnteredCheckpointer:
                 state = sample_state()
                 if not state:
                     raise RuntimeError("Checkpointer must find sample state")
+                self._log_checkpoint_mem(
+                    "before_write_host_context", next_checkpoint_id
+                )
                 await self._write_host_context(
                     self._context_dir,
                     state.store,
                 )
+                self._log_checkpoint_mem("after_write_host_context", next_checkpoint_id)
 
                 # Host + each sandbox (backup → egress) in parallel. The
                 # backup-then-egress pair for a given sandbox is sequential
@@ -386,24 +400,40 @@ class _EnteredCheckpointer:
                 # `tg_collect` takes thunks (zero-arg callables) so coroutines
                 # are only created at task-group start time.
                 sandbox_items = list((self._config.sandbox_paths or {}).items())
-                backup_funcs: list[Callable[[], Awaitable[ResticBackupSummary]]] = [
-                    partial(self._backup_host, next_checkpoint_id),
-                    *[
-                        partial(
-                            self._backup_and_egress_sandbox,
-                            name,
-                            paths,
-                            next_checkpoint_id,
-                        )
-                        for name, paths in sandbox_items
-                    ],
-                ]
-                summaries = await tg_collect(backup_funcs)
-                host_info = _snapshot_info(summaries[0])
-                sandbox_infos = {
-                    name: _snapshot_info(summary)
-                    for (name, _), summary in zip(sandbox_items, summaries[1:])
-                }
+                if _checkpoint_skip_restic():
+                    logger.warning(
+                        "TEMPORARY checkpoint diagnostics: skipping restic backups "
+                        "because %s is set",
+                        _CHECKPOINT_SKIP_RESTIC,
+                    )
+                    self._log_checkpoint_mem("skip_restic_backups", next_checkpoint_id)
+                    host_info = _skipped_snapshot_info()
+                    sandbox_infos = {
+                        name: _skipped_snapshot_info() for name, _ in sandbox_items
+                    }
+                else:
+                    backup_funcs: list[Callable[[], Awaitable[ResticBackupSummary]]] = [
+                        partial(self._backup_host, next_checkpoint_id),
+                        *[
+                            partial(
+                                self._backup_and_egress_sandbox,
+                                name,
+                                paths,
+                                next_checkpoint_id,
+                            )
+                            for name, paths in sandbox_items
+                        ],
+                    ]
+                    self._log_checkpoint_mem(
+                        "before_restic_backups", next_checkpoint_id
+                    )
+                    summaries = await tg_collect(backup_funcs)
+                    self._log_checkpoint_mem("after_restic_backups", next_checkpoint_id)
+                    host_info = _snapshot_info(summaries[0])
+                    sandbox_infos = {
+                        name: _snapshot_info(summary)
+                        for (name, _), summary in zip(sandbox_items, summaries[1:])
+                    }
 
                 # Cycle duration measured up to the checkpoint file write — the
                 # write itself is the commit point, so its cost lands on the
@@ -422,9 +452,15 @@ class _EnteredCheckpointer:
                     sandboxes=sandbox_infos,
                 )
 
+                self._log_checkpoint_mem(
+                    "before_write_checkpoint_file", next_checkpoint_id
+                )
                 await write_checkpoint_file(
                     sample_checkpoints_dir=self._sample_root,
                     checkpoint=checkpoint,
+                )
+                self._log_checkpoint_mem(
+                    "after_write_checkpoint_file", next_checkpoint_id
                 )
 
                 # Remote destination: ship the new staging-dir files (restic
@@ -432,10 +468,12 @@ class _EnteredCheckpointer:
                 # checkpoint file is shipped last in the safe order — its
                 # arrival at the destination is the remote commit point.
                 if self._sample_staging_dir is not None:
+                    self._log_checkpoint_mem("before_host_egress", next_checkpoint_id)
                     await host_egress(
                         staging_dir=self._sample_staging_dir,
                         destination_dir=self._sample_checkpoints_dir,
                     )
+                    self._log_checkpoint_mem("after_host_egress", next_checkpoint_id)
 
                 # Emit the CheckpointEvent now that the checkpoint file is
                 # committed (locally and, when remote, at the destination too).
@@ -444,6 +482,7 @@ class _EnteredCheckpointer:
                 # events.json. On resume, hydrate synthesizes the trailing
                 # event from the latest checkpoint file (working.md §8a).
                 transcript()._event(CheckpointEvent.from_details(checkpoint))
+                self._log_checkpoint_mem("after_checkpoint_event", next_checkpoint_id)
             finally:
                 # Reopen even if checkpointing fails after closing the prior span;
                 # subsequent agent events should stay nested under a checkpoint span.
@@ -470,6 +509,37 @@ class _EnteredCheckpointer:
             context_dir,
             store_json=store_jsonable(store),
             agent_state=agent_state,
+        )
+
+    def _log_checkpoint_mem(self, phase: str, checkpoint_id: int) -> None:
+        if not _checkpoint_mem_diagnostics_enabled():
+            return
+        summary = _process_memory_summary()
+        counts = self._transcript_store.counts()
+        context_sizes = _context_file_sizes(Path(self._context_dir))
+        logger.warning(
+            "TEMPORARY checkpoint memory diagnostics: "
+            "sample=%s epoch=%s checkpoint=%s phase=%s "
+            "rss_mb=%s anon_rss_mb=%s maps=%s anon_rw_maps=%s "
+            "virtual_gib=%.2f top_mapping_mb=%s "
+            "events=%s message_pool=%s call_pool=%s attachments=%s "
+            "db_bytes=%s context_files=%s",
+            self._sample_id,
+            self._epoch,
+            checkpoint_id,
+            phase,
+            summary.rss_mb,
+            summary.anon_rss_mb,
+            summary.total_mappings,
+            summary.anon_rw_mappings,
+            summary.virtual_gib,
+            summary.top_mapping_mb,
+            counts.events,
+            counts.message_pool,
+            counts.call_pool,
+            counts.attachments,
+            counts.db_bytes,
+            context_sizes,
         )
 
     def _seed_transcript_store(self, hydration: HydrationResult) -> None:
@@ -585,3 +655,93 @@ def _snapshot_info(summary: ResticBackupSummary) -> SnapshotDetails:
         size_bytes=summary.data_added_packed,
         duration_ms=int(summary.total_duration * 1000),
     )
+
+
+class _ProcessMemorySummary(BaseModel):
+    rss_mb: int | None
+    anon_rss_mb: int | None
+    total_mappings: int
+    anon_rw_mappings: int
+    virtual_gib: float
+    top_mapping_mb: int
+
+
+def _checkpoint_mem_diagnostics_enabled() -> bool:
+    return os.environ.get(_CHECKPOINT_MEM_DIAGNOSTICS, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _checkpoint_skip_restic() -> bool:
+    return os.environ.get(_CHECKPOINT_SKIP_RESTIC, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _process_memory_summary() -> _ProcessMemorySummary:
+    rss_mb, anon_rss_mb = _status_memory_mb()
+    total_mappings = 0
+    anon_rw_mappings = 0
+    virtual_kib = 0
+    top_mapping_kib = 0
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as maps:
+            for line in maps:
+                total_mappings += 1
+                parts = line.split(maxsplit=5)
+                if len(parts) < 5:
+                    continue
+                start_hex, end_hex = parts[0].split("-", 1)
+                size_kib = (int(end_hex, 16) - int(start_hex, 16)) // 1024
+                virtual_kib += size_kib
+                top_mapping_kib = max(top_mapping_kib, size_kib)
+                perms = parts[1]
+                inode = parts[4]
+                if perms.startswith("rw") and inode == "0":
+                    anon_rw_mappings += 1
+    except OSError:
+        pass
+
+    return _ProcessMemorySummary(
+        rss_mb=rss_mb,
+        anon_rss_mb=anon_rss_mb,
+        total_mappings=total_mappings,
+        anon_rw_mappings=anon_rw_mappings,
+        virtual_gib=virtual_kib / (1024 * 1024),
+        top_mapping_mb=top_mapping_kib // 1024,
+    )
+
+
+def _status_memory_mb() -> tuple[int | None, int | None]:
+    rss_kib: int | None = None
+    anon_kib: int | None = None
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    rss_kib = int(line.split()[1])
+                elif line.startswith("RssAnon:"):
+                    anon_kib = int(line.split()[1])
+    except OSError:
+        return None, None
+    return (None if rss_kib is None else rss_kib // 1024), (
+        None if anon_kib is None else anon_kib // 1024
+    )
+
+
+def _context_file_sizes(context_dir: Path) -> dict[str, int]:
+    sizes: dict[str, int] = {}
+    for path in sorted(context_dir.iterdir()) if context_dir.exists() else []:
+        if path.is_file():
+            sizes[path.name] = path.stat().st_size
+    return sizes
+
+
+def _skipped_snapshot_info() -> SnapshotDetails:
+    return SnapshotDetails(snapshot_id="restic-skipped", size_bytes=0, duration_ms=0)
