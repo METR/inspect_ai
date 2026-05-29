@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -157,26 +159,61 @@ class SampleBufferFilestore(SampleBuffer):
             f.write(to_json_safe(manifest))
 
     def write_segment(self, id: int, files: list[SegmentFile]) -> None:
+        started = time.monotonic()
+        json_bytes = 0
+        event_count = 0
+        attachment_count = 0
+        message_pool_count = 0
+        call_pool_count = 0
+
         # write the file locally
         with tempfile.NamedTemporaryFile(mode="wb", delete=False) as segment_file:
             name = segment_file.name
             with ZipFile(segment_file, mode="w", **zipfile_compress_kwargs) as zip:
                 for sf in files:
-                    zip.writestr(
-                        segment_file_name(sf.id, sf.epoch),
-                        to_json_str_safe(sf.data),
-                    )
+                    data = to_json_str_safe(sf.data)
+                    json_bytes += len(data.encode("utf-8"))
+                    event_count += len(sf.data.events)
+                    attachment_count += len(sf.data.attachments)
+                    message_pool_count += len(sf.data.message_pool)
+                    call_pool_count += len(sf.data.call_pool)
+                    zip.writestr(segment_file_name(sf.id, sf.epoch), data)
             segment_file.flush()
             os.fsync(segment_file.fileno())
+
+        zip_bytes = os.path.getsize(name)
+        read_bytes = 0
+        upload_started = time.monotonic()
 
         # write then move for atomicity
         try:
             with open(name, "rb") as zf:
                 with open_file(f"{self._dir}{segment_name(id)}", "wb") as f:
-                    f.write(zf.read())
+                    payload = zf.read()
+                    read_bytes = len(payload)
+                    f.write(payload)
                     f.flush()
         finally:
             os.unlink(name)
+
+        logger.info(
+            "TEMPORARY buffer write_segment: segment_id=%s files=%s events=%s "
+            "attachments=%s message_pool=%s call_pool=%s json_bytes=%s "
+            "zip_bytes=%s read_bytes=%s duration_ms=%s upload_ms=%s thread=%s tid=%s",
+            id,
+            len(files),
+            event_count,
+            attachment_count,
+            message_pool_count,
+            call_pool_count,
+            json_bytes,
+            zip_bytes,
+            read_bytes,
+            int((time.monotonic() - started) * 1000),
+            int((time.monotonic() - upload_started) * 1000),
+            threading.current_thread().name,
+            threading.get_ident(),
+        )
 
     def read_manifest(self) -> Manifest | None:
         try:

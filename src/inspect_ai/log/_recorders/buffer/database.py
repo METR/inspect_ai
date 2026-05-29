@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -66,6 +67,10 @@ from .types import (
 
 logger = getLogger(__name__)
 SYNC_CLEANUP_TIMEOUT = 30
+_SYNC_WORKER_QUEUE: "queue.Queue[SampleBufferDatabase | None]" = queue.Queue()
+_SYNC_WORKER_THREAD: threading.Thread | None = None
+_SYNC_WORKER_LOCK = threading.Lock()
+
 
 if TYPE_CHECKING:
     from .types import SampleEventHistorySink
@@ -789,8 +794,7 @@ class SampleBufferDatabase(SampleBuffer):
                 self._sync()
 
     def _sync(self) -> None:
-        sync_filestore = self._sync_filestore
-        if self.log_shared is None or sync_filestore is None:
+        if self.log_shared is None or self._sync_filestore is None:
             return
 
         with self._sync_lock:
@@ -800,46 +804,35 @@ class SampleBufferDatabase(SampleBuffer):
             self._sync_requested = True
             self._sync_pending = True
 
-            if self._sync_thread is None or not self._sync_thread.is_alive():
-                self._sync_thread = threading.Thread(
-                    target=self._sync_to_filestore,
-                    args=(sync_filestore,),
-                    daemon=True,
-                    name="inspect-buffer-sync",
-                )
-                self._sync_thread.start()
+        _ensure_sync_worker()
+        _SYNC_WORKER_QUEUE.put(self)
 
-            self._sync_wakeup.notify_all()
+    def _sync_to_filestore(self) -> None:
+        sync_filestore = self._sync_filestore
+        if sync_filestore is None:
+            return
 
-    def _sync_to_filestore(self, sync_filestore: SampleBufferFilestore) -> None:
-        while True:
+        with self._sync_lock:
+            if self._sync_closed:
+                return
+            assert self.log_shared is not None
+            remaining = self.log_shared - (time.monotonic() - self._sync_time)
+            if remaining > 0:
+                return
+            self._sync_requested = False
+            self._sync_pending = False
+            self._sync_time = time.monotonic()
+
+        try:
+            with trace_action(logger, "Log Sync", self.location):
+                sync_to_filestore(self, sync_filestore)
+        except Exception:
+            logger.exception("Log Sync failed for %s", self.location)
+        except BaseException:
             with self._sync_lock:
-                while not self._sync_closed:
-                    assert self.log_shared is not None
-                    remaining = self.log_shared - (time.monotonic() - self._sync_time)
-                    if self._sync_requested and remaining <= 0:
-                        self._sync_requested = False
-                        self._sync_pending = False
-                        self._sync_time = time.monotonic()
-                        break
-
-                    timeout = max(remaining, 0) if self._sync_requested else None
-                    self._sync_wakeup.wait(timeout=timeout)
-                else:
-                    self._sync_thread = None
-                    return
-
-            try:
-                with trace_action(logger, "Log Sync", self.location):
-                    sync_to_filestore(self, sync_filestore)
-            except Exception:
-                logger.exception("Log Sync failed for %s", self.location)
-            except BaseException:
-                with self._sync_lock:
-                    self._sync_requested = False
-                    self._sync_pending = False
-                    self._sync_thread = None
-                raise
+                self._sync_requested = False
+                self._sync_pending = False
+            raise
 
     def _increment_version(self, conn: Connection) -> None:
         conn.execute("""
@@ -1257,15 +1250,48 @@ class SampleBufferDatabase(SampleBuffer):
         return results
 
 
+def _ensure_sync_worker() -> None:
+    global _SYNC_WORKER_THREAD
+    with _SYNC_WORKER_LOCK:
+        if _SYNC_WORKER_THREAD is not None and _SYNC_WORKER_THREAD.is_alive():
+            return
+        _SYNC_WORKER_THREAD = threading.Thread(
+            target=_run_sync_worker,
+            daemon=True,
+            name="inspect-buffer-sync",
+        )
+        _SYNC_WORKER_THREAD.start()
+
+
+def _run_sync_worker() -> None:
+    while True:
+        db = _SYNC_WORKER_QUEUE.get()
+        try:
+            if db is None:
+                return
+            db._sync_to_filestore()
+        finally:
+            _SYNC_WORKER_QUEUE.task_done()
+
+
 def sync_to_filestore(
     db: SampleBufferDatabase, filestore: SampleBufferFilestore
 ) -> None:
+    started = time.monotonic()
+
     # read existing manifest (create an empty one if there is none)
     manifest = filestore.read_manifest() or Manifest()
 
     # prepare a list of buffered samples from the db
     samples = db.get_samples()
     if samples is None:
+        logger.info(
+            "TEMPORARY buffer sync skipped: reason=no_samples duration_ms=%s "
+            "thread=%s tid=%s",
+            int((time.monotonic() - started) * 1000),
+            threading.current_thread().name,
+            threading.get_ident(),
+        )
         return
     assert isinstance(samples, Samples)
 
@@ -1307,6 +1333,11 @@ def sync_to_filestore(
     last_message_pool_id = 0
     last_call_pool_id = 0
     segment_files: list[SegmentFile] = []
+    segment_event_count = 0
+    segment_attachment_count = 0
+    segment_message_pool_count = 0
+    segment_call_pool_count = 0
+    segment_json_bytes = 0
     segment_by_id = {seg.id: seg for seg in manifest.segments}
     for manifest_sample in manifest.samples:
         # take the max of last_*_id across all of this sample's segments, not
@@ -1353,6 +1384,12 @@ def sync_to_filestore(
             # update manifest
             manifest_sample.segments.append(segment_id)
 
+            segment_event_count += len(sample_data.events)
+            segment_attachment_count += len(sample_data.attachments)
+            segment_message_pool_count += len(sample_data.message_pool)
+            segment_call_pool_count += len(sample_data.call_pool)
+            segment_json_bytes += len(to_json_str_safe(sample_data).encode("utf-8"))
+
             # update maximums
             (
                 last_event_id,
@@ -1382,6 +1419,25 @@ def sync_to_filestore(
 
     # write the manifest (do this even if we had no segments to pickup adds/deletes)
     filestore.write_manifest(manifest)
+
+    logger.info(
+        "TEMPORARY buffer sync complete: samples=%s previous_segments=%s "
+        "wrote_segment=%s segment_id=%s segment_files=%s events=%s attachments=%s "
+        "message_pool=%s call_pool=%s json_bytes=%s duration_ms=%s thread=%s tid=%s",
+        len(samples.samples),
+        last_segment_id,
+        len(segment_files) > 0,
+        segment_id if len(segment_files) > 0 else None,
+        len(segment_files),
+        segment_event_count,
+        segment_attachment_count,
+        segment_message_pool_count,
+        segment_call_pool_count,
+        segment_json_bytes,
+        int((time.monotonic() - started) * 1000),
+        threading.current_thread().name,
+        threading.get_ident(),
+    )
 
 
 def maximum_ids(

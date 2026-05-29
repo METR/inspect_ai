@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+import time
 import zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -63,10 +65,12 @@ class _MultiFrameZstdCompressObj:
         self._input_bytes = 0
 
     def compress(self, data: bytes) -> bytes:
+        started = time.monotonic()
         view = memoryview(data)
         pieces: list[bytes] = []
         offset = 0
         n = len(view)
+        flush_count = 0
         while offset < n:
             remaining_cap = _MAX_INPUT_PER_FRAME - self._input_bytes
             end = min(offset + remaining_cap, n)
@@ -76,9 +80,23 @@ class _MultiFrameZstdCompressObj:
             offset = end
             if self._input_bytes >= _MAX_INPUT_PER_FRAME:
                 pieces.append(self._obj.flush())
+                flush_count += 1
                 self._obj = self._factory()
                 self._input_bytes = 0
-        return b"".join(pieces)
+        output = b"".join(pieces)
+        if n or output:
+            logger.info(
+                "TEMPORARY zstd compress: input_bytes=%s output_bytes=%s "
+                "pieces=%s frame_flushes=%s duration_ms=%s thread=%s tid=%s",
+                n,
+                len(output),
+                len(pieces),
+                flush_count,
+                int((time.monotonic() - started) * 1000),
+                threading.current_thread().name,
+                threading.get_ident(),
+            )
+        return output
 
     def flush(self) -> bytes:
         # If the last ``compress()`` call landed exactly on the frame boundary,
