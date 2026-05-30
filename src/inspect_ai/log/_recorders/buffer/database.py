@@ -59,9 +59,9 @@ from .types import (
     EventData,
     JsonData,
     MessagePoolData,
-    SampleBuffer,
     SampleData,
     Samples,
+    WritableSampleBuffer,
 )
 
 logger = getLogger(__name__)
@@ -73,7 +73,7 @@ class TaskData(BaseModel):
     metrics: list[TaskDisplayMetric]
 
 
-class SampleBufferDatabase(SampleBuffer):
+class SampleBufferDatabase(WritableSampleBuffer):
     SCHEMA = """
 
     CREATE TABLE IF NOT EXISTS task_database (

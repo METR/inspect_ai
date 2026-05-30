@@ -13,11 +13,13 @@ from pydantic import (
 from inspect_ai._util._async import current_async_backend, run_coroutine, tg_collect
 from inspect_ai._util.async_zip import AsyncZipReader
 from inspect_ai._util.asyncfiles import get_async_filesystem
-from inspect_ai._util.constants import ALL_LOG_FORMATS, EVAL_LOG_FORMAT
+from inspect_ai._util.constants import ALL_LOG_FORMATS, EVAL_LOG_FORMAT, LogFormat
 from inspect_ai._util.dateutil import UtcDatetimeStr
 from inspect_ai._util.error import EvalError
 from inspect_ai._util.file import (
     FileInfo,
+    basename,
+    dirname,
     file,
     filesystem,
 )
@@ -87,7 +89,7 @@ class LogOverview(BaseModel):
 
 def list_eval_logs(
     log_dir: str = os.environ.get("INSPECT_LOG_DIR", "./logs"),
-    formats: list[Literal["eval", "json"]] | None = None,
+    formats: list[LogFormat] | None = None,
     filter: Callable[[EvalLog], bool] | None = None,
     recursive: bool = True,
     descending: bool = True,
@@ -97,7 +99,7 @@ def list_eval_logs(
 
     Args:
       log_dir (str): Log directory (defaults to INSPECT_LOG_DIR)
-      formats (Literal["eval", "json"]): Formats to list (default
+      formats (LogFormat): Formats to list (default
         to listing all formats)
       filter (Callable[[EvalLog], bool]): Filter to limit logs returned.
          Note that the EvalLog instance passed to the filter has only
@@ -674,7 +676,7 @@ def manifest_eval_log_name(info: EvalLogInfo, log_dir: str, sep: str) -> str:
 
 def _filter_log_files(
     ls: list[FileInfo],
-    formats: list[Literal["eval", "json"]] | None,
+    formats: list[LogFormat] | None,
     descending: bool,
     sort: bool,
 ) -> list[FileInfo]:
@@ -688,16 +690,37 @@ def _filter_log_files(
         if sort
         else ls
     )
-    return [
+    result = [
         file
         for file in ordered
         if file.type == "file" and is_log_file(file.name, extensions)
     ]
 
+    # .eval.sample logs are plain directories of `<…>.eval.sample/` sample dirs
+    # (each with a header.jsonl); surface the containing eval folder as the log
+    if formats is None or "eval.sample" in formats:
+        from ._recorders.eval_sample.store import HEADER_JSON, SAMPLE_DIR_SUFFIX
+
+        seen: set[str] = set()
+        for file in ordered:
+            if file.type != "file" or basename(file.name) != HEADER_JSON:
+                continue
+            sample_dir = dirname(file.name).rstrip("/\\")
+            if not sample_dir.endswith(SAMPLE_DIR_SUFFIX):
+                continue
+            eval_folder = dirname(sample_dir).rstrip("/\\")
+            if eval_folder and eval_folder not in seen:
+                seen.add(eval_folder)
+                result.append(
+                    FileInfo(name=eval_folder, type="dir", size=0, mtime=file.mtime)
+                )
+
+    return result
+
 
 def log_files_from_ls(
     ls: list[FileInfo],
-    formats: list[Literal["eval", "json"]] | None = None,
+    formats: list[LogFormat] | None = None,
     descending: bool = True,
     sort: bool = True,
 ) -> list[EvalLogInfo]:
@@ -706,7 +729,7 @@ def log_files_from_ls(
 
 async def log_files_from_ls_async(
     ls: list[FileInfo],
-    formats: list[Literal["eval", "json"]] | None = None,
+    formats: list[LogFormat] | None = None,
     descending: bool = True,
     sort: bool = True,
 ) -> list[EvalLogInfo]:

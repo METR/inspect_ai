@@ -4,7 +4,7 @@ import logging
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, Set, cast
+from typing import Any, NamedTuple, Set, cast
 
 import rich
 from pydantic import BaseModel
@@ -27,6 +27,7 @@ from inspect_ai._eval.task.run import resolve_plan
 from inspect_ai._eval.task.scan import Scanners, scan_already_clean
 from inspect_ai._util._async import run_coroutine
 from inspect_ai._util.azure import call_with_azure_auth_fallback
+from inspect_ai._util.constants import LogFormat
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import (
     FileSystem,
@@ -129,7 +130,7 @@ def eval_set(
     score_display: bool | None = None,
     log_level: str | None = None,
     log_level_transcript: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     limit: int | tuple[int, int] | None = None,
     sample_id: str | int | list[str] | list[int] | list[str | int] | None = None,
     sample_shuffle: bool | int | None = None,

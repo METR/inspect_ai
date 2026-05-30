@@ -260,3 +260,109 @@ def test_checkpoint_resume_runs_to_completion(
         if isinstance(e, CheckpointEvent) and not (begin_idx < i < end_idx)
     }
     assert new_checkpoint_ids == {3}
+
+
+@skip_if_no_docker
+@pytest.mark.slow
+def test_checkpoint_resume_eval_sample(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same cancel→resume→complete flow, but with the `.eval.sample` format.
+
+    The headline: for `.eval.sample` the host checkpoint state IS the sample
+    directory's event stream — there is no host restic repo and no `context/`
+    JSON files, and every checkpoint artifact (the cumulative sandbox restic
+    repo + the per-checkpoint `agent_state.jsonl`) lives *inside* the
+    `<...>.eval.sample/checkpoints/` dir. Resume folds that directory.
+    """
+    monkeypatch.setenv("INSPECT_CHECKPOINTING", "1")
+    _resume_state.cancelled = False
+    _resume_state.generates = 0
+
+    log_dir = str(tmp_path / "logs")
+
+    # --- initial attempt: cancels mid-run after checkpoints commit ---------
+    log = eval(
+        resume_decode_task(),
+        model=SCRIPTED_MODEL,
+        log_dir=log_dir,
+        log_format="eval.sample",
+    )[0]
+    assert log.status == "error"
+    assert _resume_state.cancelled is True
+    assert _resume_state.generates >= 3  # bash, remember, cancel
+
+    # --- the self-contained, host-repo-free on-disk shape ------------------
+    # the eval.sample format nests one `<id>_<epoch>_<uuid>.eval.sample/` dir
+    # per sample inside the eval folder under the log dir
+    logs_root = tmp_path / "logs"
+    sample_dirs = list(logs_root.rglob("*.eval.sample"))
+    assert len(sample_dirs) == 1, sorted(str(p) for p in logs_root.rglob("*"))
+    checkpoints = sample_dirs[0] / "checkpoints"
+    assert checkpoints.is_dir(), "checkpoints nest inside the sample dir"
+    # the sandbox filesystem snapshot is a cumulative restic repo in the dir
+    assert (checkpoints / "restic" / "sandboxes").is_dir()
+    # the host state is the event stream — NO host restic repo, NO context JSONs
+    assert not (checkpoints / "restic" / "host").exists()
+    assert not (checkpoints / "context").exists()
+    # per-checkpoint dirs hold the cp.track() bag (the react agent tracks msgs)
+    numbered = [d for d in checkpoints.iterdir() if d.name.isdigit()]
+    assert numbered and all((d / "agent_state.jsonl").is_file() for d in numbered), (
+        numbered
+    )
+    # the checkpoint metadata is the CheckpointEvent in the stream — no ckpt file
+    assert not list(checkpoints.glob("ckpt-*.json"))
+    # and there is no sibling `.checkpoints/` sidecar
+    assert not list((tmp_path / "logs").glob("*.checkpoints"))
+
+    # --- retry: resume from the directory and run to completion ------------
+    _resume_state.generates = 0
+    retry_log = eval_retry(log, log_dir=log_dir)[0]
+
+    assert retry_log.status == "success"
+    assert retry_log.samples is not None and len(retry_log.samples) == 1
+    sample = retry_log.samples[0]
+    assert sample.error is None
+    # resume restored the prior conversation, so only the remaining turns ran
+    assert _resume_state.generates == 2
+    assert sample.scores is not None
+    assert sample.scores["includes"].value == CORRECT
+    assert LAYER1_CONTENT in sample.output.completion
+
+    # --- the resumed .eval.sample log re-contains the prior history --------
+    completed = read_eval_log(retry_log.location)
+    assert completed.samples is not None
+    events = completed.samples[0].events
+
+    restore_spans = [
+        e for e in events if isinstance(e, SpanBeginEvent) and e.type == "prior_run"
+    ]
+    assert len(restore_spans) == 1
+    restore_span = restore_spans[0]
+    assert restore_span.name.startswith("checkpoint restore")
+
+    begin_idx = next(
+        i
+        for i, e in enumerate(events)
+        if isinstance(e, SpanBeginEvent) and e.id == restore_span.id
+    )
+    end_idx = next(
+        i
+        for i, e in enumerate(events)
+        if isinstance(e, SpanEndEvent) and e.id == restore_span.id
+    )
+    restored = events[begin_idx + 1 : end_idx]
+
+    restored_checkpoint_ids = {
+        e.checkpoint_id for e in restored if isinstance(e, CheckpointEvent)
+    }
+    assert restored_checkpoint_ids == {1, 2}
+    restored_tools = {e.function for e in restored if isinstance(e, ToolEvent)}
+    assert {"bash", "remember"} <= restored_tools
+
+    new_checkpoint_ids = {
+        e.checkpoint_id
+        for i, e in enumerate(events)
+        if isinstance(e, CheckpointEvent) and not (begin_idx < i < end_idx)
+    }
+    assert new_checkpoint_ids == {3}

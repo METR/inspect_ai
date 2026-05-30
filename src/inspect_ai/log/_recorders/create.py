@@ -1,20 +1,29 @@
-from typing import IO, Any, Callable, Literal, cast
+from typing import IO, Any, Callable, cast
+
+from inspect_ai._util.constants import LogFormat
 
 from .eval import EvalRecorder
+from .eval_sample import EvalSampleRecorder
 from .json import JSONRecorder
 from .recorder import Recorder
 
-_recorders: dict[str, type[Recorder]] = {"eval": EvalRecorder, "json": JSONRecorder}
+# eval.sample registered last so its directory-sniffing handles_location only
+# runs for paths the suffix-based recorders don't already claim
+_recorders: dict[str, type[Recorder]] = {
+    "eval": EvalRecorder,
+    "json": JSONRecorder,
+    "eval.sample": EvalSampleRecorder,
+}
 
 
 def create_recorder_for_format(
-    format: Literal["eval", "json"], *args: Any, **kwargs: Any
+    format: LogFormat, *args: Any, **kwargs: Any
 ) -> Recorder:
     recorder = recorder_type_for_format(format)
     return recorder(*args, **kwargs)
 
 
-def recorder_type_for_format(format: Literal["eval", "json"]) -> type[Recorder]:
+def recorder_type_for_format(format: LogFormat) -> type[Recorder]:
     recorder = _recorders.get(format, None)
     if recorder:
         return recorder

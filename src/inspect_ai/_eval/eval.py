@@ -4,7 +4,7 @@ import os
 import sys
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import anyio
 from anyio.abc import TaskGroup
@@ -36,6 +36,7 @@ from inspect_ai._util.constants import (
     DEFAULT_LOG_FORMAT,
     DEFAULT_LOG_SHARED,
     JSON_LOG_FORMAT,
+    LogFormat,
 )
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import absolute_file_path, filesystem
@@ -111,7 +112,7 @@ def eval(
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     limit: int | tuple[int, int] | None = None,
     sample_id: str | int | list[str] | list[int] | list[str | int] | None = None,
     sample_shuffle: bool | int | None = None,
@@ -379,7 +380,7 @@ async def eval_async(
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     limit: int | tuple[int, int] | None = None,
     sample_id: str | int | list[str] | list[int] | list[str | int] | None = None,
     sample_shuffle: bool | int | None = None,
@@ -612,7 +613,7 @@ async def _eval_async_inner(
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     limit: int | tuple[int, int] | None = None,
     sample_id: str | int | list[str] | list[int] | list[str | int] | None = None,
     sample_shuffle: bool | int | None = None,
@@ -952,7 +953,7 @@ def eval_retry(
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     max_samples: int | None = None,
     max_tasks: int | None = None,
     max_subprocesses: int | None = None,
@@ -1131,7 +1132,7 @@ async def eval_retry_async(
     log_level: str | None = None,
     log_level_transcript: str | None = None,
     log_dir: str | None = None,
-    log_format: Literal["eval", "json"] | None = None,
+    log_format: LogFormat | None = None,
     max_samples: int | None = None,
     max_tasks: int | None = None,
     max_subprocesses: int | None = None,
@@ -1329,6 +1330,15 @@ async def eval_retry_async(
                     log_format = "eval"
                 case ".json":
                     log_format = "json"
+                case _:
+                    # the eval.sample format is a directory (no extension); keep
+                    # the retry in the same format so resume reads the prior dir
+                    from inspect_ai.log._recorders.eval_sample.store import (
+                        is_eval_sample_log,
+                    )
+
+                    if is_eval_sample_log(eval_log.location):
+                        log_format = "eval.sample"
         sample_id = eval_log.eval.config.sample_id
         sample_shuffle = eval_log.eval.config.sample_shuffle
         epochs = (

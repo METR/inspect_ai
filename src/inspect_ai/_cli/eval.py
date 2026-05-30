@@ -19,6 +19,7 @@ from inspect_ai import Epochs, eval, eval_retry
 from inspect_ai._eval.evalset import eval_set
 from inspect_ai._util.config import resolve_args
 from inspect_ai._util.constants import (
+    ALL_LOG_FORMATS,
     ALL_LOG_LEVELS,
     DEFAULT_BATCH_SIZE,
     DEFAULT_CACHE_DAYS,
@@ -27,6 +28,7 @@ from inspect_ai._util.constants import (
     DEFAULT_LOG_SHARED,
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_RETRY_ON_ERROR,
+    LogFormat,
 )
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import filesystem
@@ -858,7 +860,7 @@ def eval_options(func: Callable[..., Any]) -> Callable[..., click.Context]:
     )
     @click.option(
         "--log-format",
-        type=click.Choice(["eval", "json"], case_sensitive=False),
+        type=click.Choice(ALL_LOG_FORMATS, case_sensitive=False),
         envvar=["INSPECT_LOG_FORMAT", "INSPECT_EVAL_LOG_FORMAT"],
         help="Format for writing log files.",
     )
@@ -1026,7 +1028,7 @@ def _eval_command_impl(
     log_shared: int | None,
     no_score: bool | None,
     no_score_display: bool | None,
-    log_format: Literal["eval", "json"] | None,
+    log_format: LogFormat | None,
     log_level_transcript: str,
     **common: Unpack[CommonOptions],
 ) -> None:
@@ -1293,7 +1295,7 @@ def eval_set_command(
     bundle_overwrite: bool | None,
     embed_viewer: bool | None,
     log_dir_allow_dirty: bool | None,
-    log_format: Literal["eval", "json"] | None,
+    log_format: LogFormat | None,
     log_level_transcript: str,
     eval_set_id: str | None,
     **common: Unpack[CommonOptions],
@@ -1559,7 +1561,7 @@ def eval_exec(
     log_level: str,
     log_level_transcript: str,
     log_dir: str,
-    log_format: Literal["eval", "json"] | None,
+    log_format: LogFormat | None,
     model: str | None,
     model_base_url: str | None,
     m: tuple[str, ...] | None,

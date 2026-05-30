@@ -4,8 +4,9 @@ from typing import Literal
 import anyio
 
 from inspect_ai._util._async import run_coroutine
+from inspect_ai._util.constants import LogFormat
 from inspect_ai._util.error import PrerequisiteError
-from inspect_ai._util.file import exists, filesystem
+from inspect_ai._util.file import FileSystem, exists, filesystem
 from inspect_ai.log import resolve_sample_attachments
 from inspect_ai.log._condense import condense_sample
 from inspect_ai.log._file import (
@@ -14,14 +15,69 @@ from inspect_ai.log._file import (
     read_eval_log_async,
     write_eval_log,
 )
+from inspect_ai.log._log import EvalLog
 from inspect_ai.log._recorders import create_recorder_for_location
 from inspect_ai.log._recorders.create import recorder_type_for_location
 from inspect_ai.log._resolve import resolve_sample_events_data
 
 
+def _recompute_aggregates(log: "EvalLog") -> None:
+    """Recompute results/reductions from a log's per-sample scores in place.
+
+    The eval.sample format persists per-sample scores but no cross-run
+    aggregates; rebuild them from `sample.scores` + the EvalSpec (metrics,
+    epochs reducer) via the same `eval_results` the live pipeline uses — no
+    re-scoring and no scorer-code import.
+    """
+    from inspect_ai._eval.score import (
+        metrics_from_log_header,
+        reducers_from_log_header,
+    )
+    from inspect_ai._eval.task.results import eval_results
+    from inspect_ai.scorer._metric import SampleScore
+
+    samples = log.samples or []
+    scores = [
+        {
+            name: SampleScore(
+                score=score, sample_id=sample.id, sample_metadata=sample.metadata
+            )
+            for name, score in sample.scores.items()
+        }
+        for sample in samples
+        if sample.scores
+    ]
+    if not scores:
+        return
+    results, reductions = eval_results(
+        len(samples),
+        scores,
+        reducers_from_log_header(log),
+        None,
+        metrics_from_log_header(log),
+    )
+    log.results = results
+    log.reductions = reductions
+
+
+def _is_single_log(path: str, fs: FileSystem) -> bool:
+    """Whether `path` is a single log rather than a directory to scan.
+
+    A single log is a log file (e.g. `.eval`/`.json`) or a log that is itself a
+    directory (e.g. `.eval.sample`). A plain directory of logs is not.
+    """
+    if fs.info(path).type == "file":
+        return True
+    try:
+        recorder_type_for_location(path)
+        return True
+    except ValueError:
+        return False
+
+
 def convert_eval_logs(
     path: str,
-    to: Literal["eval", "json"],
+    to: LogFormat,
     output_dir: str,
     overwrite: bool = False,
     resolve_attachments: bool | Literal["full", "core"] = False,
@@ -34,7 +90,7 @@ def convert_eval_logs(
     Args:
         path (str): Path to source log file(s). Should be either a single
             log file or a directory containing log files.
-        to (Literal["eval", "json"]): Format to convert to. If a file is
+        to (LogFormat): Format to convert to. If a file is
             already in the target format it will just be copied to the output dir.
         output_dir (str): Output directory to write converted log file(s) to.
         overwrite (bool): Overwrite existing log files (defaults to `False`,
@@ -47,6 +103,7 @@ def convert_eval_logs(
     from inspect_ai._display import display
 
     # confirm that path exists
+    path = path.rstrip("/\\")
     fs = filesystem(path)
     if not fs.exists(path):
         raise PrerequisiteError(f"Error: path '{path}' does not exist.")
@@ -57,16 +114,19 @@ def convert_eval_logs(
         output_dir = output_dir[:-1]
     output_fs.mkdir(output_dir, exist_ok=True)
 
+    # `path` is either a single log (a file, or a log that is itself a
+    # directory like `.eval.sample`) or a directory to scan for logs
+    scanning_dir = not _is_single_log(path, fs)
+
     # convert a single file (input file is relative to the 'path')
     def convert_file(input_file: str) -> None:
         # compute input and ensure output dir exists
         input_name, _ = os.path.splitext(input_file)
         input_dir = os.path.dirname(input_name.replace("\\", "/"))
 
-        # Compute paths, handling directories being converted
-        # and files being converted specially
-        path_is_dir = fs.info(path).type == "directory"
-        if path_is_dir:
+        # Compute paths, handling directories being scanned
+        # and single logs being converted specially
+        if scanning_dir:
             target_dir = f"{output_dir}{output_fs.sep}{input_dir}"
             input_file = f"{path}{fs.sep}{input_file}"
             output_file_basename = input_name
@@ -96,9 +156,13 @@ def convert_eval_logs(
             )
         else:
             log = read_eval_log(input_file, resolve_attachments=resolve_attachments)
+            # eval.sample stores no cross-run aggregates — recompute them from
+            # the samples + EvalSpec so the packed output is faithful
+            if log.results is None and log.samples:
+                _recompute_aggregates(log)
             write_eval_log(log, output_file)
 
-    if fs.info(path).type == "file":
+    if not scanning_dir:
         convert_file(path)
     else:
         root_dir = fs.info(path).name

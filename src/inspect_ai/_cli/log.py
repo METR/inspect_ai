@@ -11,7 +11,7 @@ from typing_extensions import Unpack
 
 from inspect_ai._cli.common import CommonOptions, common_options, process_common_options
 from inspect_ai._cli.util import int_or_bool_flag_callback
-from inspect_ai._util.constants import PKG_PATH
+from inspect_ai._util.constants import PKG_PATH, LogFormat
 from inspect_ai.log import EvalStatus, list_eval_logs
 from inspect_ai.log._convert import convert_eval_logs
 from inspect_ai.log._file import (
@@ -203,7 +203,7 @@ def dump_command(
 )
 def convert_command(
     path: str,
-    to: Literal["eval", "json"],
+    to: LogFormat,
     output_dir: str,
     overwrite: bool,
     resolve_attachments: bool | Literal["full", "core"],

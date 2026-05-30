@@ -9,6 +9,7 @@ from inspect_ai._display.core.display import TaskDisplayMetric
 from ..._log import EvalSampleSummary
 
 if TYPE_CHECKING:
+    from ..types import SampleEvent
     from .history import SampleHistory
 
 JsonData: TypeAlias = dict[str, JsonValue]
@@ -165,3 +166,26 @@ class SampleBuffer(abc.ABC):
     def cleanup(self) -> None:
         """Remove this buffer's backing storage."""
         ...
+
+
+class WritableSampleBuffer(SampleBuffer):
+    """A `SampleBuffer` that is also the live write sink for a run.
+
+    The `TaskLogger` streams sample lifecycle + events into one of these; both
+    the SQLite buffer and the durable `.eval.sample` directory store implement it.
+    """
+
+    @abc.abstractmethod
+    def start_sample(self, sample: EvalSampleSummary) -> None: ...
+
+    @abc.abstractmethod
+    def log_events(self, events: "list[SampleEvent]") -> None: ...
+
+    @abc.abstractmethod
+    def complete_sample(self, summary: EvalSampleSummary) -> None: ...
+
+    @abc.abstractmethod
+    def update_metrics(self, metrics: list[TaskDisplayMetric]) -> None: ...
+
+    @abc.abstractmethod
+    def remove_samples(self, samples: list[tuple[str | int, int]]) -> None: ...

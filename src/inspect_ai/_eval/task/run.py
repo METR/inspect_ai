@@ -1617,6 +1617,30 @@ def eval_log_sample_source(
     ) -> ResumeCheckpoint | None:
         if eval_checkpoints_dir is None:
             return None
+        # `.eval.sample` nests checkpoints inside the prior sample dir and uses
+        # the CheckpointEvent in its event stream as the commit marker (there
+        # is no sibling `.checkpoints/` dir or ckpt file).
+        from inspect_ai.log._recorders.eval_sample.store import is_eval_sample_log
+
+        if eval_log is not None and is_eval_sample_log(eval_log.location):
+            from inspect_ai.log._recorders.eval_sample.resume import (
+                latest_checkpoint_id_from_sample_dir,
+            )
+            from inspect_ai.log._recorders.eval_sample.store import SampleDirStore
+
+            root = SampleDirStore(eval_log.location, create=False).checkpoints_root(
+                id, epoch
+            )
+            if root is None:
+                return None
+            if (
+                latest_checkpoint_id_from_sample_dir(eval_log.location, id, epoch)
+                is None
+            ):
+                return None
+            return ResumeCheckpoint(
+                sample_checkpoints_dir=root, prior_log_location=eval_log.location
+            )
         if not await has_sample_checkpoint(eval_checkpoints_dir, id, epoch):
             return None
         return ResumeCheckpoint(

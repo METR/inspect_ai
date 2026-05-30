@@ -8,6 +8,13 @@ logger = getLogger(__name__)
 
 
 def sample_buffer(location: str) -> SampleBuffer:
+    # the .eval.sample format is its own durable buffer — the viewer reads
+    # running and completed samples from the directory through one path
+    from ..eval_sample.store import SampleDirStore, is_eval_sample_log
+
+    if is_eval_sample_log(location):
+        return SampleDirStore(location, create=False)
+
     try:
         return SampleBufferDatabase(location, create=False)
     except FileNotFoundError:

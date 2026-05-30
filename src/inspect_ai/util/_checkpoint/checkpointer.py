@@ -34,6 +34,13 @@ class ResumeCheckpoint:
 
     sample_checkpoints_dir: str
 
+    prior_log_location: str | None = None
+    """The prior run's log location, when it used the `.eval.sample` format.
+
+    For that format the host-side resume state is the prior sample directory
+    itself (its event stream), so hydration folds it back rather than reading
+    a host restic repo. ``None`` for the `.eval`/`.json` formats."""
+
 
 class Checkpointer(Protocol):
     """The session yielded by ``async with checkpointer() as cp:``.

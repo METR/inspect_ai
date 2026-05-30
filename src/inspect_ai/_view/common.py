@@ -18,6 +18,7 @@ from s3fs import S3FileSystem  # type: ignore
 from s3fs.core import _error_wrapper, version_id_kw  # type: ignore
 
 from inspect_ai._util._async import tg_collect
+from inspect_ai._util.constants import LogFormat
 from inspect_ai._util.file import default_fs_options, dirname, filesystem, size_in_mb
 from inspect_ai._view.azure import (
     azure_warning_hint,
@@ -527,7 +528,7 @@ async def async_filesystem(
 
 async def list_eval_logs_async(
     log_dir: str = os.environ.get("INSPECT_LOG_DIR", "./logs"),
-    formats: list[Literal["eval", "json"]] | None = None,
+    formats: list[LogFormat] | None = None,
     recursive: bool = True,
     descending: bool = True,
     fs_options: dict[str, Any] = {},
@@ -539,7 +540,7 @@ async def list_eval_logs_async(
 
     Args:
       log_dir (str): Log directory (defaults to INSPECT_LOG_DIR)
-      formats (Literal["eval", "json"]): Formats to list (default
+      formats (LogFormat): Formats to list (default
         to listing all formats)
       recursive (bool): List log files recursively (defaults to True).
       descending (bool): List in descending order.

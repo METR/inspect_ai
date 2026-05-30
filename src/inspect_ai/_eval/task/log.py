@@ -41,6 +41,8 @@ from inspect_ai.log._log import (
 )
 from inspect_ai.log._recorders import Recorder
 from inspect_ai.log._recorders.buffer import SampleBufferDatabase
+from inspect_ai.log._recorders.buffer.types import WritableSampleBuffer
+from inspect_ai.log._recorders.eval_sample import EvalSampleRecorder
 from inspect_ai.log._recorders.types import SampleEvent
 from inspect_ai.model import (
     GenerateConfig,
@@ -242,11 +244,17 @@ class TaskLogger:
         self.flush_pending: list[tuple[str | int, int]] = []
 
         # sample buffer db
-        self._buffer_db: SampleBufferDatabase | None = None
+        self._buffer_db: WritableSampleBuffer | None = None
 
     async def init(self) -> None:
         self._bump_created_past_existing_logs()
         self._location = await self.recorder.log_init(self.eval)
+
+        # the .eval.sample format's own directory store IS the durable record
+        # and the live event sink — reuse it directly (not gated by realtime/pytest)
+        if isinstance(self.recorder, EvalSampleRecorder):
+            self._buffer_db = self.recorder.store_for(self.eval)
+            return
 
         if self.eval.config.log_realtime is False or os.environ.get(
             "PYTEST_CURRENT_TEST"
@@ -305,7 +313,7 @@ class TaskLogger:
         return self._samples_completed
 
     @property
-    def buffer_db(self) -> SampleBufferDatabase | None:
+    def buffer_db(self) -> WritableSampleBuffer | None:
         return self._buffer_db
 
     async def log_start(self, plan: EvalPlan) -> None:

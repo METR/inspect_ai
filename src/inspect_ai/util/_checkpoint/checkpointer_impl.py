@@ -20,6 +20,7 @@ from functools import partial
 from logging import getLogger
 from typing import Any, TypeVar
 
+import anyio
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from inspect_ai._util._async import tg_collect
@@ -118,6 +119,9 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
             config=self._config,
             hydration=result,
             resume_checkpoint=self._resume_checkpoint,
+            log_location=self._log_location,
+            sample_id=self._sample_id,
+            epoch=self._epoch,
         )
         return self._cached
 
@@ -140,6 +144,12 @@ class _EnteredCheckpointer:
         config: ResolvedCheckpointConfig,
         hydration: HydrationResult,
         resume_checkpoint: ResumeCheckpoint | None,
+        # the sole production constructor (`_CheckpointerSetup.__aenter__`)
+        # always supplies these; they default only so unit tests that drive the
+        # `.eval` path directly need not provide `.eval.sample`-only inputs.
+        log_location: str = "",
+        sample_id: int | str = "",
+        epoch: int = 1,
     ) -> None:
         self._config = config
         self._sample_checkpoints_dir = hydration.sample_checkpoints_dir
@@ -150,6 +160,12 @@ class _EnteredCheckpointer:
         self._host_repo = hydration.host_repo
         self._restic_password = hydration.restic_password
         self._resume_checkpoint = resume_checkpoint
+        # `.eval.sample`: host state is the event stream; persist only the
+        # cp.track() bag into the sample dir and skip the host restic repo.
+        self._eval_sample = hydration.eval_sample
+        self._log_location = log_location
+        self._sample_id = sample_id
+        self._epoch = epoch
         self._agent_state: dict[str, Any] = (
             hydration.host.agent_state if hydration.host.agent_state is not None else {}
         )
@@ -345,12 +361,12 @@ class _EnteredCheckpointer:
         # the per-checkpoint file.
         cycle_start = time.monotonic()
 
-        # Checkpoint file numbering continues from any checkpoint files
-        # already present in the dir (incl. those FS-copied from a prior
-        # eval on resume). Scanned per-fire rather than tracked in
-        # memory so the count naturally bridges resumed runs without an
-        # explicit handoff.
-        next_checkpoint_id = await _scan_next_checkpoint_id(self._sample_root)
+        # Checkpoint numbering continues across resume. `.eval`: scan the
+        # ckpt-*.json files in the sample root. `.eval.sample`: count the
+        # CheckpointEvents already in the transcript — the rehydrated
+        # `prior_run` span carries the prior ones, so the count bridges
+        # resume with no explicit handoff and no file scan.
+        next_checkpoint_id = await self._next_checkpoint_id()
 
         # Wrap the whole fire in a trace action so an in-progress fire is
         # observable live (`inspect trace anomalies` Running Actions) and a
@@ -362,48 +378,62 @@ class _EnteredCheckpointer:
             "Checkpoint",
             f"fire {_restic_tag(next_checkpoint_id)} (trigger={trigger})",
         ):
-            # Close `checkpoint N` *before* `write_host_context` so the
-            # ``SpanEndEvent`` lands in this checkpoint's ``events.json`` —
-            # the persisted snapshot must show the span closing within it.
+            # Close `checkpoint N` *before* persisting host state so the
+            # ``SpanEndEvent`` is part of this checkpoint's record.
             await self._close_current_span()
 
             state = sample_state()
             if not state:
                 raise RuntimeError("Checkpointer must find sample state")
             ts = transcript()
-            await self._write_host_context(
-                self._context_dir,
-                ts.events,
-                ts.attachments,
-                state.store,
-            )
 
-            # Host + each sandbox (backup → egress) in parallel. The
-            # backup-then-egress pair for a given sandbox is sequential
-            # (egress diffs against what backup just wrote), but the pairs
-            # are independent across sandboxes and from the host backup.
-            # `tg_collect` takes thunks (zero-arg callables) so coroutines
-            # are only created at task-group start time.
+            # Host state. `.eval`: snapshot events/store/attachments into the
+            # context dir for a restic backup. `.eval.sample`: the event stream
+            # already IS the host state — only the cp.track() bag, which never
+            # enters the stream, needs persisting.
+            agent_state: dict[str, Any] | None = None
+            if self._eval_sample:
+                agent_state = self._capture_agent_state()
+            else:
+                assert self._context_dir is not None
+                await self._write_host_context(
+                    self._context_dir, ts.events, ts.attachments, state.store
+                )
+
+            # Backups in parallel: each sandbox (backup → egress), plus the
+            # host context for `.eval` (none for `.eval.sample`). `tg_collect`
+            # takes thunks so coroutines start at task-group start time.
             sandbox_items = list((self._config.sandbox_paths or {}).items())
-            backup_funcs: list[Callable[[], Awaitable[ResticBackupSummary]]] = [
-                partial(self._backup_host, next_checkpoint_id),
-                *[
-                    partial(
-                        self._backup_and_egress_sandbox, name, paths, next_checkpoint_id
-                    )
-                    for name, paths in sandbox_items
-                ],
+            backup_funcs: list[Callable[[], Awaitable[ResticBackupSummary]]] = []
+            if not self._eval_sample:
+                backup_funcs.append(partial(self._backup_host, next_checkpoint_id))
+            backup_funcs += [
+                partial(
+                    self._backup_and_egress_sandbox, name, paths, next_checkpoint_id
+                )
+                for name, paths in sandbox_items
             ]
             summaries = await tg_collect(backup_funcs)
-            host_info = _snapshot_info(summaries[0])
+
+            if self._eval_sample:
+                host_info: SnapshotDetails | None = None
+                sandbox_summaries = summaries
+            else:
+                host_info = _snapshot_info(summaries[0])
+                sandbox_summaries = summaries[1:]
             sandbox_infos = {
                 name: _snapshot_info(summary)
-                for (name, _), summary in zip(sandbox_items, summaries[1:])
+                for (name, _), summary in zip(sandbox_items, sandbox_summaries)
             }
 
-            # Cycle duration measured up to the checkpoint file write — the
-            # write itself is the commit point, so its cost lands on the
-            # next cycle's clock if anywhere.
+            # Persist the cp.track() bag next to this checkpoint inside the
+            # sample dir (`.eval.sample` only).
+            if self._eval_sample and agent_state:
+                await anyio.to_thread.run_sync(
+                    partial(self._write_agent_state, next_checkpoint_id, agent_state)
+                )
+
+            # Cycle duration measured up to the commit point.
             duration_ms = int((time.monotonic() - cycle_start) * 1000)
 
             checkpoint = Checkpoint(
@@ -412,38 +442,71 @@ class _EnteredCheckpointer:
                 turn=self._turn,
                 created_at=datetime.now(timezone.utc),
                 duration_ms=duration_ms,
-                size_bytes=host_info.size_bytes
+                size_bytes=(host_info.size_bytes if host_info else 0)
                 + sum(s.size_bytes for s in sandbox_infos.values()),
                 host=host_info,
                 sandboxes=sandbox_infos,
             )
 
-            await write_checkpoint_file(
-                sample_checkpoints_dir=self._sample_root,
-                checkpoint=checkpoint,
-            )
+            # `.eval`: the ckpt-NNNNN.json file is the commit point.
+            # `.eval.sample`: the CheckpointEvent appended below is — no file.
+            if not self._eval_sample:
+                await write_checkpoint_file(
+                    sample_checkpoints_dir=self._sample_root,
+                    checkpoint=checkpoint,
+                )
 
-            # Remote destination: ship the new staging-dir files (restic
-            # repo additions + checkpoint file) to the destination. The
-            # checkpoint file is shipped last in the safe order — its
-            # arrival at the destination is the remote commit point.
+            # Remote destination: ship the new staging-dir files (restic repo
+            # additions + checkpoint file) to the destination, checkpoint file
+            # last (its arrival is the remote commit point).
             if self._sample_staging_dir is not None:
                 await host_egress(
                     staging_dir=self._sample_staging_dir,
                     destination_dir=self._sample_checkpoints_dir,
                 )
 
-            # Emit the CheckpointEvent now that the checkpoint file is
-            # committed (locally and, when remote, at the destination too).
-            # By construction the event is NOT in this fire's events.json
-            # (already written above); it IS captured in the next fire's
-            # events.json. On resume, hydrate synthesizes the trailing
-            # event from the latest checkpoint file (working.md §8a).
+            # Emit the CheckpointEvent now that the checkpoint is committed. For
+            # `.eval.sample` the recorder streams it into the sample dir, where
+            # it serves as both the checkpoint metadata and the commit marker.
             transcript()._event(CheckpointEvent.from_details(checkpoint))
 
-            # Checkpoint file is committed; open the next `checkpoint N+1`
-            # span so subsequent agent events nest under it.
+            # Open the next `checkpoint N+1` span so subsequent agent events
+            # nest under it.
             await self._open_next_span()
+
+    async def _next_checkpoint_id(self) -> int:
+        """Next checkpoint ordinal, continuing across resume.
+
+        `.eval.sample`: the CheckpointEvents in the transcript are the index
+        (the rehydrated `prior_run` span carries the prior ones). `.eval`: scan
+        the ckpt-*.json files in the sample root.
+        """
+        if self._eval_sample:
+            prior = [
+                e.checkpoint_id
+                for e in transcript().events
+                if isinstance(e, CheckpointEvent)
+            ]
+            return (max(prior) + 1) if prior else 1
+        return await _scan_next_checkpoint_id(self._sample_root)
+
+    def _capture_agent_state(self) -> dict[str, Any] | None:
+        """Snapshot the cp.track() bag — the one host piece not in the stream."""
+        return (
+            {key: cb() for key, cb in self._on_checkpoint_callbacks.items()}
+            if self._on_checkpoint_callbacks
+            else None
+        )
+
+    def _write_agent_state(
+        self, checkpoint_id: int, agent_state: dict[str, Any]
+    ) -> None:
+        """Persist the cp.track() bag into the sample dir (`.eval.sample`)."""
+        from inspect_ai.log._recorders.eval_sample.store import SampleDirStore
+
+        SampleDirStore(self._log_location, create=False).write_agent_state(
+            self._sample_id, self._epoch, checkpoint_id, agent_state
+        )
 
     async def _write_host_context(
         self,
@@ -504,11 +567,7 @@ class _EnteredCheckpointer:
         # this fire's events have been consumed from the live transcript's
         # perspective even if none made it into the persisted snapshot.
         self._events_consumed = len(events)
-        agent_state = (
-            {key: cb() for key, cb in self._on_checkpoint_callbacks.items()}
-            if self._on_checkpoint_callbacks
-            else None
-        )
+        agent_state = self._capture_agent_state()
         await host_context.write(
             context_dir,
             host_context.HostContext(
@@ -522,6 +581,8 @@ class _EnteredCheckpointer:
         )
 
     async def _backup_host(self, checkpoint_id: int) -> ResticBackupSummary:
+        # only called for `.eval`, which always has a host context dir
+        assert self._context_dir is not None
         with trace_action(
             logger, "Checkpoint Backup", f"host {_restic_tag(checkpoint_id)}"
         ):

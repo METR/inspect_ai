@@ -63,6 +63,7 @@ from inspect_ai.util._restic import init_repo, resolve_restic, restore_repo
 from inspect_ai.util._restic.ops import restic_env
 from inspect_ai.util._sandbox.context import sandbox
 
+from ._async_fs import async_mkdir
 from ._host_egress import seed_manifest
 from ._layout import host_context
 from ._layout.eval_checkpoints_dir import eval_checkpoints_dir
@@ -125,15 +126,117 @@ class HydrationResult:
     ``sample_checkpoints_dir`` when local, ``sample_staging_dir`` when
     remote."""
 
-    context_dir: str
-    """Per-sample context subdir — restic's backup source."""
+    context_dir: str | None
+    """Per-sample context subdir — restic's backup source. ``None`` for the
+    `.eval.sample` format, which has no host context (the event stream is the
+    host state)."""
 
     host_restic: Path
     host_repo: str
-    """Path to the host restic repo: ``<sample_root>/restic/host/``."""
+    """Path to the host restic repo: ``<sample_root>/restic/host/``. Unused for
+    `.eval.sample` (no host repo)."""
 
     restic_password: str
     host: _HostHydrationResult
+
+    eval_sample: bool = False
+    """Whether this run uses the `.eval.sample` format — the host checkpoint
+    state lives in the sample directory's event stream, so there is no host
+    restic repo or context dir and checkpoints nest under
+    ``<sample_dir>/checkpoints``."""
+
+
+def _is_eval_sample(log_location: str) -> bool:
+    from inspect_ai.log._recorders.eval_sample.store import is_eval_sample_log
+
+    return is_eval_sample_log(log_location)
+
+
+async def _eval_sample_checkpoints_root(
+    log_location: str, sample_id: int | str, epoch: int
+) -> str:
+    """Resolve ``<sample_dir>/checkpoints`` for this run's sample.
+
+    The recorder has already created the sample dir (logging starts before the
+    agent enters the checkpointer), so the resolve always finds it.
+    """
+    from inspect_ai.log._recorders.eval_sample.store import SampleDirStore
+
+    def _resolve() -> str | None:
+        return SampleDirStore(log_location, create=False).checkpoints_root(
+            sample_id, epoch
+        )
+
+    root = await anyio.to_thread.run_sync(_resolve)
+    if root is None:
+        raise RuntimeError(
+            f"checkpoint: no .eval.sample dir for sample {sample_id} epoch {epoch} "
+            f"under {log_location}"
+        )
+    return root
+
+
+async def _eval_sample_latest_committed_id(
+    prior_log_location: str | None, sample_id: int | str, epoch: int
+) -> int | None:
+    if prior_log_location is None:
+        return None
+    from inspect_ai.log._recorders.eval_sample.resume import (
+        latest_checkpoint_id_from_sample_dir,
+    )
+
+    return await anyio.to_thread.run_sync(
+        partial(
+            latest_checkpoint_id_from_sample_dir, prior_log_location, sample_id, epoch
+        )
+    )
+
+
+def _emit_prior_run_from_sample_dir(
+    prior_log_location: str | None,
+    sample_id: int | str | None,
+    epoch: int,
+    latest_committed_id: int | None,
+) -> _HostHydrationResult:
+    """Replay the prior run's events into the live transcript + restore state.
+
+    For `.eval.sample` resume the prior sample directory already holds the full
+    transcript. Read it back fully-expanded, wrap it in a ``prior_run`` span,
+    and emit each event through ``transcript()._event`` — the *normal* channel,
+    so the recorder streams them into the new sample dir (re-condensed,
+    self-contained). ``Store`` and ``cp.track()`` state are restored too; only
+    the sandbox filesystem still comes from restic.
+    """
+    if prior_log_location is None or sample_id is None:
+        return _HostHydrationResult()
+
+    from inspect_ai.log._recorders.eval_sample.resume import _events_through_checkpoint
+    from inspect_ai.log._recorders.eval_sample.store import SampleDirStore
+    from inspect_ai.util._store import store_from_events
+
+    store = SampleDirStore(prior_log_location, create=False)
+    prior = store.read_eval_sample(sample_id, epoch)
+    events: list[Event] = list(prior.events)
+    if latest_committed_id is not None:
+        events = _events_through_checkpoint(events, latest_committed_id)
+
+    # emit through the normal channel so the recorder captures them into the
+    # new dir (the prior_run wrap mirrors the .eval resume's restored history)
+    wrapped = _wrap_prior_run(events)
+    ts = transcript()
+    for event in wrapped:
+        ts._event(event)
+
+    state = sample_state()
+    if state is None:
+        raise RuntimeError("_emit_prior_run_from_sample_dir: no active sample state")
+    for key, value in store_from_events(events)._data.items():
+        state.store.set(key, value)
+
+    agent_state = store.read_agent_state(sample_id, epoch, latest_committed_id)
+    return _HostHydrationResult(
+        agent_state=agent_state, condensed_events=wrapped, msg_pool=[], call_pool=[]
+    )
 
 
 async def hydrate(
@@ -164,15 +267,25 @@ async def hydrate(
         ),
     )
 
+    # `.eval.sample` nests checkpoints inside the sample dir and keeps host
+    # state in the event stream — there is no host restic repo or context dir,
+    # and the CheckpointEvent in the stream is the commit marker.
+    eval_sample = _is_eval_sample(log_location)
+
     # Phase 1: synchronous prologue. After this completes, every Phase 2
     # function can read the password from <sample_root>/sample.json
     # and reach restic on the host.
-    new_eval_checkpoints_dir = eval_checkpoints_dir(
-        log_location, config.checkpoints_location
-    )
-    new_sample_checkpoints_dir = await ensure_sample_checkpoints_dir(
-        new_eval_checkpoints_dir, sample_id, epoch
-    )
+    if eval_sample:
+        new_sample_checkpoints_dir = await _eval_sample_checkpoints_root(
+            log_location, sample_id, epoch
+        )
+    else:
+        new_eval_checkpoints_dir = eval_checkpoints_dir(
+            log_location, config.checkpoints_location
+        )
+        new_sample_checkpoints_dir = await ensure_sample_checkpoints_dir(
+            new_eval_checkpoints_dir, sample_id, epoch
+        )
 
     # Sample root: where restic + checkpoint files are first materialized.
     # Remote destination → host-local staging; local → destination directly.
@@ -182,13 +295,18 @@ async def hydrate(
     else:
         sample_staging = None
         sample_root = new_sample_checkpoints_dir
+        if eval_sample:
+            await async_mkdir(sample_root)  # the nested `checkpoints/` dir
 
-    sample_context_dir = await ensure_context_dir(sample_root)
+    # `.eval.sample` has no host context dir (the event stream is the host state)
+    sample_context_dir = None if eval_sample else await ensure_context_dir(sample_root)
 
     if resume_checkpoint:
         # Bring the cross-cutting bits over first so `ensure_restic_config`
         # reads the inherited password instead of minting a fresh one,
         # and so the checkpoint file count continues from the prior run.
+        # (For `.eval.sample` this copies forward the restic password +
+        # sandbox repos; there are no host repo / ckpt files to copy.)
         await _fs_copy_cross_cutting(
             resume_checkpoint.sample_checkpoints_dir,
             sample_root,
@@ -197,16 +315,20 @@ async def hydrate(
     host_restic = await resolve_restic()
     host_repo = host_repo_dir(sample_root)
 
-    # On resume, find the highest committed checkpoint id (checkpoint
-    # files are the source of truth — see ``Checkpoint`` design notes).
-    # Any restic snapshot tagged ``ckpt-NNNNN`` with N > this id is an
-    # orphan from an interrupted fire that completed its backup but
-    # never wrote its checkpoint file; ``_hydrate_host`` /
-    # ``_hydrate_sandbox`` drop those below so ``restic restore latest``
-    # picks the committed snapshot.
+    # On resume, find the highest committed checkpoint id. Any restic snapshot
+    # tagged ``ckpt-NNNNN`` with N > this id is an orphan from an interrupted
+    # fire that completed its backup but never committed; the sandbox hydrate
+    # drops those so ``restic restore latest`` picks the committed snapshot.
+    # `.eval`: the checkpoint files are the source of truth. `.eval.sample`: the
+    # CheckpointEvent in the prior dir's event stream is.
     latest_committed_id: int | None = None
     if resume_checkpoint:
-        latest_committed_id = await scan_latest_committed_id(sample_root)
+        if eval_sample:
+            latest_committed_id = await _eval_sample_latest_committed_id(
+                resume_checkpoint.prior_log_location, sample_id, epoch
+            )
+        else:
+            latest_committed_id = await scan_latest_committed_id(sample_root)
 
     # Phase 2: host + sandboxes in parallel. Host work runs alongside
     # the per-sandbox fan-out; each sandbox's work is independent of
@@ -226,6 +348,9 @@ async def hydrate(
             context_dir=sample_context_dir,
             latest_committed_id=latest_committed_id,
             action=action,
+            eval_sample=eval_sample,
+            sample_id=sample_id,
+            epoch=epoch,
         )
 
     async with anyio.create_task_group() as tg:
@@ -264,6 +389,7 @@ async def hydrate(
         host_repo=host_repo,
         restic_password=restic_config.restic_password,
         host=host_result,
+        eval_sample=eval_sample,
     )
 
 
@@ -274,15 +400,37 @@ async def _hydrate_host(
     host_repo: str,
     restic_password: str,
     sample_root: str,
-    context_dir: str,
+    context_dir: str | None,
     latest_committed_id: int | None,
     action: str,
+    eval_sample: bool = False,
+    sample_id: int | str | None = None,
+    epoch: int = 1,
 ) -> _HostHydrationResult:
+    if eval_sample:
+        # No host restic repo: the prior sample dir's event stream IS the host
+        # state. Fresh runs have nothing to restore; resumed runs replay the
+        # prior events into the new dir (via the normal transcript channel, so
+        # the recorder captures them) and restore Store + agent_state.
+        if resume is None:
+            return _HostHydrationResult()
+        with trace_action(logger, action, "host replay from sample dir"):
+            return await anyio.to_thread.run_sync(
+                partial(
+                    _emit_prior_run_from_sample_dir,
+                    resume.prior_log_location,
+                    sample_id,
+                    epoch,
+                    latest_committed_id,
+                )
+            )
+
     if resume is None:
         with trace_action(logger, action, "host init"):
             await init_repo(host_restic, host_repo, restic_password)
         return _HostHydrationResult()
 
+    assert context_dir is not None  # non-eval.sample always has a context dir
     # Resume: FS-copy the old host repo into the new one (preserves
     # snapshot IDs and password), drop any orphan snapshots beyond the
     # latest committed checkpoint file, restic-restore the latest

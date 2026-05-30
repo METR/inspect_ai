@@ -64,8 +64,10 @@ class Checkpoint(BaseModel):
     size_bytes: int
     """Total on-disk size added by this checkpoint (sum of host + sandboxes)."""
 
-    host: SnapshotDetails
-    """Stats for the host repo backup this cycle."""
+    host: SnapshotDetails | None = None
+    """Stats for the host repo backup this cycle. ``None`` for the
+    `.eval.sample` format, which has no host restic repo — the host state
+    lives in the sample directory's event stream rather than a snapshot."""
 
     sandboxes: dict[str, SnapshotDetails] = Field(default_factory=dict)
     """Per-sandbox stats keyed by sandbox name. Empty when checkpointing is
