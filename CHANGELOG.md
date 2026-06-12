@@ -1,6 +1,8 @@
 ## Unreleased
 
 - Google: Retry truncated response streams (`ClientPayloadError` wrapping a `PayloadEncodingError`, e.g. a connection reset mid-body) instead of crashing the sample.
+- Log: Sample event condensing is now linear, not quadratic, in conversation length.
+- Eval Logs: Record the installed task package's git commit in `EvalSpec.revision`, resolving the actual distribution (namespace-package aware).
 
 ## 0.3.241 (22 June 2026)
 
@@ -27,7 +29,6 @@
 - Log: `read_eval_log`, `read_eval_log_async`, and `samples_df` now accept `exclude_fields` for more memory-efficient loading of large samples.
 - Bugfix: Fix direct multi_scorer task usage.
 - Bugfix: `subprocess()` no longer deadlocks on timeout/cancel when asyncio's child watcher misses the process exit (observed under heavy `docker compose exec` load); the shielded post-kill `process.wait()` is now bounded.
-- Eval Logs: Record the installed task package's git commit in `EvalSpec.revision`, resolving the actual distribution (namespace-package aware).
 
 ## 0.3.240 (15 June 2026)
 
