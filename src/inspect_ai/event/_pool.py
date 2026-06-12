@@ -306,6 +306,12 @@ def condense_model_event_calls(
 
     See module docstring for the occurrence-keyed dedup strategy.
 
+    Wire requests are append-mostly, so the equal prefix of each event's
+    message list is resolved against the previous event's pool indices
+    without hashing; only the divergent tail is hashed. Output is identical
+    to hashing every message: a prefix element equal to the previous
+    element resolves to the index that hash-dedup of equal content would produce.
+
     Args:
         events: Events to condense.
         next_index: The pool position assigned to the first new unique
