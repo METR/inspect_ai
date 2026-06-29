@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Checkpoint: resume no longer hard-errors when a run contains a duplicate checkpoint span left by a tolerated (non-fatal) capture failure.
 - Google: Retry truncated response streams (`ClientPayloadError` wrapping a `PayloadEncodingError`, e.g. a connection reset mid-body) instead of crashing the sample.
 - Log: Sample event condensing is now linear, not quadratic, in conversation length.
 - Eval Logs: Record the installed task package's git commit in `EvalSpec.revision`, resolving the actual distribution (namespace-package aware).
