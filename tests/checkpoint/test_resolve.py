@@ -17,6 +17,7 @@ from inspect_ai.util._checkpoint import (
 )
 from inspect_ai.util._checkpoint.config import (
     DEFAULT_CHECKPOINT_TRIGGER,
+    CheckpointDisabled,
     merge_checkpoint_configs,
 )
 
@@ -307,3 +308,46 @@ def test_task_callbacks_reach_resolved_config() -> None:
     assert resolved is not None
     assert resolved.on_checkpoint is on_checkpoint
     assert resolved.on_resume is on_resume
+
+
+# --- veto (checkpoint=False) overrides ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "task, sample, eval_",
+    [
+        pytest.param(
+            CheckpointDisabled(),
+            None,
+            CheckpointConfig(trigger=TurnInterval(every=1)),
+            id="task_veto_overrides_eval_enable",
+        ),
+        pytest.param(
+            CheckpointConfig(trigger=TurnInterval(every=1)),
+            None,
+            CheckpointDisabled(),
+            id="eval_veto_overrides_task_enable",
+        ),
+        pytest.param(
+            CheckpointDisabled(),
+            CheckpointSampleConfig(trigger=TurnInterval(every=1)),
+            None,
+            id="task_veto_overrides_sample_config",
+        ),
+    ],
+)
+def test_veto_disables_checkpointing(
+    task: CheckpointConfig | CheckpointDisabled | None,
+    sample: CheckpointSampleConfig | None,
+    eval_: CheckpointConfig | CheckpointDisabled | None,
+) -> None:
+    assert merge_checkpoint_configs(task, sample, eval_) is None
+
+
+def test_veto_is_per_task_not_eval_wide() -> None:
+    # One shared eval enable; a vetoing task resolves to disabled while a
+    # non-vetoing task under the same eval config stays enabled. Proves the
+    # veto is per-task (no shared-state leak).
+    eval_cfg = CheckpointConfig(trigger=TurnInterval(every=1))
+    assert merge_checkpoint_configs(CheckpointDisabled(), None, eval_cfg) is None
+    assert merge_checkpoint_configs(None, None, eval_cfg) is not None
