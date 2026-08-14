@@ -4,6 +4,7 @@
 - Fixed duplicated task prompt and redundant context sent to the model when using `CompactionAuto` with providers that support native compaction. (#4804)
 - Transcripts now show which compaction strategy actually ran, and flag when `CompactionAuto` fell back from native to summary compaction. (#4804)
 - Logging: Reduced memory usage and event-loop stalls when finalizing long samples with realtime logging; summary-only hooks can opt out of full-sample materialization via `Hooks.needs_full_sample`. (#4879)
+- Models: OpenAI, OpenAI-compatible, Anthropic and Groq now allow 60s rather than 5s for connection setup, so a busy event loop is much less likely to cause `APIConnectionError`. (METR/inspect_ai `faber/http-connect-defaults`, filed upstream as #4882)
 
 ## 0.3.258 (11 August 2026)
 
