@@ -1,3 +1,11 @@
+## Unreleased (METR fork cherry-picks on top of 0.3.259)
+
+- Fixed model calls timing out during long samples with realtime logging enabled: per-event transcript and buffer processing cost grew with conversation length, starving the event loop. (#4839)
+- Fixed duplicated task prompt and redundant context sent to the model when using `CompactionAuto` with providers that support native compaction. (#4804)
+- Transcripts now show which compaction strategy actually ran, and flag when `CompactionAuto` fell back from native to summary compaction. (#4804)
+- Logging: Reduced memory usage and event-loop stalls when finalizing long samples with realtime logging; summary-only hooks can opt out of full-sample materialization via `Hooks.needs_full_sample`. (#4879)
+- Models: OpenAI, OpenAI-compatible, Anthropic and Groq now allow 60s rather than 5s for connection setup, so a busy event loop is much less likely to cause `APIConnectionError`. (METR/inspect_ai `faber/http-connect-defaults-httpx2`, upstream #4884)
+
 ## 0.3.259 (16 August 2026)
 
 - Inspect View: The Messages tab now paginates chunked evals, loading further pages as you scroll instead of the entire sample up front, so huge samples open quickly (non-chunked evals still load in full). (#498)
