@@ -3,6 +3,7 @@
 - Fixed model calls timing out during long samples with realtime logging enabled: per-event transcript and buffer processing cost grew with conversation length, starving the event loop. (#4839)
 - Fixed duplicated task prompt and redundant context sent to the model when using `CompactionAuto` with providers that support native compaction. (#4804)
 - Transcripts now show which compaction strategy actually ran, and flag when `CompactionAuto` fell back from native to summary compaction. (#4804)
+- Logging: Reduced memory usage and event-loop stalls when finalizing long samples with realtime logging; summary-only hooks can opt out of full-sample materialization via `Hooks.needs_full_sample`. (#4879)
 
 ## 0.3.258 (11 August 2026)
 
