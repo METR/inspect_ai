@@ -11,16 +11,25 @@ class SampleTiming:
     start_time: float = 0.0
     waiting_time: float = 0.0
     start_datetime: datetime | None = None
+    prior_time: float = 0.0
+    prior_working_time: float = 0.0
     # Track concurrent waiting to avoid double-counting overlapping waits
     concurrent_wait_count: int = 0
     concurrent_wait_start: float | None = None
 
 
-def init_sample_working_time(start_time: float) -> None:
+def init_sample_working_time(
+    start_time: float,
+    *,
+    prior_time: float = 0.0,
+    prior_working_time: float = 0.0,
+) -> None:
     _sample_timing.set(
         SampleTiming(
             start_time=start_time,
             start_datetime=datetime.now(timezone.utc),
+            prior_time=prior_time,
+            prior_working_time=prior_working_time,
         )
     )
 
@@ -29,9 +38,19 @@ def sample_waiting_time() -> float:
     return _sample_timing.get().waiting_time
 
 
+def sample_total_time() -> float:
+    timing = _sample_timing.get()
+    return time.monotonic() - timing.start_time + timing.prior_time
+
+
 def sample_working_time() -> float:
     timing = _sample_timing.get()
-    return time.monotonic() - timing.start_time - timing.waiting_time
+    return (
+        time.monotonic()
+        - timing.start_time
+        - timing.waiting_time
+        + timing.prior_working_time
+    )
 
 
 def sample_start_datetime() -> datetime | None:
