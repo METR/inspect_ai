@@ -24,18 +24,23 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-from test_helpers.utils import skip_if_no_docker
+from test_helpers.utils import flaky_retry, skip_if_no_docker
 
 from checkpoint.resume_scoring_kill_harness import (
+    AGENT_SLEEP_ENV,
     ANSWER,
     CANCEL_FILE_ENV,
+    RESTORE_USAGE_ENV,
     TARGET_ENV,
+    TIME_LIMIT_ENV,
     generates,
     reset_generates,
 )
@@ -151,3 +156,84 @@ def test_checkpoint_scoring_phase_resume(
     assert sample.scores is not None
     assert sample.scores["crashing_includes"].value == CORRECT
     assert ANSWER in sample.output.completion
+
+
+# The killed attempt burns this much sample time before its agent finishes;
+# the resume then runs under a *lower* limit, so a resume that continued the
+# prior attempt's clock would open its time scope already expired.
+_AGENT_SLEEP_SECONDS = 30
+_RESUME_TIME_LIMIT_SECONDS = 25
+
+
+@skip_if_no_docker
+@pytest.mark.slow
+@flaky_retry(max_retries=1)
+def test_scoring_resume_keeps_its_full_time_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scoring-only resume keeps its whole time budget, even with usage restored.
+
+    Tokens, cost and turns are checked cooperatively when they are recorded,
+    but time and working time enforce through a cancel-scope deadline and a
+    background poller that fire whether or not the agent is running. A
+    scoring-phase resume that continued the prior attempt's clock would
+    therefore cancel the checkpoint restore running inside its own solver
+    task — and the agent it would be protecting already finished.
+
+    The time limit is lowered between attempts (a retry can be configured
+    differently) so the prior attempt's clock exceeds it by construction.
+    """
+    cancel_file = tmp_path / "cancels.txt"
+    monkeypatch.setenv(CANCEL_FILE_ENV, str(cancel_file))
+    monkeypatch.setenv(TARGET_ENV, "1")
+    monkeypatch.setenv(RESTORE_USAGE_ENV, "1")
+    monkeypatch.setenv(AGENT_SLEEP_ENV, str(_AGENT_SLEEP_SECONDS))
+    monkeypatch.delenv(TIME_LIMIT_ENV, raising=False)
+
+    log_dir = str(tmp_path / "logs")
+    # Both are stateful on disk and flaky-retry re-runs this body with the
+    # same `tmp_path`: a stale crash count would skip the kill, and stale
+    # checkpoints would be resumed instead of this run's own.
+    cancel_file.unlink(missing_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+
+    tests_dir = Path(__file__).parent.parent
+
+    projects_before = _inspect_projects()
+    try:
+        _run_killed_attempt(log_dir, None, tests_dir)
+        monkeypatch.setenv(TIME_LIMIT_ENV, str(_RESUME_TIME_LIMIT_SECONDS))
+        reset_generates()
+        resume = eval_retry(read_eval_log(_latest_log(log_dir)), log_dir=log_dir)[0]
+    finally:
+        for name in _inspect_projects() - projects_before:
+            _force_remove_project(name)
+
+    assert resume.status == "success"
+    assert resume.samples is not None and len(resume.samples) == 1
+    sample = resume.samples[0]
+    assert sample.error is None
+
+    # Headline: no limit was stamped. Seeding the prior clock here would have
+    # cancelled the restore and logged a time limit against a sample whose
+    # agent completed cleanly.
+    assert sample.limit is None, f"scoring resume was stopped by {sample.limit}"
+    assert generates() == 0
+    assert sample.scores is not None
+    assert sample.scores["crashing_includes"].value == CORRECT
+    assert ANSWER in sample.output.completion
+
+    # ...and the premise held: the clock a seeding resume would have started
+    # from — this sample's cumulative time less the resume's own elapsed time,
+    # `started_at` being per-attempt — really did exceed the resume's budget.
+    assert sample.total_time is not None
+    assert sample.started_at and sample.completed_at
+    resume_elapsed = (
+        datetime.fromisoformat(sample.completed_at)
+        - datetime.fromisoformat(sample.started_at)
+    ).total_seconds()
+    prior_time = sample.total_time - resume_elapsed
+    assert prior_time > _RESUME_TIME_LIMIT_SECONDS, (
+        f"the killed attempt only reached {prior_time}s, so this no longer "
+        f"exercises a resume whose inherited clock would exceed its limit"
+    )

@@ -85,6 +85,7 @@ For incomplete samples, Inspect locates the checkpoint directory, restores each 
 1.  Agent State: Any state values the agent registered (e.g. message or compaction history).
 2.  Sandbox: The sandbox setup script is run and the configured sandbox paths are restored from backup into a fresh sandbox container.
 3.  Events and Store: Inspect's internal per-sample state is rehydrated (the events appear under a synthesized `prior_run` span in the new `.eval` log).
+4.  Usage (opt-in): with `restore_usage=True`, the sample's token, cost, turn, time, and working-time counters continue from the checkpoint instead of restarting at zero. Off by default. The message limit always continues, since it counts the restored conversation.
 
 By default checkpoints are deleted once the eval completes successfully; use `retention="retain"` in the `CheckpointConfig` to preserve them.
 
@@ -130,6 +131,7 @@ Note that time and token intervals effectively checkpoint at `≥ N` because fir
 | `checkpoints_location` | Override the parent directory under which the per-eval checkpoint directory lands (defaults to a sibling of the eval log file). |
 | `max_consecutive_failures` | If set, fail the sample after N consecutive failed checkpoint attempts. Defaults to `None` (unlimited tolerance). Specify `0` to make any single failure fatal. |
 | `retention` | `"delete"` or `"retain"`. `"delete"` (default) removes the checkpoint directory on successful eval completion; `"retain"` keeps it. |
+| `restore_usage` | Continue the sample's usage counters from its checkpoint on resume rather than restarting them at zero. Defaults to `False`. |
 
 : A full Python example:
 
@@ -156,6 +158,10 @@ trigger:
 max_consecutive_failures: 3
 retention: retain
 ```
+
+Whether to enable `restore_usage` is a trade-off. Left off, a sample that crashes repeatedly can spend a multiple of its configured budget — each attempt gets the full allowance. Turned on, a sample can resume with almost nothing left and fail immediately, turning a recoverable crash into a lost sample. Off is the default because checkpointing's primary job is resilience.
+
+Usage is restored as of the checkpoint, not as of the crash: work done after the last checkpoint is rolled back, so it is not charged. Time spent restoring *is* charged to the time and working limits.
 
 ### Task Configuration
 
@@ -310,3 +316,5 @@ Checkpointing enables restoration of the most important agent context after a cr
 - Failure tolerance — A failed checkpoint attempt records an `InfoEvent` (`source="checkpoint"`) and logs a warning, but by default the sample keeps running. (durability is treated as a nicety, not a correctness requirement). Set `max_consecutive_failures=N` to bound this, or `0` for strict mode.
 
 - Restic binary — On first use, Inspect fetches a pinned [restic](https://restic.net) binary and caches it. For offline / air-gapped environments, pre-warm the cache with `inspect download restic`.
+
+- Restore is not free — Restic restore, sandbox ingress, and the task's `on_resume` hook all run inside the sample's time and working limits.

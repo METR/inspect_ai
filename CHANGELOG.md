@@ -25,6 +25,7 @@
 - Fixed sandbox agent bridge forwarding file inputs that are not inline `data:` URIs (e.g. host paths or URLs); such requests are now rejected.
 - Mistral: Provider-generated images remain available when replayed in subsequent conversation turns.
 - Docs: Clarify that the sandbox `exec()` output limit is enforced by front-truncating the output streams rather than by raising `OutputLimitExceededError` (which remains the behaviour for `read_file()`). (#4778)
+- Checkpointing: New opt-in `restore_usage` option continues a resumed sample's token, cost, turn, time, and working-time usage from its checkpoint instead of restarting at zero (off by default).
 
 ## 0.3.259 (16 August 2026)
 

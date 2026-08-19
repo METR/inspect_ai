@@ -29,6 +29,7 @@ from typing import Any
 import anyio
 
 from inspect_ai import Task, eval, eval_retry, task
+from inspect_ai._util.working import report_sample_waiting_time
 from inspect_ai.agent import react
 from inspect_ai.dataset import Sample
 from inspect_ai.log import read_eval_log
@@ -37,6 +38,7 @@ from inspect_ai.model import (
     ChatMessageTool,
     GenerateConfig,
     ModelOutput,
+    ModelUsage,
     modelapi,
 )
 from inspect_ai.model._providers.mockllm import MockLLM
@@ -73,6 +75,17 @@ TARGET_ENV = "INSPECT_TEST_RESUME_TARGET_CANCELS"
 # unwind) or SIGINT (what Ctrl-C delivers — graceful cancel, log finalized,
 # sandboxes torn down). Resume must work from either.
 SIGNAL_ENV = "INSPECT_TEST_RESUME_SIGNAL"
+
+# Knobs the usage-restoration tests vary per attempt (each attempt is a fresh
+# process, so they travel as environment rather than arguments):
+#
+# - whether the task opts in to continuing its usage counters on resume,
+# - a sample token limit (unset = no limit), and
+# - seconds of provider waiting time the scripted model reports on the first
+#   attempt (see `_report_model_waiting`).
+RESTORE_USAGE_ENV = "INSPECT_TEST_RESTORE_USAGE"
+TOKEN_LIMIT_ENV = "INSPECT_TEST_TOKEN_LIMIT"
+MODEL_WAITING_ENV = "INSPECT_TEST_MODEL_WAITING_SECONDS"
 
 
 def crash_signal() -> signal.Signals:
@@ -169,6 +182,20 @@ def crash() -> Tool:
 # crashing, until `target` crashes are reached; the final resume submits.
 
 
+def _report_model_waiting() -> None:
+    """Report `MODEL_WAITING_ENV` seconds of provider waiting time.
+
+    Real providers report rate-limit / dispatch waits through this same
+    call; reporting it here (without actually sleeping) is what makes a
+    sample's total time and its working time differ by a known amount, so
+    a resume that continues both can be checked for confusing one with the
+    other. No-op unless the env var is set.
+    """
+    seconds = float(os.environ.get(MODEL_WAITING_ENV) or 0.0)
+    if seconds:
+        report_sample_waiting_time(seconds)
+
+
 def _scripted_outputs(
     input: list[ChatMessage],
     tools: list[ToolInfo],
@@ -177,6 +204,24 @@ def _scripted_outputs(
 ) -> ModelOutput:
     _resume_state.generates += 1
     n = sum(1 for m in input if isinstance(m, ChatMessageTool))
+    if n == 1:
+        # turn 1 only ever runs on the first attempt (later attempts restore
+        # the conversation), and the checkpoint that closes it captures the
+        # wait — so it lands in prior usage, never in the resume's own.
+        _report_model_waiting()
+    output = _scripted_call(n)
+    # MockLLM only fills usage in for its *iterator* form — a callable
+    # `custom_outputs` is returned straight to the caller — so report it here
+    # or the sample records no token usage at all. One token per message in
+    # the (deterministic) conversation, plus one for the reply.
+    output.usage = ModelUsage(
+        input_tokens=len(input), output_tokens=1, total_tokens=len(input) + 1
+    )
+    return output
+
+
+def _scripted_call(n: int) -> ModelOutput:
+    """The tool call scripted for a conversation with `n` completed tool turns."""
     done = cancels_done()
     target = target_cancels()
     if n == 0:
@@ -224,7 +269,9 @@ def resume_decode_task() -> Task:
             trigger=TurnInterval(every=1),
             # No sandbox_paths: the default sandbox's $HOME is auto-captured.
             retention="retain",
+            restore_usage=os.environ.get(RESTORE_USAGE_ENV) == "1",
         ),
+        token_limit=int(limit) if (limit := os.environ.get(TOKEN_LIMIT_ENV)) else None,
     )
 
 

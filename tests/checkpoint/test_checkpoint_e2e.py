@@ -26,6 +26,12 @@ checkpoint commits *during* the final resume (a ``CheckpointEvent`` outside
 the wraps, continuing the numbering); and resume restored the prior
 conversation (only the remaining turns run, not a replay from scratch).
 
+The ``restore_usage`` tests reuse the same kill/resume machinery over a
+shorter script (one kill, then a resume that finishes), running it twice —
+once with the flag on and once off — and comparing the two logs. Nothing
+about the model's token counts is hardcoded: the two arms do identical
+work, so every difference between their logs is the restored usage.
+
 Requires Docker: the sandbox backup path injects/execs a Linux restic
 binary inside the sandbox, which only works with a Linux container
 (``detect_sandbox_os`` rejects non-Linux hosts). See
@@ -40,6 +46,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -48,8 +55,11 @@ from test_helpers.utils import flaky_retry, skip_if_no_anthropic, skip_if_no_doc
 from checkpoint.resume_kill_harness import (
     CANCEL_FILE_ENV,
     LAYER1_CONTENT,
+    MODEL_WAITING_ENV,
+    RESTORE_USAGE_ENV,
     SIGNAL_ENV,
     TARGET_ENV,
+    TOKEN_LIMIT_ENV,
     generates,
     reset_generates,
 )
@@ -60,7 +70,7 @@ from checkpoint.resume_kill_thinking_harness import (
 from inspect_ai import eval_retry
 from inspect_ai.event import Event, SpanBeginEvent, SpanEndEvent, ToolEvent
 from inspect_ai.event._checkpoint import CheckpointEvent
-from inspect_ai.log import list_eval_logs, read_eval_log
+from inspect_ai.log import EvalLog, EvalSample, list_eval_logs, read_eval_log
 from inspect_ai.scorer import CORRECT
 from inspect_ai.util._checkpoint._layout.eval_checkpoints_dir import (
     eval_checkpoints_dir,
@@ -471,3 +481,170 @@ def test_checkpoint_resume_rehydrated_event_layout(
         p.endswith("workspace/decoded/layer1.txt") for p in ckpt3_details.files
     )
     assert ckpt3_details.additional_files is None
+
+
+# Provider waiting time the scripted model reports on the first attempt (see
+# `_report_model_waiting`). Large enough to dwarf the incidental waits a run
+# picks up on its own, and free — it is reported, not slept.
+_MODEL_WAITING_SECONDS = 5.0
+
+
+def _kill_then_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    restore_usage: bool,
+    resume_token_limit: int | None = None,
+) -> EvalLog:
+    """One SIGKILLed attempt, then a resume that runs to completion.
+
+    ``resume_token_limit`` applies to the resume only — the killed attempt
+    always runs unlimited, so a budget can be sized against work already
+    measured and still be the resume's first encounter with it.
+    """
+    arm = f"{int(restore_usage)}-{resume_token_limit}"
+    cancel_file = tmp_path / f"cancels-{arm}.txt"
+    log_dir = str(tmp_path / f"logs-{arm}")
+    monkeypatch.setenv(CANCEL_FILE_ENV, str(cancel_file))
+    monkeypatch.setenv(TARGET_ENV, "1")
+    monkeypatch.setenv(RESTORE_USAGE_ENV, "1" if restore_usage else "0")
+    monkeypatch.setenv(MODEL_WAITING_ENV, str(_MODEL_WAITING_SECONDS))
+    monkeypatch.delenv(TOKEN_LIMIT_ENV, raising=False)
+
+    # Both the crash count and the logs are stateful on disk, and every arm of
+    # every attempt shares one `tmp_path` (flaky-retry re-runs the body with
+    # it too). A stale count would skip the kill; stale logs would resume some
+    # other arm's run.
+    cancel_file.unlink(missing_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+
+    tests_dir = Path(__file__).parent.parent
+
+    projects_before = _inspect_projects()
+    try:
+        _run_interrupted_attempt(log_dir, None, tests_dir)
+        if resume_token_limit is not None:
+            monkeypatch.setenv(TOKEN_LIMIT_ENV, str(resume_token_limit))
+        reset_generates()
+        return eval_retry(read_eval_log(_latest_log(log_dir)), log_dir=log_dir)[0]
+    finally:
+        for name in _inspect_projects() - projects_before:
+            _force_remove_project(name)
+
+
+def _only_sample(log: EvalLog) -> EvalSample:
+    assert log.samples is not None and len(log.samples) == 1
+    return log.samples[0]
+
+
+def _sample_tokens(log: EvalLog) -> int:
+    return sum(usage.total_tokens for usage in _only_sample(log).model_usage.values())
+
+
+def _attempt_elapsed(sample: EvalSample) -> float:
+    """Wall-clock seconds of the attempt that wrote this sample.
+
+    ``started_at`` is stamped per attempt, so for a resumed sample this is
+    the resume's own duration, not the sample's lifetime.
+    """
+    assert sample.started_at and sample.completed_at
+    started = datetime.fromisoformat(sample.started_at)
+    completed = datetime.fromisoformat(sample.completed_at)
+    return (completed - started).total_seconds()
+
+
+@pytest.mark.slow
+@skip_if_no_docker
+@flaky_retry(max_retries=1)
+def test_restore_usage_carries_prior_attempt_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the flag on, the resumed sample's log spans both attempts.
+
+    Compared against the same run with the flag off rather than against
+    hardcoded counts: the scripted model makes both arms deterministic, so
+    the only difference between the two logs is the restored usage. The
+    flag-off arm doubles as the guard that the default is unchanged.
+    """
+    off = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
+    on = _kill_then_resume(tmp_path, monkeypatch, restore_usage=True)
+
+    assert off.status == "success" and on.status == "success"
+    off_sample, on_sample = _only_sample(off), _only_sample(on)
+    assert off_sample.error is None and on_sample.error is None
+    assert off_sample.limit is None and on_sample.limit is None
+
+    # tokens and turns continue from the checkpoint only when opted in
+    assert _sample_tokens(on) > _sample_tokens(off)
+    assert on_sample.turn_count is not None and off_sample.turn_count is not None
+    assert on_sample.turn_count > off_sample.turn_count
+
+    assert on_sample.total_time is not None and off_sample.total_time is not None
+    assert on_sample.working_time is not None and off_sample.working_time is not None
+    assert on_sample.total_time > off_sample.total_time
+
+    # `started_at` stays per-attempt while `total_time` becomes cumulative, so
+    # a resumed sample reports more total time than its own wall clock — the
+    # two are deliberately not expected to agree.
+    on_elapsed = _attempt_elapsed(on_sample)
+    assert on_sample.total_time > on_elapsed + 1.0, (
+        f"total_time {on_sample.total_time} should exceed the resume's own "
+        f"{on_elapsed}s by the prior attempt's time"
+    )
+    # ...whereas the default arm restarts the clock, so there they do agree.
+    off_elapsed = _attempt_elapsed(off_sample)
+    assert off_sample.total_time == pytest.approx(off_elapsed, abs=1.0), (
+        f"total_time {off_sample.total_time} should match the attempt's own "
+        f"{off_elapsed}s when usage is not restored"
+    )
+
+    # The killed attempt reported `_MODEL_WAITING_SECONDS` of provider waiting
+    # before its last checkpoint. `total_time` continues the prior *total* and
+    # `working_time` the prior *working* time, so that gap has to reappear
+    # here; deriving working_time from the (now cumulative) total_time would
+    # swallow it.
+    on_waiting = on_sample.total_time - on_sample.working_time
+    assert on_waiting >= _MODEL_WAITING_SECONDS * 0.8, (
+        f"restored working_time is missing the prior attempt's waiting: "
+        f"total {on_sample.total_time} - working {on_sample.working_time} "
+        f"= {on_waiting}, expected at least {_MODEL_WAITING_SECONDS}"
+    )
+    # the default arm carries none of that prior waiting
+    off_waiting = off_sample.total_time - off_sample.working_time
+    assert off_waiting < _MODEL_WAITING_SECONDS * 0.5, (
+        f"a non-restoring resume should show only its own waiting; got {off_waiting}s"
+    )
+
+
+@pytest.mark.slow
+@skip_if_no_docker
+@flaky_retry(max_retries=1)
+def test_restore_usage_enforces_the_spanning_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget two attempts collectively exceed stops only the opted-in run.
+
+    The budget is measured from an unlimited flag-off arm and applied to the
+    resume only, so it is by construction enough for everything the resume
+    itself does — one token to spare. A breach can only come from usage
+    carried over from the killed attempt.
+    """
+    measured = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
+    budget = _sample_tokens(measured) + 1
+
+    off = _kill_then_resume(
+        tmp_path, monkeypatch, restore_usage=False, resume_token_limit=budget
+    )
+    on = _kill_then_resume(
+        tmp_path, monkeypatch, restore_usage=True, resume_token_limit=budget
+    )
+
+    assert off.status == "success" and on.status == "success"
+    # the scripted model makes the resumed work identical across arms, which
+    # is what makes a budget measured from one arm meaningful in another
+    assert _sample_tokens(off) == _sample_tokens(measured)
+
+    assert _only_sample(off).limit is None
+    on_limit = _only_sample(on).limit
+    assert on_limit is not None and on_limit.type == "token"
+    assert _sample_tokens(off) < budget <= _sample_tokens(on)

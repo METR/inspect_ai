@@ -73,6 +73,14 @@ WRITE_CMD = (
 CANCEL_FILE_ENV = "INSPECT_TEST_SCORING_RESUME_CANCEL_FILE"
 TARGET_ENV = "INSPECT_TEST_SCORING_RESUME_TARGET_CANCELS"
 
+# Knobs the usage-restoration test varies per attempt (each attempt is a fresh
+# process, so they travel as environment rather than arguments): whether the
+# task opts in to continuing its usage counters on resume, a sample time limit
+# (unset = no limit), and seconds of sample time the agent's tool call burns.
+RESTORE_USAGE_ENV = "INSPECT_TEST_SCORING_RESUME_RESTORE_USAGE"
+TIME_LIMIT_ENV = "INSPECT_TEST_SCORING_RESUME_TIME_LIMIT"
+AGENT_SLEEP_ENV = "INSPECT_TEST_SCORING_RESUME_AGENT_SLEEP"
+
 
 def cancels_done() -> int:
     f = os.environ.get(CANCEL_FILE_ENV)
@@ -141,6 +149,16 @@ def remember() -> Tool:
 # scorer instead (see `crashing_includes`).
 
 
+def _write_cmd() -> str:
+    """The agent's write, optionally padded to burn `AGENT_SLEEP_ENV` seconds.
+
+    The pad lets a test give the killed attempt more elapsed time than the
+    (lowered) limit its resume runs under.
+    """
+    seconds = os.environ.get(AGENT_SLEEP_ENV)
+    return f"sleep {int(seconds)} && {WRITE_CMD}" if seconds else WRITE_CMD
+
+
 def _scripted_outputs(
     input: list[ChatMessage],
     tools: list[ToolInfo],
@@ -150,7 +168,9 @@ def _scripted_outputs(
     _resume_state.generates += 1
     n = sum(1 for m in input if isinstance(m, ChatMessageTool))
     if n == 0:
-        return ModelOutput.for_tool_call(SCRIPTED_MODEL, "bash", {"command": WRITE_CMD})
+        return ModelOutput.for_tool_call(
+            SCRIPTED_MODEL, "bash", {"command": _write_cmd()}
+        )
     return ModelOutput.for_tool_call(SCRIPTED_MODEL, "submit", {"answer": ANSWER})
 
 
@@ -196,7 +216,9 @@ def resume_scoring_task() -> Task:
         checkpoint=CheckpointConfig(
             trigger=TurnInterval(every=1),
             retention="retain",
+            restore_usage=os.environ.get(RESTORE_USAGE_ENV) == "1",
         ),
+        time_limit=int(limit) if (limit := os.environ.get(TIME_LIMIT_ENV)) else None,
     )
 
 
