@@ -1984,6 +1984,13 @@ async def task_run_sample(
                         if prior_usage is not None:
                             # `_prior_usage` only returns non-None when `resume_checkpoint` is set
                             assert resume_checkpoint is not None
+                            # time/working enforce via a cancel-scope/poller
+                            # independent of agent activity, so a scoring
+                            # resume (no agent run left) must not seed them
+                            # from prior usage — see `_clock_seed_usage`.
+                            clock_usage = _clock_seed_usage(
+                                resume_checkpoint.attempt, prior_usage
+                            )
                             seed_limit_usage(
                                 token=state._token_limit,
                                 cost=state._cost_limit,
@@ -1993,8 +2000,8 @@ async def task_run_sample(
                                 token_usage=prior_usage.token_limit_usage,
                                 cost_usage=prior_usage.cost,
                                 turns=prior_usage.turns,
-                                time_usage=prior_usage.time,
-                                working_usage=prior_usage.working_time,
+                                time_usage=clock_usage.time,
+                                working_usage=clock_usage.working_time,
                             )
                             _raise_if_prior_usage_exhausted(
                                 attempt=resume_checkpoint.attempt,
@@ -2742,6 +2749,32 @@ def _prior_usage(
     if resume_checkpoint is None or config is None or not config.restore_usage:
         return None
     return resume_checkpoint.usage
+
+
+class _ClockSeedUsage(NamedTuple):
+    """Prior `time`/`working_time` to seed into the clock limit nodes."""
+
+    time: float
+    working_time: float
+
+
+def _clock_seed_usage(
+    attempt: Literal["initial", "resume", "resume_for_scoring"],
+    prior_usage: CheckpointUsage,
+) -> _ClockSeedUsage:
+    """Time/working-time to seed, given a resume's attempt type.
+
+    Zero on `resume_for_scoring`: the agent already ran to completion and
+    won't run again. `time` enforces via an anyio cancel-scope deadline and
+    `working` via a background poller, both independent of agent activity —
+    seeding them from at-or-past-limit prior usage would cancel the
+    checkpoint restore that runs inside this attempt's solver task. Token,
+    cost, and turn limits are unaffected: those are checked cooperatively on
+    record, so seeding them from prior usage cannot wrongly enforce here.
+    """
+    if attempt == "resume_for_scoring":
+        return _ClockSeedUsage(time=0.0, working_time=0.0)
+    return _ClockSeedUsage(time=prior_usage.time, working_time=prior_usage.working_time)
 
 
 def _raise_if_prior_usage_exhausted(

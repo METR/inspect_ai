@@ -451,6 +451,86 @@ def test_prior_usage_at_a_ceiling_does_not_raise_for_scoring_resume() -> None:
     )
 
 
+@pytest.mark.parametrize("attempt", ["initial", "resume"])
+def test_clock_seed_usage_passes_through_prior_time_for_agent_attempts(
+    attempt: Literal["initial", "resume", "resume_for_scoring"],
+) -> None:
+    from inspect_ai._eval.task.run import _clock_seed_usage
+
+    seed = _clock_seed_usage(attempt, _usage_seed())
+
+    assert seed.time == 30.0
+    assert seed.working_time == 25.0
+
+
+def test_clock_seed_usage_is_zero_for_scoring_resume() -> None:
+    """A `resume_for_scoring` attempt seeds no clock usage.
+
+    Regardless of how close to a configured limit the prior attempt's
+    time/working time were: the agent won't run again, so there is no
+    remaining agent work for a shortened cancel-scope/poller budget to
+    protect.
+    """
+    from inspect_ai._eval.task.run import _clock_seed_usage
+
+    seed = _clock_seed_usage("resume_for_scoring", _usage_seed())
+
+    assert seed.time == 0.0
+    assert seed.working_time == 0.0
+
+
+async def test_scoring_resume_does_not_shorten_the_time_scope() -> None:
+    """A scoring resume with prior time at the limit keeps the full time budget.
+
+    `_TimeLimit` derives its cancel-scope deadline from seeded usage at
+    `__enter__`. If a scoring resume seeded the prior (exhausted) time, the
+    scope would open with ~zero remaining budget and cancel the checkpoint
+    restore that runs inside this same solver task.
+    """
+    from inspect_ai._eval.task.run import _clock_seed_usage
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import (
+        cost_limit,
+        seed_limit_usage,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    time_limit_seconds = 60.0
+    seed = _usage_seed()
+    seed.time = time_limit_seconds  # prior attempt used the whole budget
+    seed.working_time = time_limit_seconds
+
+    time_node = time_limit(time_limit_seconds)
+    working_node = working_limit(time_limit_seconds)
+    clock_usage = _clock_seed_usage("resume_for_scoring", seed)
+
+    seed_limit_usage(
+        token=token_limit(100),
+        cost=cost_limit(1.0),
+        turn=turn_limit(10),
+        time=time_node,
+        working=working_node,
+        token_usage=ModelUsage(total_tokens=0),
+        cost_usage=0.0,
+        turns=0,
+        time_usage=clock_usage.time,
+        working_usage=clock_usage.working_time,
+    )
+
+    # seeded usage is zero, not the exhausted prior value
+    assert time_node.usage == 0.0
+    assert working_node.usage == 0.0
+
+    with time_node, working_node:
+        # the cancel-scope deadline was derived from zero seeded usage, so
+        # the full configured limit remains rather than `max(0.0, limit -
+        # prior_time)` == 0.0
+        assert time_node._remaining_limit() == pytest.approx(time_limit_seconds)
+
+
 def test_prior_usage_against_unlimited_nodes_does_not_raise() -> None:
     _check_exhausted(
         _seeded_nodes(
