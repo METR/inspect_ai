@@ -665,10 +665,6 @@ def seed_limit_usage(
     Internal: used by checkpoint resume so a continued sample enforces
     against its cumulative usage. Call before entering any of the nodes —
     a time limit derives its deadline at ``__enter__``.
-
-    Nodes are typed ``Limit`` because that is what ``sample_limits()``
-    and ``TaskState`` expose; each must be the concrete sample-level
-    node, and a mismatch raises ``TypeError``.
     """
     if (
         not isinstance(token, _TokenLimit)
@@ -1423,7 +1419,8 @@ Also append a test that a limit sized to span attempts trips only when opted in.
 def test_restore_usage_enforces_the_spanning_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A budget the two attempts jointly exceed stops only the opted-in run."""
+    """A budget that two attempts collectively exceed stops only the one with
+    restore_usage=True."""
     off = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
     budget = _sample_tokens(off) + 1
     monkeypatch.setenv(TOKEN_LIMIT_ENV, str(budget))
