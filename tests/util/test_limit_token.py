@@ -711,9 +711,6 @@ def _consume_usage(input_tokens: int, output_tokens: int) -> None:
 
 
 def test_seeded_usage_accumulates_on_top() -> None:
-    from inspect_ai.model._model_output import ModelUsage
-    from inspect_ai.util._limit import record_model_usage
-
     limit = token_limit(100)
     limit._seed_usage(ModelUsage(total_tokens=40))
 
@@ -723,9 +720,6 @@ def test_seeded_usage_accumulates_on_top() -> None:
 
 
 def test_seeded_usage_counts_towards_the_ceiling() -> None:
-    from inspect_ai.model._model_output import ModelUsage
-    from inspect_ai.util._limit import check_token_limit, record_model_usage
-
     limit = token_limit(100)
     limit._seed_usage(ModelUsage(total_tokens=95))
 

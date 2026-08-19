@@ -1377,6 +1377,13 @@ class _TimeLimit(Limit, _Node):
         self._seeded_usage: float = 0.0
 
     def _seed_usage(self, elapsed: float) -> None:
+        if self._start_time is not None:
+            raise RuntimeError(
+                "_TimeLimit._seed_usage() must be called before entering the "
+                "time_limit context manager: the cancel-scope deadline is "
+                "already derived at __enter__, so seeding afterwards would "
+                "inflate usage without shortening it."
+            )
         self._seeded_usage += elapsed
 
     def __enter__(self) -> Limit:
@@ -1464,9 +1471,8 @@ class _TimeLimit(Limit, _Node):
     def _remaining_limit(self) -> float | None:
         """The wall-clock budget left for this scope, after seeded usage.
 
-        Clamped at 0 rather than going negative, which anyio reads as
-        "already expired" — the intended outcome for a sample resuming
-        with its time budget already spent.
+        Clamped at 0 so an over-spent budget opens an immediately-expired
+        scope rather than a negative delay.
         """
         if self._active_limit is None:
             return None
@@ -1590,14 +1596,24 @@ def seed_limit_usage(
     against its cumulative usage. Call before entering any of the nodes —
     a time limit derives its deadline at ``__enter__``.
     """
-    if (
-        not isinstance(token, _TokenLimit)
-        or not isinstance(cost, _CostLimit)
-        or not isinstance(turn, _TurnLimit)
-        or not isinstance(time, _TimeLimit)
-        or not isinstance(working, _WorkingLimit)
+    for name, value, expected in (
+        ("token", token, _TokenLimit),
+        ("cost", cost, _CostLimit),
+        ("turn", turn, _TurnLimit),
+        ("time", time, _TimeLimit),
+        ("working", working, _WorkingLimit),
     ):
-        raise TypeError("seed_limit_usage requires concrete sample limit nodes")
+        if not isinstance(value, expected):
+            raise TypeError(
+                f"seed_limit_usage: {name!r} must be a {expected.__name__} node, "
+                f"got {type(value).__name__}"
+            )
+    # the loop above already enforced these types; narrow for the type checker
+    assert isinstance(token, _TokenLimit)
+    assert isinstance(cost, _CostLimit)
+    assert isinstance(turn, _TurnLimit)
+    assert isinstance(time, _TimeLimit)
+    assert isinstance(working, _WorkingLimit)
     token._seed_usage(token_usage)
     cost._seed_usage(cost_usage)
     turn._seed_usage(turns)

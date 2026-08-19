@@ -1,7 +1,16 @@
 import anyio
 import pytest
 
-from inspect_ai.util._limit import LimitExceededError, time_limit
+from inspect_ai.util._limit import (
+    LimitExceededError,
+    message_limit,
+    time_limit,
+    token_limit,
+)
+from inspect_ai.util._limit_overrides import (
+    sample_limit_override_scope,
+    set_sample_limit_override,
+)
 
 
 def test_validates_limit_parameter() -> None:
@@ -185,4 +194,59 @@ async def test_seeded_time_reports_cumulative_usage() -> None:
     limit._seed_usage(5.0)
 
     with limit:
-        assert limit.usage >= 5.0
+        assert 5.0 <= limit.usage < 6.0
+
+
+@pytest.mark.parametrize("seed", [1.0, 1.5])
+@pytest.mark.anyio
+async def test_seeded_time_at_or_over_limit_cancels_immediately(seed: float) -> None:
+    """A seed >= the limit clamps the remaining budget to 0, not negative."""
+    limit = time_limit(1.0)
+    limit._seed_usage(seed)
+
+    with pytest.raises(LimitExceededError) as exc_info:
+        with limit:
+            await anyio.sleep(0.5)
+
+    assert exc_info.value.limit == 1.0
+
+
+@pytest.mark.anyio
+async def test_seeded_time_override_refresh_keeps_the_seed() -> None:
+    """A live override on a seeded scope must not hand back a fresh full budget.
+
+    Regression guard: `_refresh_deadline` re-derives the deadline from
+    `_remaining_limit()`, which subtracts the seed — a naive refresh keyed
+    only off the new override value would reopen the full override amount.
+    """
+    limit = time_limit(10.0)
+    limit._seed_usage(3.0)
+
+    with sample_limit_override_scope(
+        "seeded-time-refresh",
+        time=limit,
+        token=token_limit(None),
+        message=message_limit(None),
+    ):
+        with limit:
+            assert limit._start_time is not None
+            assert limit._cancel_scope.deadline == pytest.approx(
+                limit._start_time + 7.0
+            )
+
+            set_sample_limit_override("seeded-time-refresh", "time_limit", 5)
+            # a fresh (unseeded) budget would put the deadline at start + 5;
+            # the seed must still shorten it to start + (5 - 3)
+            assert limit._cancel_scope.deadline == pytest.approx(
+                limit._start_time + 2.0
+            )
+
+            set_sample_limit_override("seeded-time-refresh", "time_limit", None)
+
+
+async def test_seed_usage_after_enter_raises() -> None:
+    limit = time_limit(10)
+
+    with limit:
+        with pytest.raises(RuntimeError, match="before entering"):
+            limit._seed_usage(1.0)

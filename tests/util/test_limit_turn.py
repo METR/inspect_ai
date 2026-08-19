@@ -390,8 +390,6 @@ def _consume_turns(turns: int) -> None:
 
 
 def test_seeded_turns_accumulate_on_top() -> None:
-    from inspect_ai.util._limit import record_turn
-
     limit = turn_limit(10)
     limit._seed_usage(4)
 

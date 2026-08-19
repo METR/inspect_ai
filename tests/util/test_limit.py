@@ -12,11 +12,15 @@ from inspect_ai.util._limit import (
     apply_limits,
     check_message_limit,
     check_token_limit,
+    cost_limit,
     message_limit,
     record_model_usage,
     sample_limits,
+    seed_limit_usage,
     time_limit,
     token_limit,
+    turn_limit,
+    working_limit,
 )
 
 
@@ -188,16 +192,6 @@ def test_get_sample_limits_within_eval() -> None:
 
 
 def test_seed_limit_usage_seeds_every_node() -> None:
-    from inspect_ai.model._model_output import ModelUsage
-    from inspect_ai.util._limit import (
-        cost_limit,
-        seed_limit_usage,
-        time_limit,
-        token_limit,
-        turn_limit,
-        working_limit,
-    )
-
     token = token_limit(100)
     cost = cost_limit(1.0)
     turn = turn_limit(10)

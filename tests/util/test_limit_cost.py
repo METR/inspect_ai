@@ -124,8 +124,6 @@ def _consume_cost(amount: float) -> None:
 
 
 def test_seeded_cost_accumulates_on_top() -> None:
-    from inspect_ai.util._limit import record_model_cost
-
     limit = cost_limit(1.0)
     limit._seed_usage(0.4)
 

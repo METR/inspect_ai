@@ -317,4 +317,4 @@ async def test_seeded_working_time_accumulates_on_top() -> None:
     limit._seed_usage(6.0)
 
     with limit:
-        assert limit.usage >= 6.0
+        assert 6.0 <= limit.usage < 7.0
