@@ -185,3 +185,40 @@ def test_get_sample_limits_within_eval() -> None:
 
     # Assertion failures in the solver will manifest as a failed eval.
     assert log.status == "success"
+
+
+def test_seed_limit_usage_seeds_every_node() -> None:
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import (
+        cost_limit,
+        seed_limit_usage,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    token = token_limit(100)
+    cost = cost_limit(1.0)
+    turn = turn_limit(10)
+    time_ = time_limit(60)
+    working = working_limit(60)
+
+    seed_limit_usage(
+        token=token,
+        cost=cost,
+        turn=turn,
+        time=time_,
+        working=working,
+        token_usage=ModelUsage(total_tokens=40),
+        cost_usage=0.4,
+        turns=4,
+        time_usage=12.0,
+        working_usage=10.0,
+    )
+
+    assert token.usage == 40
+    assert cost.usage == pytest.approx(0.4)
+    assert turn.usage == 4
+    assert time_.usage == pytest.approx(12.0)
+    assert working.usage == pytest.approx(10.0)

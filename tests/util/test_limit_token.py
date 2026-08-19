@@ -708,3 +708,31 @@ def _consume_usage(input_tokens: int, output_tokens: int) -> None:
         )
     )
     check_token_limit()
+
+
+def test_seeded_usage_accumulates_on_top() -> None:
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import record_model_usage
+
+    limit = token_limit(100)
+    limit._seed_usage(ModelUsage(total_tokens=40))
+
+    with limit:
+        record_model_usage(ModelUsage(total_tokens=10))
+        assert limit.usage == 50
+
+
+def test_seeded_usage_counts_towards_the_ceiling() -> None:
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import check_token_limit, record_model_usage
+
+    limit = token_limit(100)
+    limit._seed_usage(ModelUsage(total_tokens=95))
+
+    with pytest.raises(LimitExceededError) as exc_info:
+        with limit:
+            record_model_usage(ModelUsage(total_tokens=10))
+            check_token_limit()
+
+    assert exc_info.value.value == 105
+    assert exc_info.value.limit == 100

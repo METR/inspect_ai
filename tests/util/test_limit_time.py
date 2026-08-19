@@ -164,3 +164,25 @@ async def test_cannot_reuse_context_manager_in_stack() -> None:
     assert "Each Limit may only be used once in a single 'with' block" in str(
         exc_info.value
     )
+
+
+@pytest.mark.anyio
+async def test_seeded_time_shortens_the_deadline() -> None:
+    limit = time_limit(1.0)
+    limit._seed_usage(0.9)
+
+    with pytest.raises(LimitExceededError) as exc_info:
+        with limit:
+            await anyio.sleep(0.5)
+
+    assert exc_info.value.limit == 1.0
+    assert exc_info.value.value > 0.9
+
+
+@pytest.mark.anyio
+async def test_seeded_time_reports_cumulative_usage() -> None:
+    limit = time_limit(10)
+    limit._seed_usage(5.0)
+
+    with limit:
+        assert limit.usage >= 5.0

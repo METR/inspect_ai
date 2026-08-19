@@ -121,3 +121,14 @@ def test_stacking_cost_limits_outer_exceeded() -> None:
 def _consume_cost(amount: float) -> None:
     record_model_cost(amount)
     check_cost_limit()
+
+
+def test_seeded_cost_accumulates_on_top() -> None:
+    from inspect_ai.util._limit import record_model_cost
+
+    limit = cost_limit(1.0)
+    limit._seed_usage(0.4)
+
+    with limit:
+        record_model_cost(0.1)
+        assert limit.usage == pytest.approx(0.5)

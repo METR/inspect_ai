@@ -1027,6 +1027,9 @@ class _TokenLimit(Limit, _Node):
         self._type = type
         self._usage = ModelUsage()
 
+    def _seed_usage(self, usage: ModelUsage) -> None:
+        self._usage += usage
+
     def __enter__(self) -> _TokenLimit:
         super()._check_reuse()
         token_limit_tree.push(self)
@@ -1119,6 +1122,9 @@ class _TurnLimit(Limit, _Node):
         self._limit = limit
         self._turns = 0
 
+    def _seed_usage(self, turns: int) -> None:
+        self._turns += turns
+
     def __enter__(self) -> Limit:
         super()._check_reuse()
         turn_limit_tree.push(self)
@@ -1202,6 +1208,9 @@ class _CostLimit(Limit, _Node):
         self._validate_cost_limit(limit)
         self._limit = limit
         self._cost: float = 0.0
+
+    def _seed_usage(self, cost: float) -> None:
+        self._cost += cost
 
     def __enter__(self) -> Limit:
         super()._check_reuse()
@@ -1365,6 +1374,10 @@ class _TimeLimit(Limit, _Node):
         self._active_limit: float | None = None
         self._start_time: float | None = None
         self._end_time: float | None = None
+        self._seeded_usage: float = 0.0
+
+    def _seed_usage(self, elapsed: float) -> None:
+        self._seeded_usage += elapsed
 
     def __enter__(self) -> Limit:
         super()._check_reuse()
@@ -1372,7 +1385,7 @@ class _TimeLimit(Limit, _Node):
         # `self.limit` (not `self._limit`) so a sample started after a live
         # override was set opens its scope with the override already applied
         self._active_limit = self.limit
-        self._cancel_scope = anyio.move_on_after(self._active_limit)
+        self._cancel_scope = anyio.move_on_after(self._remaining_limit())
         self._cancel_scope.__enter__()
         self._start_time = anyio.current_time()
         return self
@@ -1403,7 +1416,7 @@ class _TimeLimit(Limit, _Node):
             assert self._start_time is not None
             # Note we've measured the elapsed time independently of anyio's cancel scope
             # so this is an approximation.
-            time_elapsed = self._end_time - self._start_time
+            time_elapsed = self._end_time - self._start_time + self._seeded_usage
             transcript()._event(
                 SampleLimitEvent(type="time", message=message, limit=limit)
             )
@@ -1443,19 +1456,29 @@ class _TimeLimit(Limit, _Node):
         if self._cancel_scope.cancel_called:
             return
         self._active_limit = self.limit
+        remaining = self._remaining_limit()
         self._cancel_scope.deadline = (
-            self._start_time + self._active_limit
-            if self._active_limit is not None
-            else math.inf
+            self._start_time + remaining if remaining is not None else math.inf
         )
+
+    def _remaining_limit(self) -> float | None:
+        """The wall-clock budget left for this scope, after seeded usage.
+
+        Clamped at 0 rather than going negative, which anyio reads as
+        "already expired" — the intended outcome for a sample resuming
+        with its time budget already spent.
+        """
+        if self._active_limit is None:
+            return None
+        return max(0.0, self._active_limit - self._seeded_usage)
 
     @property
     def usage(self) -> float:
         if self._start_time is None:
-            return 0.0
+            return self._seeded_usage
         if self._end_time is None:
-            return anyio.current_time() - self._start_time
-        return self._end_time - self._start_time
+            return anyio.current_time() - self._start_time + self._seeded_usage
+        return self._end_time - self._start_time + self._seeded_usage
 
 
 class _WorkingLimit(Limit, _Node):
@@ -1466,6 +1489,10 @@ class _WorkingLimit(Limit, _Node):
         self.parent: _WorkingLimit | None = None
         self._start_time: float | None = None
         self._end_time: float | None = None
+        self._seeded_usage: float = 0.0
+
+    def _seed_usage(self, working: float) -> None:
+        self._seeded_usage += working
 
     def __enter__(self) -> Limit:
         super()._check_reuse()
@@ -1490,10 +1517,17 @@ class _WorkingLimit(Limit, _Node):
     @property
     def usage(self) -> float:
         if self._start_time is None:
-            return 0.0
+            return self._seeded_usage
         if self._end_time is None:
-            return anyio.current_time() - self._start_time - self._waiting_time
-        return self._end_time - self._start_time - self._waiting_time
+            return (
+                anyio.current_time()
+                - self._start_time
+                - self._waiting_time
+                + self._seeded_usage
+            )
+        return (
+            self._end_time - self._start_time - self._waiting_time + self._seeded_usage
+        )
 
     def record_waiting_time(self, waiting_time: float) -> None:
         """Record waiting time for this node and its ancestor nodes."""
@@ -1535,6 +1569,40 @@ def _validate_time_limit(name: str, value: float | None) -> None:
         raise ValueError(
             f"{name} limit value must be a non-negative float or None: {value}"
         )
+
+
+def seed_limit_usage(
+    *,
+    token: Limit,
+    cost: Limit,
+    turn: Limit,
+    time: Limit,
+    working: Limit,
+    token_usage: ModelUsage,
+    cost_usage: float,
+    turns: int,
+    time_usage: float,
+    working_usage: float,
+) -> None:
+    """Pre-load sample limit nodes with usage from a prior attempt.
+
+    Internal: used by checkpoint resume so a continued sample enforces
+    against its cumulative usage. Call before entering any of the nodes —
+    a time limit derives its deadline at ``__enter__``.
+    """
+    if (
+        not isinstance(token, _TokenLimit)
+        or not isinstance(cost, _CostLimit)
+        or not isinstance(turn, _TurnLimit)
+        or not isinstance(time, _TimeLimit)
+        or not isinstance(working, _WorkingLimit)
+    ):
+        raise TypeError("seed_limit_usage requires concrete sample limit nodes")
+    token._seed_usage(token_usage)
+    cost._seed_usage(cost_usage)
+    turn._seed_usage(turns)
+    time._seed_usage(time_usage)
+    working._seed_usage(working_usage)
 
 
 class _LimitData(Limit):

@@ -309,3 +309,12 @@ class _MockTime:
     def advance(self, seconds: float) -> float:
         self._current_time += seconds
         return self._current_time
+
+
+@pytest.mark.anyio
+async def test_seeded_working_time_accumulates_on_top() -> None:
+    limit = working_limit(10)
+    limit._seed_usage(6.0)
+
+    with limit:
+        assert limit.usage >= 6.0

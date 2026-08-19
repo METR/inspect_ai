@@ -387,3 +387,14 @@ def _consume_turns(turns: int) -> None:
     # record_turn() both records the turn and checks the active limit.
     for _ in range(turns):
         record_turn()
+
+
+def test_seeded_turns_accumulate_on_top() -> None:
+    from inspect_ai.util._limit import record_turn
+
+    limit = turn_limit(10)
+    limit._seed_usage(4)
+
+    with limit:
+        record_turn()
+        assert limit.usage == 5
