@@ -351,3 +351,39 @@ def test_task_callbacks_reach_resolved_config() -> None:
     assert resolved is not None
     assert resolved.on_checkpoint is on_checkpoint
     assert resolved.on_resume is on_resume
+
+
+def test_restore_usage_defaults_to_false() -> None:
+    resolved = merge_checkpoint_configs(CheckpointConfig())
+    assert resolved is not None
+    assert resolved.restore_usage is False
+
+
+def test_restore_usage_from_task_layer() -> None:
+    resolved = merge_checkpoint_configs(_cfg("restore_usage", True))
+    assert resolved is not None
+    assert resolved.restore_usage is True
+
+
+def test_restore_usage_sample_beats_task() -> None:
+    resolved = merge_checkpoint_configs(
+        _cfg("restore_usage", False), _sample_cfg("restore_usage", True)
+    )
+    assert resolved is not None
+    assert resolved.restore_usage is True
+
+
+def test_restore_usage_eval_beats_sample() -> None:
+    resolved = merge_checkpoint_configs(
+        None, _sample_cfg("restore_usage", True), _cfg("restore_usage", False)
+    )
+    assert resolved is not None
+    assert resolved.restore_usage is False
+
+
+def test_restore_usage_explicit_false_is_not_unset() -> None:
+    resolved = merge_checkpoint_configs(
+        _cfg("restore_usage", True), _sample_cfg("restore_usage", False)
+    )
+    assert resolved is not None
+    assert resolved.restore_usage is False

@@ -165,6 +165,7 @@ class _CheckpointConfigModel(BaseModel):
     sandbox_paths: dict[str, list[str]] = Field(default_factory=dict)
     max_consecutive_failures: int | None = None
     retention: Literal["delete", "retain"] = "delete"
+    restore_usage: bool | None = None
 
     def to_dataclass(self) -> CheckpointConfig:
         return CheckpointConfig(
@@ -173,6 +174,7 @@ class _CheckpointConfigModel(BaseModel):
             sandbox_paths=self.sandbox_paths,
             max_consecutive_failures=self.max_consecutive_failures,
             retention=self.retention,
+            restore_usage=self.restore_usage,
         )
 
 

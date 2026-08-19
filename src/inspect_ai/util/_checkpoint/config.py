@@ -70,6 +70,11 @@ class CheckpointSampleConfig:
     attempts. ``None`` = inherit / unlimited tolerance. ``0`` = any
     failure is fatal."""
 
+    restore_usage: bool | None = None
+    """Continue the sample's usage counters (tokens, cost, turns, time,
+    working time) from its checkpoint on resume rather than restarting
+    them at zero. ``None`` = inherit; defaults to ``False``."""
+
 
 @dataclass
 class CheckpointConfig(CheckpointSampleConfig):
@@ -143,6 +148,7 @@ class ResolvedCheckpointConfig:
     retention: Literal["delete", "retain"] = "delete"
     checkpoints_location: str | None = None
     max_consecutive_failures: int | None = None
+    restore_usage: bool = False
     on_checkpoint: OnCheckpointCallback | None = None
     on_resume: OnResumeCallback | None = None
 
@@ -192,6 +198,7 @@ def merge_checkpoint_configs(
     trigger: CheckpointTrigger | None = None
     sandbox_paths: dict[str, list[str]] | None = None
     max_consecutive_failures: int | None = None
+    restore_usage: bool | None = None
     for layer in (task, sample, eval_):
         if layer is None:
             continue
@@ -201,6 +208,8 @@ def merge_checkpoint_configs(
             sandbox_paths = layer.sandbox_paths
         if layer.max_consecutive_failures is not None:
             max_consecutive_failures = layer.max_consecutive_failures
+        if layer.restore_usage is not None:
+            restore_usage = layer.restore_usage
 
     checkpoints_location: str | None = None
     retention: Literal["delete", "retain"] | None = None
@@ -221,6 +230,7 @@ def merge_checkpoint_configs(
         retention=retention if retention is not None else "delete",
         checkpoints_location=checkpoints_location,
         max_consecutive_failures=max_consecutive_failures,
+        restore_usage=restore_usage if restore_usage is not None else False,
         on_checkpoint=on_checkpoint,
         on_resume=on_resume,
     )

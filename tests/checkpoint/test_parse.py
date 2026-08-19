@@ -158,3 +158,23 @@ def test_json_file(tmp_path: Path) -> None:
     path.write_text(json.dumps({"trigger": {"type": "turn", "every": 3}}))
     cfg = _parse(str(path))
     assert isinstance(cfg.trigger, TurnInterval) and cfg.trigger.every == 3
+
+
+def test_restore_usage_from_config_file(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.json"
+    path.write_text(
+        json.dumps({"trigger": {"type": "turn", "every": 3}, "restore_usage": True})
+    )
+
+    cfg = _parse(str(path))
+
+    assert cfg.restore_usage is True
+
+
+def test_restore_usage_defaults_to_none_in_config_file(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.json"
+    path.write_text(json.dumps({"trigger": {"type": "turn", "every": 3}}))
+
+    cfg = _parse(str(path))
+
+    assert cfg.restore_usage is None
