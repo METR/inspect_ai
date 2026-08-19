@@ -736,15 +736,14 @@ def _capture_usage() -> CheckpointUsage | None:
     except RuntimeError:
         return None
 
-    # `SampleLimits.token` is typed as the public `Limit` base (no `_usage`);
-    # `sample_limits()` always constructs it from `token_limit_tree`, whose
-    # nodes are `_TokenLimit`.
+    # `SampleLimits.token` is typed as the public `Limit` base (no `_usage`).
+    # It's a `_TokenLimit` while the sample's limit trees are live, but once
+    # `record_sample_limit_data()` has snapshotted them (limit trees closed),
+    # it's a `_LimitData` instead — which has no raw `ModelUsage` to capture.
+    # Treat that the same as "no running sample": degrade to `None`.
     token_node = limits.token
     if not isinstance(token_node, _TokenLimit):
-        raise TypeError(
-            "sample_limits().token must be a _TokenLimit node, got "
-            f"{type(token_node).__name__}"
-        )
+        return None
 
     return CheckpointUsage(
         model_usage=deepcopy(sample_model_usage()),

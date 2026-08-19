@@ -2685,6 +2685,40 @@ async def test_fire_without_limit_scope_records_no_usage() -> None:
     assert _capture_usage() is None
 
 
+async def test_capture_usage_returns_none_once_limit_data_recorded() -> None:
+    """`_capture_usage()` degrades to `None` once `record_sample_limit_data()` has snapshotted the sample's limit trees.
+
+    That snapshot form (`_LimitData`) only carries a metered `usage` float,
+    not the raw `ModelUsage` a resume needs — so this is the same
+    "nothing to capture" case as no running sample at all, not an error.
+    """
+    from inspect_ai.util._checkpoint.checkpointer_impl import _capture_usage
+    from inspect_ai.util._limit import (
+        cost_limit,
+        message_limit,
+        record_sample_limit_data,
+        reset_sample_limit_data,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    try:
+        with (
+            token_limit(None),
+            cost_limit(None),
+            message_limit(None),
+            turn_limit(None),
+            time_limit(None),
+            working_limit(None),
+        ):
+            record_sample_limit_data(0)
+            assert _capture_usage() is None
+    finally:
+        reset_sample_limit_data()
+
+
 async def test_fire_captures_usage_within_sample_limit_scope(dirs: _Dirs) -> None:
     """A fire with live sample limit scopes snapshots usage onto Checkpoint.usage."""
     from inspect_ai.model._model import (
@@ -2741,3 +2775,83 @@ async def test_fire_captures_usage_within_sample_limit_scope(dirs: _Dirs) -> Non
     assert usage.token_limit_usage.total_tokens == 8
     assert usage.cost == 1.5
     assert usage.turns == 1
+
+
+async def test_capture_usage_snapshot_independent_of_live_sources() -> None:
+    """The `CheckpointUsage` `_capture_usage()` returns must not change when the live usage sources it was drawn from are mutated afterward.
+
+    `test_fire_captures_usage_within_sample_limit_scope` records everything
+    before capturing and mutates nothing afterward, so it wouldn't catch a
+    missing copy. This test captures first, then mutates the live contextvar
+    dicts' entries and the token limit node's usage in place, and checks the
+    earlier snapshot is unaffected.
+
+    Mutating in place (rather than adding a key or reassigning one) is the
+    discriminating case: pydantic validation already rebuilds the top-level
+    dict passed to a `dict[str, ModelUsage]` field, so an add/reassign at
+    that level is invisible to the snapshot with or without `deepcopy()`.
+    Only a mutation of an already-referenced `ModelUsage` instance's own
+    fields depends on `deepcopy()` for isolation.
+    """
+    from inspect_ai.model._model import (
+        sample_model_usage,
+        sample_model_usage_context_var,
+        sample_role_usage,
+        sample_role_usage_context_var,
+    )
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._checkpoint.checkpointer_impl import _capture_usage
+    from inspect_ai.util._limit import (
+        _TokenLimit,
+        cost_limit,
+        message_limit,
+        record_model_usage,
+        sample_limits,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    model_token = sample_model_usage_context_var.set(
+        {"mockllm/model": ModelUsage(input_tokens=5, output_tokens=3, total_tokens=8)}
+    )
+    role_token = sample_role_usage_context_var.set(
+        {"grader": ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2)}
+    )
+    try:
+        with (
+            token_limit(None),
+            cost_limit(None),
+            message_limit(None),
+            turn_limit(None),
+            time_limit(None),
+            working_limit(None),
+        ):
+            record_model_usage(
+                ModelUsage(input_tokens=5, output_tokens=3, total_tokens=8)
+            )
+
+            usage = _capture_usage()
+            assert usage is not None
+
+            token_node = sample_limits().token
+            assert isinstance(token_node, _TokenLimit)
+
+            # Mutate the live sources' existing entries in place.
+            sample_model_usage()["mockllm/model"].total_tokens = 999999
+            sample_role_usage()["grader"].total_tokens = 999999
+            token_node._usage.total_tokens = 999999
+
+            assert usage.model_usage == {
+                "mockllm/model": ModelUsage(
+                    input_tokens=5, output_tokens=3, total_tokens=8
+                )
+            }
+            assert usage.role_usage == {
+                "grader": ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+            }
+            assert usage.token_limit_usage.total_tokens == 8
+    finally:
+        sample_model_usage_context_var.reset(model_token)
+        sample_role_usage_context_var.reset(role_token)
