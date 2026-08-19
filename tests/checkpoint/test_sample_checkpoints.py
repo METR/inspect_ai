@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import pytest
 
@@ -391,10 +391,14 @@ def _seeded_nodes(seed: _GuardSeed, *, unlimited: bool = False) -> _GuardNodes:
     return nodes
 
 
-def _check_exhausted(nodes: _GuardNodes) -> None:
+def _check_exhausted(
+    nodes: _GuardNodes,
+    attempt: Literal["initial", "resume", "resume_for_scoring"] = "resume",
+) -> None:
     from inspect_ai._eval.task.run import _raise_if_prior_usage_exhausted
 
     _raise_if_prior_usage_exhausted(
+        attempt=attempt,
         token=nodes.token,
         cost=nodes.cost,
         turn=nodes.turn,
@@ -437,6 +441,14 @@ def test_prior_usage_at_a_ceiling_fails_the_resume(
 
     assert exc_info.value.type == expected_type
     assert "Restored usage from checkpoint" in str(exc_info.value)
+
+
+def test_prior_usage_at_a_ceiling_does_not_raise_for_scoring_resume() -> None:
+    """A `resume_for_scoring` attempt has no agent run left to protect."""
+    _check_exhausted(
+        _seeded_nodes(_GuardSeed(token_usage=100)),
+        attempt="resume_for_scoring",
+    )
 
 
 def test_prior_usage_against_unlimited_nodes_does_not_raise() -> None:

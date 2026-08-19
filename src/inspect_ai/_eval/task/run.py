@@ -1982,6 +1982,8 @@ async def task_run_sample(
                         sample_turn_limit = create_turn_limit(turn_limit)
                         sample_working_limit = create_working_limit(working_limit)
                         if prior_usage is not None:
+                            # `_prior_usage` only returns non-None when `resume_checkpoint` is set
+                            assert resume_checkpoint is not None
                             seed_limit_usage(
                                 token=state._token_limit,
                                 cost=state._cost_limit,
@@ -1995,6 +1997,7 @@ async def task_run_sample(
                                 working_usage=prior_usage.working_time,
                             )
                             _raise_if_prior_usage_exhausted(
+                                attempt=resume_checkpoint.attempt,
                                 token=state._token_limit,
                                 cost=state._cost_limit,
                                 turn=sample_turn_limit,
@@ -2742,14 +2745,26 @@ def _prior_usage(
 
 
 def _raise_if_prior_usage_exhausted(
-    *, token: Limit, cost: Limit, turn: Limit, time: Limit, working: Limit
+    *,
+    attempt: Literal["initial", "resume", "resume_for_scoring"],
+    token: Limit,
+    cost: Limit,
+    turn: Limit,
+    time: Limit,
+    working: Limit,
 ) -> None:
     """Fail a resume whose seeded usage already meets its limit.
 
     Reachable when a limit was lowered between attempts. Raising here
     rather than letting the scopes open keeps a zero-budget time limit
     from cancelling the sample partway through sandbox restore.
+
+    A no-op on ``resume_for_scoring``: the agent already ran to completion
+    and won't run again, so there's nothing left to protect from a
+    zero-budget cancel.
     """
+    if attempt == "resume_for_scoring":
+        return
     limits: list[tuple[Literal["token", "cost", "turn", "time", "working"], Limit]] = [
         ("token", token),
         ("cost", cost),
