@@ -16,6 +16,7 @@ from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
 )
 from inspect_ai.util._checkpoint._layout.schemas import (
     Checkpoint,
+    CheckpointUsage,
     ResticConfig,
     SnapshotDetails,
 )
@@ -255,3 +256,31 @@ async def test_scan_latest_committed_checkpoint_returns_latest_parseable(
     assert checkpoint is not None
     assert checkpoint.checkpoint_id == 2
     assert checkpoint.trigger == "agent_complete"
+
+
+async def test_resume_carries_usage(tmp_path: Path) -> None:
+    from inspect_ai._eval.task.run import _resume_if_checkpointed
+
+    eval_dir = tmp_path / "logs.checkpoints"
+    sample_dir = sample_checkpoints_dir(str(eval_dir), 1, 1)
+    Path(sample_dir).mkdir(parents=True, exist_ok=True)
+    await write_checkpoint_file(
+        sample_checkpoints_dir=sample_dir,
+        checkpoint=Checkpoint(
+            checkpoint_id=1,
+            trigger="turn",
+            turn=2,
+            created_at=datetime.now(timezone.utc),
+            duration_ms=1,
+            size_bytes=1,
+            host=SnapshotDetails(snapshot_id="a", size_bytes=1, duration_ms=1),
+            usage=CheckpointUsage(cost=0.5, turns=2, time=30.0, working_time=25.0),
+        ),
+    )
+
+    resume = await _resume_if_checkpointed(str(eval_dir), 1, 1)
+
+    assert resume is not None
+    assert resume.usage is not None
+    assert resume.usage.cost == 0.5
+    assert resume.usage.turns == 2

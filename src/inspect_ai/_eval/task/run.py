@@ -2713,6 +2713,7 @@ async def _resume_if_checkpointed(
     return ResumeCheckpoint(
         sample_checkpoints_dir=prior_sample_dir,
         attempt=attempt,
+        usage=checkpoint.usage if checkpoint is not None else None,
     )
 
 

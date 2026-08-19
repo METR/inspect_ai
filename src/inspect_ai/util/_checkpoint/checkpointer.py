@@ -23,9 +23,12 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Callable, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, TypeVar
 
 from inspect_ai.util._checkpoint.report import ResumeReport
+
+if TYPE_CHECKING:
+    from ._layout.schemas import CheckpointUsage
 
 T = TypeVar("T")
 
@@ -41,6 +44,7 @@ class ResumeCheckpoint:
 
     sample_checkpoints_dir: str
     attempt: Literal["initial", "resume", "resume_for_scoring"]
+    usage: CheckpointUsage | None = None
 
 
 class Checkpointer(Protocol):
