@@ -1376,7 +1376,13 @@ class _TimeLimit(Limit, _Node):
         self._end_time: float | None = None
         self._seeded_usage: float = 0.0
 
-    def _seed_usage(self, elapsed: float) -> None:
+    def _check_seedable(self) -> None:
+        """Raise if usage can no longer be seeded (the node has been entered).
+
+        Split out from ``_seed_usage`` so callers seeding multiple nodes
+        together (``seed_limit_usage``) can validate every node before
+        mutating any of them.
+        """
         if self._start_time is not None:
             raise RuntimeError(
                 "_TimeLimit._seed_usage() must be called before entering the "
@@ -1384,6 +1390,9 @@ class _TimeLimit(Limit, _Node):
                 "already derived at __enter__, so seeding afterwards would "
                 "inflate usage without shortening it."
             )
+
+    def _seed_usage(self, elapsed: float) -> None:
+        self._check_seedable()
         self._seeded_usage += elapsed
 
     def __enter__(self) -> Limit:
@@ -1471,8 +1480,10 @@ class _TimeLimit(Limit, _Node):
     def _remaining_limit(self) -> float | None:
         """The wall-clock budget left for this scope, after seeded usage.
 
-        Clamped at 0 so an over-spent budget opens an immediately-expired
-        scope rather than a negative delay.
+        Clamped at 0 for hygiene only: ``anyio.move_on_after`` cancels on any
+        past deadline, so a negative delay would open an equally-expired
+        scope — the clamp just keeps a reported remaining budget from
+        reading as negative.
         """
         if self._active_limit is None:
             return None
@@ -1594,26 +1605,26 @@ def seed_limit_usage(
 
     Internal: used by checkpoint resume so a continued sample enforces
     against its cumulative usage. Call before entering any of the nodes —
-    a time limit derives its deadline at ``__enter__``.
+    a time limit derives its deadline at ``__enter__``. Seeds all five nodes
+    or none: every precondition is validated before any node is mutated.
     """
-    for name, value, expected in (
-        ("token", token, _TokenLimit),
-        ("cost", cost, _CostLimit),
-        ("turn", turn, _TurnLimit),
-        ("time", time, _TimeLimit),
-        ("working", working, _WorkingLimit),
-    ):
-        if not isinstance(value, expected):
-            raise TypeError(
-                f"seed_limit_usage: {name!r} must be a {expected.__name__} node, "
-                f"got {type(value).__name__}"
-            )
-    # the loop above already enforced these types; narrow for the type checker
-    assert isinstance(token, _TokenLimit)
-    assert isinstance(cost, _CostLimit)
-    assert isinstance(turn, _TurnLimit)
-    assert isinstance(time, _TimeLimit)
-    assert isinstance(working, _WorkingLimit)
+    if not isinstance(token, _TokenLimit):
+        raise TypeError(
+            f"'token' must be a _TokenLimit node, got {type(token).__name__}"
+        )
+    if not isinstance(cost, _CostLimit):
+        raise TypeError(f"'cost' must be a _CostLimit node, got {type(cost).__name__}")
+    if not isinstance(turn, _TurnLimit):
+        raise TypeError(f"'turn' must be a _TurnLimit node, got {type(turn).__name__}")
+    if not isinstance(time, _TimeLimit):
+        raise TypeError(f"'time' must be a _TimeLimit node, got {type(time).__name__}")
+    if not isinstance(working, _WorkingLimit):
+        raise TypeError(
+            f"'working' must be a _WorkingLimit node, got {type(working).__name__}"
+        )
+
+    time._check_seedable()
+
     token._seed_usage(token_usage)
     cost._seed_usage(cost_usage)
     turn._seed_usage(turns)

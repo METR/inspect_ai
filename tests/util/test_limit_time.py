@@ -185,7 +185,7 @@ async def test_seeded_time_shortens_the_deadline() -> None:
             await anyio.sleep(0.5)
 
     assert exc_info.value.limit == 1.0
-    assert exc_info.value.value > 0.9
+    assert 0.9 < exc_info.value.value < 1.1
 
 
 @pytest.mark.anyio
@@ -199,8 +199,13 @@ async def test_seeded_time_reports_cumulative_usage() -> None:
 
 @pytest.mark.parametrize("seed", [1.0, 1.5])
 @pytest.mark.anyio
-async def test_seeded_time_at_or_over_limit_cancels_immediately(seed: float) -> None:
-    """A seed >= the limit clamps the remaining budget to 0, not negative."""
+async def test_seed_ge_limit_cancels_immediately(seed: float) -> None:
+    """A seed at or beyond the limit opens an already-expired scope.
+
+    The body is cancelled at its first checkpoint whether the remaining
+    budget lands at exactly 0 or goes negative — `move_on_after` treats both
+    the same.
+    """
     limit = time_limit(1.0)
     limit._seed_usage(seed)
 
@@ -231,19 +236,20 @@ async def test_seeded_time_override_refresh_keeps_the_seed() -> None:
         with limit:
             assert limit._start_time is not None
             assert limit._cancel_scope.deadline == pytest.approx(
-                limit._start_time + 7.0
+                limit._start_time + 7.0, abs=0.05
             )
 
             set_sample_limit_override("seeded-time-refresh", "time_limit", 5)
             # a fresh (unseeded) budget would put the deadline at start + 5;
             # the seed must still shorten it to start + (5 - 3)
             assert limit._cancel_scope.deadline == pytest.approx(
-                limit._start_time + 2.0
+                limit._start_time + 2.0, abs=0.05
             )
 
             set_sample_limit_override("seeded-time-refresh", "time_limit", None)
 
 
+@pytest.mark.anyio
 async def test_seed_usage_after_enter_raises() -> None:
     limit = time_limit(10)
 

@@ -216,3 +216,48 @@ def test_seed_limit_usage_seeds_every_node() -> None:
     assert turn.usage == 4
     assert time_.usage == pytest.approx(12.0)
     assert working.usage == pytest.approx(10.0)
+
+
+def test_seed_limit_usage_rejects_wrong_node_type() -> None:
+    with pytest.raises(TypeError, match="'cost' must be a _CostLimit node"):
+        seed_limit_usage(
+            token=token_limit(100),
+            cost=turn_limit(10),
+            turn=turn_limit(10),
+            time=time_limit(60),
+            working=working_limit(60),
+            token_usage=ModelUsage(total_tokens=40),
+            cost_usage=0.4,
+            turns=4,
+            time_usage=12.0,
+            working_usage=10.0,
+        )
+
+
+@pytest.mark.anyio
+async def test_seed_limit_usage_seeds_nothing_when_time_already_entered() -> None:
+    token = token_limit(100)
+    cost = cost_limit(1.0)
+    turn = turn_limit(10)
+    time_ = time_limit(60)
+    working = working_limit(60)
+
+    with time_:
+        with pytest.raises(RuntimeError, match="before entering"):
+            seed_limit_usage(
+                token=token,
+                cost=cost,
+                turn=turn,
+                time=time_,
+                working=working,
+                token_usage=ModelUsage(total_tokens=40),
+                cost_usage=0.4,
+                turns=4,
+                time_usage=12.0,
+                working_usage=10.0,
+            )
+
+    assert token.usage == 0
+    assert cost.usage == 0
+    assert turn.usage == 0
+    assert working.usage == 0
