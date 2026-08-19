@@ -2590,14 +2590,22 @@ def init_model_usage(initial_usage: dict[str, ModelUsage] | None = None) -> None
         model_usage_context_var.set({})
 
 
-def init_sample_model_usage() -> None:
-    sample_model_usage_context_var.set({})
+def init_sample_model_usage(usage: dict[str, ModelUsage] | None = None) -> None:
+    sample_model_usage_context_var.set(deepcopy(usage) if usage else {})
 
 
-def init_sample_model_data() -> None:
-    """Initialize all per-sample model accumulators (usage, role usage, fallbacks)."""
-    init_sample_model_usage()
-    init_sample_role_usage()
+def init_sample_model_data(
+    model_usage: dict[str, ModelUsage] | None = None,
+    role_usage: dict[str, ModelUsage] | None = None,
+) -> None:
+    """Initialize all per-sample model accumulators (usage, role usage, fallbacks).
+
+    Args:
+        model_usage: Usage to continue from (checkpoint resume); empty if None.
+        role_usage: Role usage to continue from (checkpoint resume); empty if None.
+    """
+    init_sample_model_usage(model_usage)
+    init_sample_role_usage(role_usage)
     init_sample_model_fallbacks()
 
 
@@ -2612,8 +2620,8 @@ def init_role_usage(initial_usage: dict[str, ModelUsage] | None = None) -> None:
         role_usage_context_var.set({})
 
 
-def init_sample_role_usage() -> None:
-    sample_role_usage_context_var.set({})
+def init_sample_role_usage(usage: dict[str, ModelUsage] | None = None) -> None:
+    sample_role_usage_context_var.set(deepcopy(usage) if usage else {})
 
 
 def record_and_check_model_usage(

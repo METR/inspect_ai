@@ -60,7 +60,8 @@ from inspect_ai._util.registry import (
 from inspect_ai._util.working import (
     init_sample_working_time,
     sample_start_datetime,
-    sample_waiting_time,
+    sample_total_time,
+    sample_working_time,
 )
 from inspect_ai._view.notify import view_notify_eval
 from inspect_ai.dataset import Dataset, Sample
@@ -147,9 +148,11 @@ from inspect_ai.util._checkpoint._layout import (
 from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
     scan_latest_committed_checkpoint,
 )
+from inspect_ai.util._checkpoint._layout.schemas import CheckpointUsage
 from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
 from inspect_ai.util._checkpoint.config import (
     CheckpointConfig,
+    ResolvedCheckpointConfig,
     merge_checkpoint_configs,
 )
 from inspect_ai.util._early_stopping import (
@@ -158,10 +161,12 @@ from inspect_ai.util._early_stopping import (
     EarlyStoppingSummary,
 )
 from inspect_ai.util._limit import (
+    Limit,
     LimitExceededError,
     monitor_working_limit,
     record_sample_limit_data,
     reset_sample_limit_data,
+    seed_limit_usage,
     token_limit_usage,
     turn_count,
 )
@@ -1698,6 +1703,21 @@ async def task_run_sample(
         # attempt's snapshot
         reset_sample_limit_data()
 
+        # resolve checkpoint config across all three levels with
+        # precedence eval > sample > task (per-field merge — see
+        # `merge_checkpoint_configs`). Resolved up here because its
+        # `restore_usage` field decides what the sample's usage
+        # accumulators and limit nodes below are initialised with.
+        resolved_checkpoint = merge_checkpoint_configs(
+            checkpoint,
+            sample.checkpoint,
+            eval_checkpoint,
+            on_checkpoint=task.on_checkpoint,
+            on_resume=task.on_resume,
+        )
+
+        prior_usage = _prior_usage(resume_checkpoint, resolved_checkpoint)
+
         # validate that we have sample_id (mostly for the typechecker)
         sample_id = sample.id
         if sample_id is None:
@@ -1715,7 +1735,10 @@ async def task_run_sample(
             )
 
         # initialise subtask and scoring context
-        init_sample_model_data()
+        init_sample_model_data(
+            model_usage=prior_usage.model_usage if prior_usage else None,
+            role_usage=prior_usage.role_usage if prior_usage else None,
+        )
         set_sample_state(state)
         sample_transcript_bounded, history_provider = _sample_transcript_config(
             logger, sample_id, state.epoch
@@ -1750,17 +1773,6 @@ async def task_run_sample(
             )
             if sandbox or sample.sandbox is not None
             else contextlib.nullcontext()
-        )
-
-        # resolve checkpoint config across all three levels with
-        # precedence eval > sample > task (per-field merge — see
-        # `merge_checkpoint_configs`).
-        resolved_checkpoint = merge_checkpoint_configs(
-            checkpoint,
-            sample.checkpoint,
-            eval_checkpoint,
-            on_checkpoint=task.on_checkpoint,
-            on_resume=task.on_resume,
         )
 
         # helper to handle exceptions (will throw if we've exceeded the limit)
@@ -1950,7 +1962,13 @@ async def task_run_sample(
 
                         # record start time
                         start_time = time.monotonic()
-                        init_sample_working_time(start_time)
+                        init_sample_working_time(
+                            start_time,
+                            prior_time=prior_usage.time if prior_usage else 0.0,
+                            prior_working_time=(
+                                prior_usage.working_time if prior_usage else 0.0
+                            ),
+                        )
 
                         # run sample w/ optional limits. This function's
                         # `task_id` param carries the per-attempt eval id;
@@ -1961,6 +1979,28 @@ async def task_run_sample(
                         # fully targetable.
                         override_task_id = stable_task_id_for_eval(task_id)
                         sample_time_limit = create_time_limit(time_limit)
+                        sample_turn_limit = create_turn_limit(turn_limit)
+                        sample_working_limit = create_working_limit(working_limit)
+                        if prior_usage is not None:
+                            seed_limit_usage(
+                                token=state._token_limit,
+                                cost=state._cost_limit,
+                                turn=sample_turn_limit,
+                                time=sample_time_limit,
+                                working=sample_working_limit,
+                                token_usage=prior_usage.token_limit_usage,
+                                cost_usage=prior_usage.cost,
+                                turns=prior_usage.turns,
+                                time_usage=prior_usage.time,
+                                working_usage=prior_usage.working_time,
+                            )
+                            _raise_if_prior_usage_exhausted(
+                                token=state._token_limit,
+                                cost=state._cost_limit,
+                                turn=sample_turn_limit,
+                                time=sample_time_limit,
+                                working=sample_working_limit,
+                            )
                         with (
                             sample_limit_override_scope(
                                 override_task_id,
@@ -1971,9 +2011,9 @@ async def task_run_sample(
                             state._token_limit,
                             state._cost_limit,
                             state._message_limit,
-                            create_turn_limit(turn_limit),
+                            sample_turn_limit,
                             sample_time_limit,
-                            create_working_limit(working_limit),
+                            sample_working_limit,
                         ):
 
                             async def run(tg: TaskGroup) -> None:
@@ -2610,7 +2650,7 @@ def create_eval_sample(
     # construct sample for logging
 
     # compute total time if we can
-    total_time = time.monotonic() - start_time if start_time is not None else None
+    total_time = sample_total_time() if start_time is not None else None
 
     return EvalSample(
         id=id,
@@ -2642,7 +2682,7 @@ def create_eval_sample(
         started_at=started_at.isoformat() if started_at is not None else None,
         completed_at=datetime.now(timezone.utc).isoformat(),
         total_time=round(total_time, 3) if total_time is not None else None,
-        working_time=round(total_time - sample_waiting_time(), 3)
+        working_time=round(sample_working_time(), 3)
         if total_time is not None
         else None,
         error=error,
@@ -2685,6 +2725,51 @@ async def log_sample(
             logging_sample, sample_history, flush=True
         )
     return materialized_sample
+
+
+def _prior_usage(
+    resume_checkpoint: ResumeCheckpoint | None,
+    config: ResolvedCheckpointConfig | None,
+) -> CheckpointUsage | None:
+    """The usage a resumed sample should continue from, if it should.
+
+    ``None`` unless this is a resume of a checkpoint that recorded usage
+    and the eval opted in via ``restore_usage``.
+    """
+    if resume_checkpoint is None or config is None or not config.restore_usage:
+        return None
+    return resume_checkpoint.usage
+
+
+def _raise_if_prior_usage_exhausted(
+    *, token: Limit, cost: Limit, turn: Limit, time: Limit, working: Limit
+) -> None:
+    """Fail a resume whose seeded usage already meets its limit.
+
+    Reachable when a limit was lowered between attempts. Raising here
+    rather than letting the scopes open keeps a zero-budget time limit
+    from cancelling the sample partway through sandbox restore.
+    """
+    limits: list[tuple[Literal["token", "cost", "turn", "time", "working"], Limit]] = [
+        ("token", token),
+        ("cost", cost),
+        ("turn", turn),
+        ("time", time),
+        ("working", working),
+    ]
+    for limit_type, node in limits:
+        ceiling = node.limit
+        if ceiling is not None and node.usage >= ceiling:
+            raise LimitExceededError(
+                limit_type,
+                value=node.usage,
+                limit=ceiling,
+                message=(
+                    f"Restored usage from checkpoint already meets the "
+                    f"{limit_type} limit. usage: {node.usage}, limit: {ceiling}"
+                ),
+                source=node,
+            )
 
 
 async def _resume_if_checkpointed(

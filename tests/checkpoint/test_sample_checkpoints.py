@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
+
+import pytest
 
 from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
     _read_restic_config,
@@ -21,6 +24,7 @@ from inspect_ai.util._checkpoint._layout.schemas import (
     SnapshotDetails,
 )
 from inspect_ai.util._checkpoint._triggers import CheckpointTriggerKind
+from inspect_ai.util._limit import Limit
 
 
 def _info(
@@ -284,3 +288,230 @@ async def test_resume_carries_usage(tmp_path: Path) -> None:
     assert resume.usage is not None
     assert resume.usage.cost == 0.5
     assert resume.usage.turns == 2
+
+
+def _usage_seed() -> CheckpointUsage:
+    from inspect_ai.model._model_output import ModelUsage
+
+    return CheckpointUsage(
+        model_usage={"mockllm/model": ModelUsage(total_tokens=40)},
+        token_limit_usage=ModelUsage(total_tokens=40),
+        cost=0.4,
+        turns=4,
+        time=30.0,
+        working_time=25.0,
+    )
+
+
+def test_prior_usage_seeds_are_applied_when_enabled() -> None:
+    from inspect_ai._eval.task.run import _prior_usage
+    from inspect_ai.util._checkpoint._triggers import Manual
+    from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
+    from inspect_ai.util._checkpoint.config import ResolvedCheckpointConfig
+
+    resume = ResumeCheckpoint(
+        sample_checkpoints_dir="/tmp/x", attempt="resume", usage=_usage_seed()
+    )
+    config = ResolvedCheckpointConfig(trigger=Manual(), restore_usage=True)
+
+    assert _prior_usage(resume, config) is not None
+
+
+def test_prior_usage_is_none_when_flag_off() -> None:
+    from inspect_ai._eval.task.run import _prior_usage
+    from inspect_ai.util._checkpoint._triggers import Manual
+    from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
+    from inspect_ai.util._checkpoint.config import ResolvedCheckpointConfig
+
+    resume = ResumeCheckpoint(
+        sample_checkpoints_dir="/tmp/x", attempt="resume", usage=_usage_seed()
+    )
+    config = ResolvedCheckpointConfig(trigger=Manual())
+
+    assert _prior_usage(resume, config) is None
+
+
+def test_prior_usage_is_none_without_a_resume() -> None:
+    from inspect_ai._eval.task.run import _prior_usage
+    from inspect_ai.util._checkpoint._triggers import Manual
+    from inspect_ai.util._checkpoint.config import ResolvedCheckpointConfig
+
+    config = ResolvedCheckpointConfig(trigger=Manual(), restore_usage=True)
+
+    assert _prior_usage(None, config) is None
+
+
+class _GuardSeed(NamedTuple):
+    token_usage: int = 0
+    cost_usage: float = 0.0
+    turns: int = 0
+    time_usage: float = 0.0
+    working_usage: float = 0.0
+
+
+class _GuardNodes(NamedTuple):
+    token: Limit
+    cost: Limit
+    turn: Limit
+    time: Limit
+    working: Limit
+
+
+def _seeded_nodes(seed: _GuardSeed, *, unlimited: bool = False) -> _GuardNodes:
+    """The five sample limit nodes, seeded with `seed` as a resume would."""
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import (
+        cost_limit,
+        seed_limit_usage,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    nodes = _GuardNodes(
+        token=token_limit(None if unlimited else 100),
+        cost=cost_limit(None if unlimited else 1.0),
+        turn=turn_limit(None if unlimited else 10),
+        time=time_limit(None if unlimited else 60.0),
+        working=working_limit(None if unlimited else 50.0),
+    )
+    seed_limit_usage(
+        token=nodes.token,
+        cost=nodes.cost,
+        turn=nodes.turn,
+        time=nodes.time,
+        working=nodes.working,
+        token_usage=ModelUsage(total_tokens=seed.token_usage),
+        cost_usage=seed.cost_usage,
+        turns=seed.turns,
+        time_usage=seed.time_usage,
+        working_usage=seed.working_usage,
+    )
+    return nodes
+
+
+def _check_exhausted(nodes: _GuardNodes) -> None:
+    from inspect_ai._eval.task.run import _raise_if_prior_usage_exhausted
+
+    _raise_if_prior_usage_exhausted(
+        token=nodes.token,
+        cost=nodes.cost,
+        turn=nodes.turn,
+        time=nodes.time,
+        working=nodes.working,
+    )
+
+
+def test_prior_usage_below_every_ceiling_does_not_raise() -> None:
+    _check_exhausted(
+        _seeded_nodes(
+            _GuardSeed(
+                token_usage=99,
+                cost_usage=0.99,
+                turns=9,
+                time_usage=59.0,
+                working_usage=49.0,
+            )
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "seed,expected_type",
+    [
+        (_GuardSeed(token_usage=100), "token"),
+        (_GuardSeed(cost_usage=1.0), "cost"),
+        (_GuardSeed(turns=10), "turn"),
+        (_GuardSeed(time_usage=60.0), "time"),
+        (_GuardSeed(working_usage=50.0), "working"),
+    ],
+)
+def test_prior_usage_at_a_ceiling_fails_the_resume(
+    seed: _GuardSeed, expected_type: str
+) -> None:
+    from inspect_ai.util._limit import LimitExceededError
+
+    with pytest.raises(LimitExceededError) as exc_info:
+        _check_exhausted(_seeded_nodes(seed))
+
+    assert exc_info.value.type == expected_type
+    assert "Restored usage from checkpoint" in str(exc_info.value)
+
+
+def test_prior_usage_against_unlimited_nodes_does_not_raise() -> None:
+    _check_exhausted(
+        _seeded_nodes(
+            _GuardSeed(
+                token_usage=10_000,
+                cost_usage=100.0,
+                turns=1_000,
+                time_usage=10_000.0,
+                working_usage=10_000.0,
+            ),
+            unlimited=True,
+        )
+    )
+
+
+def test_seeded_model_usage_is_isolated_from_the_checkpoint() -> None:
+    """A seeded accumulator must not alias the checkpoint's own usage.
+
+    An error retry re-seeds from the same `ResumeCheckpoint`, so an alias
+    would fold the abandoned attempt's tokens into the next seed.
+    """
+    from inspect_ai.model._model import (
+        init_sample_model_data,
+        sample_model_usage,
+        sample_model_usage_context_var,
+        sample_role_usage,
+        sample_role_usage_context_var,
+    )
+    from inspect_ai.model._model_output import ModelUsage
+
+    seed = _usage_seed()
+    seed.role_usage = {"grader": ModelUsage(total_tokens=2)}
+
+    model_token = sample_model_usage_context_var.set({})
+    role_token = sample_role_usage_context_var.set({})
+    try:
+        init_sample_model_data(seed.model_usage, seed.role_usage)
+
+        assert sample_model_usage()["mockllm/model"].total_tokens == 40
+        assert sample_role_usage()["grader"].total_tokens == 2
+
+        sample_model_usage()["mockllm/model"].total_tokens = 999999
+        sample_role_usage()["grader"].total_tokens = 999999
+        sample_model_usage()["other/model"] = ModelUsage(total_tokens=1)
+
+        assert seed.model_usage == {"mockllm/model": ModelUsage(total_tokens=40)}
+        assert seed.role_usage == {"grader": ModelUsage(total_tokens=2)}
+    finally:
+        sample_model_usage_context_var.reset(model_token)
+        sample_role_usage_context_var.reset(role_token)
+
+
+def test_unseeded_model_usage_starts_empty() -> None:
+    from inspect_ai.model._model import (
+        init_sample_model_data,
+        sample_model_usage,
+        sample_model_usage_context_var,
+        sample_role_usage,
+        sample_role_usage_context_var,
+    )
+    from inspect_ai.model._model_output import ModelUsage
+
+    model_token = sample_model_usage_context_var.set(
+        {"mockllm/model": ModelUsage(total_tokens=40)}
+    )
+    role_token = sample_role_usage_context_var.set(
+        {"grader": ModelUsage(total_tokens=2)}
+    )
+    try:
+        init_sample_model_data()
+
+        assert sample_model_usage() == {}
+        assert sample_role_usage() == {}
+    finally:
+        sample_model_usage_context_var.reset(model_token)
+        sample_role_usage_context_var.reset(role_token)
