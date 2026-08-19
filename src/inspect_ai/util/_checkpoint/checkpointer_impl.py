@@ -20,6 +20,7 @@ from collections.abc import (
     Mapping,
 )
 from contextlib import AbstractAsyncContextManager
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import partial
 from logging import getLogger
@@ -65,7 +66,7 @@ from ._layout.sample_checkpoints_dir import (
     scan_latest_committed_id,
     write_checkpoint_file,
 )
-from ._layout.schemas import Checkpoint, SnapshotDetails
+from ._layout.schemas import Checkpoint, CheckpointUsage, SnapshotDetails
 from ._layout.staging_dir import sandbox_repo_dir
 from ._sandbox_restic import egress_sandbox, run_sandbox_backup
 from ._triggers import CheckpointTriggerKind, create_trigger
@@ -554,6 +555,7 @@ class _EnteredCheckpointer:
                     trigger=trigger,
                     trigger_metadata=metadata,
                     turn=self._turn,
+                    usage=_capture_usage(),
                     created_at=datetime.now(timezone.utc),
                     duration_ms=duration_ms,
                     size_bytes=host_info.size_bytes
@@ -717,6 +719,42 @@ class _EnteredCheckpointer:
             snapshot_id=summary.snapshot_id,
         )
         return summary
+
+
+def _capture_usage() -> CheckpointUsage | None:
+    """Sample usage right now, or ``None`` outside a sample limit scope.
+
+    Fires driven outside a sample (tests, direct harness use) have no
+    limit trees, and ``sample_limits()`` raises rather than returning
+    zeros.
+    """
+    from inspect_ai.model._model import sample_model_usage, sample_role_usage
+    from inspect_ai.util._limit import _TokenLimit, sample_limits
+
+    try:
+        limits = sample_limits()
+    except RuntimeError:
+        return None
+
+    # `SampleLimits.token` is typed as the public `Limit` base (no `_usage`);
+    # `sample_limits()` always constructs it from `token_limit_tree`, whose
+    # nodes are `_TokenLimit`.
+    token_node = limits.token
+    if not isinstance(token_node, _TokenLimit):
+        raise TypeError(
+            "sample_limits().token must be a _TokenLimit node, got "
+            f"{type(token_node).__name__}"
+        )
+
+    return CheckpointUsage(
+        model_usage=deepcopy(sample_model_usage()),
+        role_usage=deepcopy(sample_role_usage()),
+        token_limit_usage=deepcopy(token_node._usage),
+        cost=limits.cost.usage,
+        turns=int(limits.turn.usage),
+        time=limits.time.usage,
+        working_time=limits.working.usage,
+    )
 
 
 async def _scan_next_checkpoint_id(sample_root: str) -> int:

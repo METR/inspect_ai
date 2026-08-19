@@ -2669,3 +2669,75 @@ def test_task_stores_checkpoint_callbacks() -> None:
     t3 = task_with(t, on_resume=on_resume2)
     assert t3.on_resume is on_resume2
     assert t3.on_checkpoint is on_checkpoint  # unchanged
+
+
+# === usage capture at fire time ==============================================
+
+
+async def test_fire_without_limit_scope_records_no_usage() -> None:
+    """`_capture_usage()` degrades to `None` outside a sample limit scope.
+
+    Matches how `dirs`-driven fire tests run: no `sample_limits()` tree is
+    active, same as this test.
+    """
+    from inspect_ai.util._checkpoint.checkpointer_impl import _capture_usage
+
+    assert _capture_usage() is None
+
+
+async def test_fire_captures_usage_within_sample_limit_scope(dirs: _Dirs) -> None:
+    """A fire with live sample limit scopes snapshots usage onto Checkpoint.usage."""
+    from inspect_ai.model._model import (
+        sample_model_usage_context_var,
+        sample_role_usage_context_var,
+    )
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import (
+        cost_limit,
+        message_limit,
+        record_model_cost,
+        record_model_usage,
+        record_turn,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+
+    model_usage = {
+        "mockllm/model": ModelUsage(input_tokens=5, output_tokens=3, total_tokens=8)
+    }
+    role_usage = {"grader": ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2)}
+    model_token = sample_model_usage_context_var.set(model_usage)
+    role_token = sample_role_usage_context_var.set(role_usage)
+    try:
+        with (
+            token_limit(None),
+            cost_limit(None),
+            message_limit(None),
+            turn_limit(None),
+            time_limit(None),
+            working_limit(None),
+        ):
+            record_model_usage(
+                ModelUsage(input_tokens=5, output_tokens=3, total_tokens=8)
+            )
+            record_model_cost(1.5)
+            record_turn()
+
+            cp = _counting(ResolvedCheckpointConfig(trigger=Manual()), dirs)
+            await cp.checkpoint()
+    finally:
+        sample_model_usage_context_var.reset(model_token)
+        sample_role_usage_context_var.reset(role_token)
+
+    checkpoint = Checkpoint.model_validate_json(
+        (Path(dirs.checkpoints) / "ckpt-00001.json").read_text()
+    )
+    usage = checkpoint.usage
+    assert usage is not None
+    assert usage.model_usage == model_usage
+    assert usage.role_usage == role_usage
+    assert usage.token_limit_usage.total_tokens == 8
+    assert usage.cost == 1.5
+    assert usage.turns == 1
