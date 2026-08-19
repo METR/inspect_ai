@@ -41,6 +41,7 @@ from checkpoint.resume_scoring_kill_harness import (
     RESTORE_USAGE_ENV,
     TARGET_ENV,
     TIME_LIMIT_ENV,
+    WORKING_LIMIT_ENV,
     generates,
     reset_generates,
 )
@@ -189,6 +190,7 @@ def test_scoring_resume_keeps_its_full_time_budget(
     monkeypatch.setenv(RESTORE_USAGE_ENV, "1")
     monkeypatch.setenv(AGENT_SLEEP_ENV, str(_AGENT_SLEEP_SECONDS))
     monkeypatch.delenv(TIME_LIMIT_ENV, raising=False)
+    monkeypatch.delenv(WORKING_LIMIT_ENV, raising=False)
 
     log_dir = str(tmp_path / "logs")
     # Both are stateful on disk and flaky-retry re-runs this body with the
@@ -203,6 +205,11 @@ def test_scoring_resume_keeps_its_full_time_budget(
     try:
         _run_killed_attempt(log_dir, None, tests_dir)
         monkeypatch.setenv(TIME_LIMIT_ENV, str(_RESUME_TIME_LIMIT_SECONDS))
+        # The working-time limit enforces via the same kind of background
+        # poller as the time limit, independent of agent activity, but is
+        # inert here unless the killed attempt's working time is also seeded
+        # on resume — pins the other half of `_clock_seed_usage`.
+        monkeypatch.setenv(WORKING_LIMIT_ENV, str(_RESUME_TIME_LIMIT_SECONDS))
         reset_generates()
         resume = eval_retry(read_eval_log(_latest_log(log_dir)), log_dir=log_dir)[0]
     finally:
@@ -237,3 +244,7 @@ def test_scoring_resume_keeps_its_full_time_budget(
         f"the killed attempt only reached {prior_time}s, so this no longer "
         f"exercises a resume whose inherited clock would exceed its limit"
     )
+    # ...and the lowered limit actually reached the resume. Without this, a
+    # resume that silently dropped the limit would also pass with
+    # `sample.limit is None` above, for the wrong reason.
+    assert resume.eval.config.time_limit == _RESUME_TIME_LIMIT_SECONDS

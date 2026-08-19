@@ -75,10 +75,12 @@ TARGET_ENV = "INSPECT_TEST_SCORING_RESUME_TARGET_CANCELS"
 
 # Knobs the usage-restoration test varies per attempt (each attempt is a fresh
 # process, so they travel as environment rather than arguments): whether the
-# task opts in to continuing its usage counters on resume, a sample time limit
-# (unset = no limit), and seconds of sample time the agent's tool call burns.
+# task opts in to continuing its usage counters on resume, a sample time and
+# working-time limit (unset = no limit), and seconds of sample time the
+# agent's tool call burns.
 RESTORE_USAGE_ENV = "INSPECT_TEST_SCORING_RESUME_RESTORE_USAGE"
 TIME_LIMIT_ENV = "INSPECT_TEST_SCORING_RESUME_TIME_LIMIT"
+WORKING_LIMIT_ENV = "INSPECT_TEST_SCORING_RESUME_WORKING_LIMIT"
 AGENT_SLEEP_ENV = "INSPECT_TEST_SCORING_RESUME_AGENT_SLEEP"
 
 
@@ -219,6 +221,9 @@ def resume_scoring_task() -> Task:
             restore_usage=os.environ.get(RESTORE_USAGE_ENV) == "1",
         ),
         time_limit=int(limit) if (limit := os.environ.get(TIME_LIMIT_ENV)) else None,
+        working_limit=(
+            int(limit) if (limit := os.environ.get(WORKING_LIMIT_ENV)) else None
+        ),
     )
 
 

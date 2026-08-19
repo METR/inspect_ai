@@ -85,7 +85,7 @@ For incomplete samples, Inspect locates the checkpoint directory, restores each 
 1.  Agent State: Any state values the agent registered (e.g. message or compaction history).
 2.  Sandbox: The sandbox setup script is run and the configured sandbox paths are restored from backup into a fresh sandbox container.
 3.  Events and Store: Inspect's internal per-sample state is rehydrated (the events appear under a synthesized `prior_run` span in the new `.eval` log).
-4.  Usage (opt-in): with `restore_usage=True`, the sample's token, cost, turn, time, and working-time counters continue from the checkpoint instead of restarting at zero. Off by default. The message limit always continues, since it counts the restored conversation.
+4.  Usage (opt-in): with `restore_usage=True`, the sample's token, cost, turn, time, and working-time counters continue from the checkpoint instead of restarting at zero. Off by default. The message limit always continues, since it counts the restored conversation. Exception: a scoring-phase resume (agent already finished; only scoring re-runs) always restarts the time and working-time counters at zero, since seeding them from an already-spent prior clock could cancel the restore itself.
 
 By default checkpoints are deleted once the eval completes successfully; use `retention="retain"` in the `CheckpointConfig` to preserve them.
 

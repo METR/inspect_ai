@@ -567,7 +567,14 @@ def test_restore_usage_carries_prior_attempt_usage(
     flag-off arm doubles as the guard that the default is unchanged.
     """
     off = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
+    # Pins which checkpoint was restored: this script does one work turn
+    # (bash) plus submit on resume, i.e. 2 generates. Restoring the wrong
+    # (earlier) checkpoint would still finish, just having redone the killed
+    # attempt's own last turn — which the assertions below can't tell apart
+    # from a genuinely restored resume, since it's the same scripted work.
+    assert generates() == 2
     on = _kill_then_resume(tmp_path, monkeypatch, restore_usage=True)
+    assert generates() == 2
 
     assert off.status == "success" and on.status == "success"
     off_sample, on_sample = _only_sample(off), _only_sample(on)
@@ -607,7 +614,7 @@ def test_restore_usage_carries_prior_attempt_usage(
     assert on_waiting >= _MODEL_WAITING_SECONDS * 0.8, (
         f"restored working_time is missing the prior attempt's waiting: "
         f"total {on_sample.total_time} - working {on_sample.working_time} "
-        f"= {on_waiting}, expected at least {_MODEL_WAITING_SECONDS}"
+        f"= {on_waiting}, expected at least {_MODEL_WAITING_SECONDS * 0.8}"
     )
     # the default arm carries none of that prior waiting
     off_waiting = off_sample.total_time - off_sample.working_time
