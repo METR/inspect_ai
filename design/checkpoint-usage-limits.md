@@ -52,6 +52,14 @@ class CheckpointUsage(BaseModel):
     turns: int = 0
     time: float = 0.0
     working_time: float = 0.0
+
+
+class Checkpoint(BaseModel):
+    ...
+    usage: CheckpointUsage | None = None
+    """Sample usage as of this checkpoint. `None` when the checkpoint was
+    written before this field existed, or fired with no live sample scope
+    (see §5)."""
 ```
 
 Captured in `_fire_once()` (`checkpointer_impl.py:544-560`) alongside the existing `turn` / `duration_ms` fields, reading `sample_limits()` and the model-usage contextvars.
@@ -110,15 +118,24 @@ Callers that use these values as *deltas* are unaffected by a constant offset �
 - **Requeue.** `_control/requeue.py` resumes through the same `_resume_if_checkpointed()` path, so it inherits this with no additional work.
 - **In-process `retry_on_error` retries are deliberately unaffected.** That path recurses `task_run_sample` forwarding the *same* `resume_checkpoint` it was called with (`run.py:2456-2465`) — `None` for a sample on its first run. Such a retry therefore restores nothing today: not messages, not the sandbox, and (after this change) not usage either. Extending checkpoint restore to cover in-process retries is a separate question. The invariant this design holds to is narrower and easier to reason about: **a sample's usage is restored exactly when its state is** — both keyed on the same `resume_checkpoint`.
 
-### 5. Risk: import cycle
+### 5. Consequences verified by prototype
 
-`_layout/schemas.py` is loaded early in package init — `inspect_ai.event._checkpoint.CheckpointEvent` imports `Checkpoint` from it, and the `Event` union imports `CheckpointEvent`. A module-level `from inspect_ai.model._model_output import ModelUsage` there may therefore cycle. This is unverified (the local venv is stale on an unrelated `acp.schema` import).
+The three items below were checked by patching `CheckpointUsage` into `schemas.py` on a scratch tree and running the real code; the patch was then reverted.
 
-If it does cycle, define `CheckpointUsage` in a lazily-imported sibling module rather than mirroring `ModelUsage`'s fields into a checkpoint-local model, which would drift. `_layout/__init__.py` already documents this exact hazard for `host_context` and shows the pattern.
+**No import cycle.** `_layout/schemas.py` is loaded early (`CheckpointEvent` imports `Checkpoint`, and the `Event` union imports `CheckpointEvent`), so a module-level `from inspect_ai.model._model_output import ModelUsage` there looked like a cycle risk — `_layout/__init__.py` documents exactly that hazard for `host_context`. It is not one: the import succeeds with `inspect_ai.event`, `inspect_ai.event._checkpoint`, `inspect_ai.util`, `inspect_ai.util._checkpoint`, `_layout.schemas`, `inspect_ai.model`, `inspect_ai.model._model_output`, `inspect_ai.log`, or `_eval.task.run` as the first module imported. `inspect_ai/__init__.py` fixes the order before anything reaches `schemas.py`. No lazy-module workaround is needed.
+
+**This is a log-schema change and needs a coordinated ts-mono update.** `CheckpointEvent` *inherits* from `Checkpoint` (`event/_checkpoint.py:9`) and `from_details()` builds itself with `cls(**details.model_dump())`, so a `usage` field on `Checkpoint` appears on every `CheckpointEvent` in the `.eval` log. Regenerating confirms it: `python src/inspect_ai/_view/schema.py` produces a 55-line diff to `inspect-openapi.json`, adding a `CheckpointUsage` component and a `usage` property on `CheckpointEvent`. The `check-schema-and-types` CI job will fail until `generated.ts` is regenerated, so landing must follow [`.claude/skills/land-ts-mono/SKILL.md`](../.claude/skills/land-ts-mono/SKILL.md).
+
+This is accepted rather than worked around. The alternatives are worse: a `Checkpoint` subclass used only for the file still leaks `usage` onto the event as an untyped extra (both models set `extra="allow"`), which puts data in logs that the schema doesn't describe; and a sidecar usage file breaks the invariant that the checkpoint file's existence *is* the commit point. Surfacing per-checkpoint usage in the log viewer is a genuine benefit besides.
+
+One naming consequence: `CheckpointUsage`'s fields become public schema and TypeScript type names. `token_limit_usage` reads as internal — worth settling on a public-facing name during implementation, while keeping the distinction from `model_usage` explicit.
+
+**Capture must tolerate having no limit trees.** `sample_limits()` raises `RuntimeError: No token limit node found. Is there a running sample?` when no sample scope is active. `tests/checkpoint/test_checkpointer.py` drives the *real* fire path with only `sample_state()` and `transcript()` patched (`_patch_sample_runtime`, line 118) — no limit trees. A bare `sample_limits()` call in `_fire_once()` would therefore break the existing unit tests. Capture goes through a helper that returns `None` when there is no live sample scope, and `usage` stays `CheckpointUsage | None`.
 
 ## Testing
 
-- **`tests/checkpoint/test_schemas.py`** — round-trip `CheckpointUsage`; confirm a `ckpt-NNNNN.json` with no `usage` block parses to zeros.
+- **`tests/checkpoint/test_schemas.py`** — round-trip `CheckpointUsage`; confirm a `ckpt-NNNNN.json` with no `usage` block parses with `usage is None`. (Both verified against the prototype.)
+- **`tests/checkpoint/test_checkpointer.py`** — the existing fire-driving tests must keep passing with no limit trees in scope, and a fire with no live sample scope records `usage=None` rather than raising.
 - **`tests/util/test_limit.py`** — a seeded node reports `prior + new`; a seeded `_TimeLimit` deadlines at `limit − prior` and reports the cumulative value in its `LimitExceededError`; a seed at or over the ceiling raises cleanly rather than cancelling; a `ctl config` override on a seeded time limit re-derives against the seed.
 - **`tests/checkpoint/test_checkpoint_e2e.py`** — the existing `resume_kill_harness.py` already drives kill → resume → kill → resume with a real `SIGKILL` in a child process and a scripted mock model, so token counts are exact. Add: the final log's `model_usage`, `total_time`, and `working_time` span all attempts rather than only the last; and a token limit sized to span attempts trips *after* a resume, which today it never would.
 
@@ -128,3 +145,4 @@ This bug is only observable across a process death, so the e2e harness carries m
 
 - **`docs/checkpointing.qmd`** — the "Recovery" section lists what is restored (agent state, sandbox, events and store); add usage limits as a fourth item, stating that tokens, cost, turns, time, and working time continue from the checkpoint. The "Limitations" section gains the converse: work done between the last checkpoint and the crash is not counted, because it is rolled back — and restore time *is* charged to the time and working limits.
 - **`CHANGELOG.md`** — one line under `## Unreleased`, outcome not mechanism.
+- **Generated artifacts** — `python src/inspect_ai/_view/schema.py` regenerates `inspect-openapi.json`, and `generated.ts` must be regenerated in the ts-mono submodule to match. See §5; land via [`.claude/skills/land-ts-mono/SKILL.md`](../.claude/skills/land-ts-mono/SKILL.md).
