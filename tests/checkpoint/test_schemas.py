@@ -167,3 +167,52 @@ def test_sample_extra_fields_preserved_round_trip() -> None:
     sample = ResticConfig.model_validate(payload)
     dumped = json.loads(sample.model_dump_json())
     assert dumped["future_field"] == "later"
+
+
+def test_usage_round_trips() -> None:
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._checkpoint._layout.schemas import CheckpointUsage
+
+    usage = CheckpointUsage(
+        model_usage={
+            "openai/gpt-5": ModelUsage(
+                input_tokens=10, output_tokens=5, total_tokens=15
+            )
+        },
+        role_usage={},
+        token_limit_usage=ModelUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+        cost=0.25,
+        turns=3,
+        time=42.5,
+        working_time=40.0,
+    )
+
+    assert CheckpointUsage.model_validate_json(usage.model_dump_json()) == usage
+
+
+def test_usage_defaults_to_zero() -> None:
+    from inspect_ai.util._checkpoint._layout.schemas import CheckpointUsage
+
+    usage = CheckpointUsage()
+
+    assert usage.model_usage == {}
+    assert usage.cost == 0.0
+    assert usage.turns == 0
+    assert usage.time == 0.0
+    assert usage.working_time == 0.0
+
+
+def test_checkpoint_without_usage_parses() -> None:
+    checkpoint = Checkpoint.model_validate(
+        {
+            "checkpoint_id": 1,
+            "trigger": "turn",
+            "turn": 2,
+            "created_at": datetime(2026, 8, 19, tzinfo=timezone.utc),
+            "duration_ms": 100,
+            "size_bytes": 10,
+            "host": _info("abc"),
+        }
+    )
+
+    assert checkpoint.usage is None
