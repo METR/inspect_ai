@@ -79,7 +79,9 @@ SIGNAL_ENV = "INSPECT_TEST_RESUME_SIGNAL"
 # Knobs the usage-restoration tests vary per attempt (each attempt is a fresh
 # process, so they travel as environment rather than arguments):
 #
-# - whether the task opts in to continuing its usage counters on resume,
+# - whether the task opts in to continuing its usage counters on resume:
+#   unset omits `restore_usage` from `CheckpointConfig` entirely (the literal
+#   default), "0"/"1" pass it explicitly as False/True,
 # - a sample token limit (unset = no limit), and
 # - seconds of provider waiting time the scripted model reports on the first
 #   attempt (see `_report_model_waiting`).
@@ -257,6 +259,23 @@ def _scripteddecode_provider() -> type[MockLLM]:
 
 @task
 def resume_decode_task() -> Task:
+    restore_usage_env = os.environ.get(RESTORE_USAGE_ENV)
+    checkpoint = (
+        # Unset: never pass `restore_usage`, so the config layer sees the
+        # literal default — the path a caller who never heard of this
+        # option takes.
+        CheckpointConfig(
+            trigger=TurnInterval(every=1),
+            # No sandbox_paths: the default sandbox's $HOME is auto-captured.
+            retention="retain",
+        )
+        if restore_usage_env is None
+        else CheckpointConfig(
+            trigger=TurnInterval(every=1),
+            retention="retain",
+            restore_usage=restore_usage_env == "1",
+        )
+    )
     return Task(
         dataset=[Sample(id="resume", input="decode the layers", target=LAYER1_CONTENT)],
         solver=react(tools=[bash(timeout=60), remember(), crash()]),
@@ -265,12 +284,7 @@ def resume_decode_task() -> Task:
         # which auto-home mode excludes — so the egress stays small without a
         # custom small-home image, and this exercises that exclude for real.
         sandbox="docker",
-        checkpoint=CheckpointConfig(
-            trigger=TurnInterval(every=1),
-            # No sandbox_paths: the default sandbox's $HOME is auto-captured.
-            retention="retain",
-            restore_usage=os.environ.get(RESTORE_USAGE_ENV) == "1",
-        ),
+        checkpoint=checkpoint,
         token_limit=int(limit) if (limit := os.environ.get(TOKEN_LIMIT_ENV)) else None,
     )
 

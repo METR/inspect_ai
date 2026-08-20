@@ -493,21 +493,28 @@ def _kill_then_resume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    restore_usage: bool,
+    restore_usage: bool | None,
     resume_token_limit: int | None = None,
 ) -> EvalLog:
     """One SIGKILLed attempt, then a resume that runs to completion.
+
+    ``restore_usage=None`` leaves the harness's env var unset, so it omits
+    ``restore_usage`` from ``CheckpointConfig`` entirely rather than passing
+    ``False`` — the literal default, as opposed to an explicit opt-out.
 
     ``resume_token_limit`` applies to the resume only — the killed attempt
     always runs unlimited, so a budget can be sized against work already
     measured and still be the resume's first encounter with it.
     """
-    arm = f"{int(restore_usage)}-{resume_token_limit}"
+    arm = f"{restore_usage}-{resume_token_limit}"
     cancel_file = tmp_path / f"cancels-{arm}.txt"
     log_dir = str(tmp_path / f"logs-{arm}")
     monkeypatch.setenv(CANCEL_FILE_ENV, str(cancel_file))
     monkeypatch.setenv(TARGET_ENV, "1")
-    monkeypatch.setenv(RESTORE_USAGE_ENV, "1" if restore_usage else "0")
+    if restore_usage is None:
+        monkeypatch.delenv(RESTORE_USAGE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(RESTORE_USAGE_ENV, "1" if restore_usage else "0")
     monkeypatch.setenv(MODEL_WAITING_ENV, str(_MODEL_WAITING_SECONDS))
     monkeypatch.delenv(TOKEN_LIMIT_ENV, raising=False)
 
@@ -564,9 +571,13 @@ def test_restore_usage_carries_prior_attempt_usage(
     Compared against the same run with the flag off rather than against
     hardcoded counts: the scripted model makes both arms deterministic, so
     the only difference between the two logs is the restored usage. The
-    flag-off arm doubles as the guard that the default is unchanged.
+    flag-off arm doubles as the guard that the default is unchanged — and it
+    leaves ``restore_usage`` unset entirely, since that (not an explicit
+    ``False``) is the path a caller who never mentions the option actually
+    takes. A third arm passes ``False`` explicitly, to prove that path is
+    indistinguishable from leaving it unset.
     """
-    off = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
+    off = _kill_then_resume(tmp_path, monkeypatch, restore_usage=None)
     # Pins which checkpoint was restored: this script does one work turn
     # (bash) plus submit on resume, i.e. 2 generates. Restoring the wrong
     # (earlier) checkpoint would still finish, just having redone the killed
@@ -575,11 +586,17 @@ def test_restore_usage_carries_prior_attempt_usage(
     assert generates() == 2
     on = _kill_then_resume(tmp_path, monkeypatch, restore_usage=True)
     assert generates() == 2
+    off_explicit = _kill_then_resume(tmp_path, monkeypatch, restore_usage=False)
+    assert generates() == 2
 
     assert off.status == "success" and on.status == "success"
+    assert off_explicit.status == "success"
     off_sample, on_sample = _only_sample(off), _only_sample(on)
+    off_explicit_sample = _only_sample(off_explicit)
     assert off_sample.error is None and on_sample.error is None
+    assert off_explicit_sample.error is None
     assert off_sample.limit is None and on_sample.limit is None
+    assert off_explicit_sample.limit is None
 
     # tokens and turns continue from the checkpoint only when opted in
     assert _sample_tokens(on) > _sample_tokens(off)
@@ -620,6 +637,26 @@ def test_restore_usage_carries_prior_attempt_usage(
     off_waiting = off_sample.total_time - off_sample.working_time
     assert off_waiting < _MODEL_WAITING_SECONDS * 0.5, (
         f"a non-restoring resume should show only its own waiting; got {off_waiting}s"
+    )
+
+    # The gap this test exists to close: passing `restore_usage=False`
+    # explicitly must be indistinguishable from never mentioning the option.
+    # A resolver that special-cased an explicit `False` (vs. materializing
+    # the same default when the field is unset) would show up as a mismatch
+    # here even though both arms already passed the "off" checks above.
+    assert _sample_tokens(off_explicit) == _sample_tokens(off)
+    assert off_explicit_sample.turn_count == off_sample.turn_count
+    assert (
+        off_explicit_sample.total_time is not None
+        and off_explicit_sample.working_time is not None
+    )
+    off_explicit_elapsed = _attempt_elapsed(off_explicit_sample)
+    assert off_explicit_sample.total_time == pytest.approx(
+        off_explicit_elapsed, abs=1.0
+    ), (
+        f"total_time {off_explicit_sample.total_time} should match the attempt's "
+        f"own {off_explicit_elapsed}s — an explicit restore_usage=False must not "
+        "carry over prior usage any more than leaving it unset does"
     )
 
 
