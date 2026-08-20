@@ -1981,225 +1981,235 @@ async def task_run_sample(
                         sample_time_limit = create_time_limit(time_limit)
                         sample_turn_limit = create_turn_limit(turn_limit)
                         sample_working_limit = create_working_limit(working_limit)
-                        if prior_usage is not None:
-                            # `_prior_usage` only returns non-None when `resume_checkpoint` is set
-                            assert resume_checkpoint is not None
-                            # time/working enforce via a cancel-scope/poller
-                            # independent of agent activity, so a scoring
-                            # resume (no agent run left) must not seed them
-                            # from prior usage — see `_clock_seed_usage`.
-                            clock_usage = _clock_seed_usage(
-                                resume_checkpoint.attempt, prior_usage
-                            )
-                            seed_limit_usage(
-                                token=state._token_limit,
-                                cost=state._cost_limit,
-                                turn=sample_turn_limit,
-                                time=sample_time_limit,
-                                working=sample_working_limit,
-                                token_usage=prior_usage.token_limit_usage,
-                                cost_usage=prior_usage.cost,
-                                turns=prior_usage.turns,
-                                time_usage=clock_usage.time,
-                                working_usage=clock_usage.working_time,
-                            )
-                            _raise_if_prior_usage_exhausted(
-                                attempt=resume_checkpoint.attempt,
-                                token=state._token_limit,
-                                cost=state._cost_limit,
-                                turn=sample_turn_limit,
-                                time=sample_time_limit,
-                                working=sample_working_limit,
-                            )
-                        with (
-                            sample_limit_override_scope(
-                                override_task_id,
-                                time=sample_time_limit,
-                                token=state._token_limit,
-                                message=state._message_limit,
-                            ),
-                            state._token_limit,
-                            state._cost_limit,
-                            state._message_limit,
-                            sample_turn_limit,
-                            sample_time_limit,
-                            sample_working_limit,
+                        with sample_limit_override_scope(
+                            override_task_id,
+                            time=sample_time_limit,
+                            token=state._token_limit,
+                            message=state._message_limit,
                         ):
+                            if prior_usage is not None:
+                                # `_prior_usage` only returns non-None when `resume_checkpoint` is set
+                                assert resume_checkpoint is not None
+                                # time/working enforce via a cancel-scope/poller
+                                # independent of agent activity, so a scoring
+                                # resume (no agent run left) must not seed them
+                                # from prior usage — see `_clock_seed_usage`.
+                                clock_usage = _clock_seed_usage(
+                                    resume_checkpoint.attempt, prior_usage
+                                )
+                                seed_limit_usage(
+                                    token=state._token_limit,
+                                    cost=state._cost_limit,
+                                    turn=sample_turn_limit,
+                                    time=sample_time_limit,
+                                    working=sample_working_limit,
+                                    token_usage=prior_usage.token_limit_usage,
+                                    cost_usage=prior_usage.cost,
+                                    turns=prior_usage.turns,
+                                    time_usage=clock_usage.time,
+                                    working_usage=clock_usage.working_time,
+                                )
+                                # entered above, so a live override already applies to
+                                # `.limit` here — otherwise a lowered override could pass
+                                # this check and still cancel the scope moments later,
+                                # inside hydrate().
+                                _raise_if_prior_usage_exhausted(
+                                    attempt=resume_checkpoint.attempt,
+                                    token=state._token_limit,
+                                    cost=state._cost_limit,
+                                    turn=sample_turn_limit,
+                                    time=sample_time_limit,
+                                    working=sample_working_limit,
+                                )
+                            with (
+                                state._token_limit,
+                                state._cost_limit,
+                                state._message_limit,
+                                sample_turn_limit,
+                                sample_time_limit,
+                                sample_working_limit,
+                            ):
 
-                            async def run(tg: TaskGroup) -> None:
-                                # access to state, limit, and errors
-                                nonlocal state, limit, error, raise_error
-                                nonlocal cancelled_error, operator_cancelled
+                                async def run(tg: TaskGroup) -> None:
+                                    # access to state, limit, and errors
+                                    nonlocal state, limit, error, raise_error
+                                    nonlocal cancelled_error, operator_cancelled
 
-                                try:
-                                    # start the sample
-                                    active.start(tg)
+                                    try:
+                                        # start the sample
+                                        active.start(tg)
 
-                                    # a task cancel with a graceful sample
-                                    # resolution arrived while this sample was
-                                    # initializing (after it left the queue,
-                                    # before it started — so the control
-                                    # layer's interrupt of in-flight samples
-                                    # missed it) — resolve it now rather than
-                                    # running the plan
-                                    resolution = (
-                                        task_cancel.cancel_type
-                                        if task_cancel is not None
-                                        else None
-                                    )
-                                    if resolution == "score" or resolution == "error":
-                                        # an "error" resolution can slip past
-                                        # the control layer's fails-on-error
-                                        # gate while this sample materializes
-                                        # (it is not yet registered in
-                                        # active_samples()) — downgrade to
-                                        # "score" so the auto-fail the gate
-                                        # exists to prevent doesn't fire
-                                        if (
-                                            resolution == "error"
-                                            and active.fails_on_error
-                                        ):
-                                            resolution = "score"
-                                        active.interrupt(resolution)
-
-                                    # monitor working limit in the background
-                                    monitor_working_limit()
-
-                                    # start background sample event emitter
-                                    start_sample_event_emitter()
-
-                                    # set progress for plan then run it
-                                    async with span("solvers"):
-                                        state = await plan(state, generate)
-
-                                # some 'cancel' exceptions are actually user interrupts or the
-                                # result of monitor_working_limit() - for these exceptions we
-                                # want to intercept them and apply the appropriate control flow
-                                # so they can continue on and be scored.
-                                except anyio.get_cancelled_exc_class() as ex:
-                                    if active.interrupt_action:
-                                        # record event
-                                        transcript()._event(
-                                            SampleLimitEvent(
-                                                type="operator",
-                                                message="Sample completed: interrupted by operator",
-                                            )
+                                        # a task cancel with a graceful sample
+                                        # resolution arrived while this sample was
+                                        # initializing (after it left the queue,
+                                        # before it started — so the control
+                                        # layer's interrupt of in-flight samples
+                                        # missed it) — resolve it now rather than
+                                        # running the plan
+                                        resolution = (
+                                            task_cancel.cancel_type
+                                            if task_cancel is not None
+                                            else None
                                         )
+                                        if (
+                                            resolution == "score"
+                                            or resolution == "error"
+                                        ):
+                                            # an "error" resolution can slip past
+                                            # the control layer's fails-on-error
+                                            # gate while this sample materializes
+                                            # (it is not yet registered in
+                                            # active_samples()) — downgrade to
+                                            # "score" so the auto-fail the gate
+                                            # exists to prevent doesn't fire
+                                            if (
+                                                resolution == "error"
+                                                and active.fails_on_error
+                                            ):
+                                                resolution = "score"
+                                            active.interrupt(resolution)
 
-                                        # handle the action
-                                        match active.interrupt_action:
-                                            case "score":
-                                                # continue to scoring (capture the most recent state)
-                                                state = sample_state() or state
-                                                limit = EvalSampleLimit(
-                                                    type="operator", limit=1
-                                                )
-                                            case "error":
-                                                # default error handling — but
-                                                # with a distinct exception:
-                                                # this terminal is counted in
-                                                # the *errored* bucket, and
-                                                # recording the cancellation
-                                                # exception's repr would make
-                                                # message-based classification
-                                                # (sample show/list, requeue
-                                                # reconciliation, retry
-                                                # seeding) treat it as
-                                                # cancelled
-                                                operator_error = RuntimeError(
-                                                    "Sample errored: interrupted by operator"
-                                                )
-                                                operator_error.__cause__ = ex
-                                                error, raise_error = handle_error(
-                                                    operator_error
-                                                )
-                                            case "cancel":
-                                                # resolve as an external cancel
-                                                # would: transcript preserved,
-                                                # no scoring, and not counted
-                                                # as a genuine error (bypasses
-                                                # handle_error / fail_on_error)
-                                                operator_cancelled = True
-                                                cancelled_error = ex
-                                                error = eval_error(
-                                                    ex, type(ex), ex, ex.__traceback__
-                                                )
-                                                transcript()._event(
-                                                    ErrorEvent(error=error)
-                                                )
+                                        # monitor working limit in the background
+                                        monitor_working_limit()
 
-                                    elif active.limit_exceeded_error:
-                                        err = active.limit_exceeded_error
-                                        # Record a SampleLimitEvent ONLY for a working-time
-                                        # limit. `sample.limit_exceeded()` (which set
-                                        # `limit_exceeded_error` and cancelled us) has two
-                                        # callers: monitor_working_limit(), which records no
-                                        # event of its own — so here we are its sole recorder
-                                        # — and the sandbox service, which surfaces a bridged
-                                        # message/token/cost limit that ALREADY recorded its
-                                        # own event at its detection point (e.g.
-                                        # check_message_limit). Recording the latter here would
-                                        # both duplicate that event and mislabel it "working".
-                                        if err.type == "working":
+                                        # start background sample event emitter
+                                        start_sample_event_emitter()
+
+                                        # set progress for plan then run it
+                                        async with span("solvers"):
+                                            state = await plan(state, generate)
+
+                                    # some 'cancel' exceptions are actually user interrupts or the
+                                    # result of monitor_working_limit() - for these exceptions we
+                                    # want to intercept them and apply the appropriate control flow
+                                    # so they can continue on and be scored.
+                                    except anyio.get_cancelled_exc_class() as ex:
+                                        if active.interrupt_action:
+                                            # record event
                                             transcript()._event(
                                                 SampleLimitEvent(
-                                                    type=err.type,
-                                                    message=err.message,
-                                                    limit=err.limit,
+                                                    type="operator",
+                                                    message="Sample completed: interrupted by operator",
                                                 )
                                             )
 
-                                        # capture most recent state for scoring
-                                        state = sample_state() or state
-                                        limit = EvalSampleLimit(
-                                            type=err.type,
-                                            limit=err.limit
-                                            if err.limit is not None
-                                            else -1,
+                                            # handle the action
+                                            match active.interrupt_action:
+                                                case "score":
+                                                    # continue to scoring (capture the most recent state)
+                                                    state = sample_state() or state
+                                                    limit = EvalSampleLimit(
+                                                        type="operator", limit=1
+                                                    )
+                                                case "error":
+                                                    # default error handling — but
+                                                    # with a distinct exception:
+                                                    # this terminal is counted in
+                                                    # the *errored* bucket, and
+                                                    # recording the cancellation
+                                                    # exception's repr would make
+                                                    # message-based classification
+                                                    # (sample show/list, requeue
+                                                    # reconciliation, retry
+                                                    # seeding) treat it as
+                                                    # cancelled
+                                                    operator_error = RuntimeError(
+                                                        "Sample errored: interrupted by operator"
+                                                    )
+                                                    operator_error.__cause__ = ex
+                                                    error, raise_error = handle_error(
+                                                        operator_error
+                                                    )
+                                                case "cancel":
+                                                    # resolve as an external cancel
+                                                    # would: transcript preserved,
+                                                    # no scoring, and not counted
+                                                    # as a genuine error (bypasses
+                                                    # handle_error / fail_on_error)
+                                                    operator_cancelled = True
+                                                    cancelled_error = ex
+                                                    error = eval_error(
+                                                        ex,
+                                                        type(ex),
+                                                        ex,
+                                                        ex.__traceback__,
+                                                    )
+                                                    transcript()._event(
+                                                        ErrorEvent(error=error)
+                                                    )
+
+                                        elif active.limit_exceeded_error:
+                                            err = active.limit_exceeded_error
+                                            # Record a SampleLimitEvent ONLY for a working-time
+                                            # limit. `sample.limit_exceeded()` (which set
+                                            # `limit_exceeded_error` and cancelled us) has two
+                                            # callers: monitor_working_limit(), which records no
+                                            # event of its own — so here we are its sole recorder
+                                            # — and the sandbox service, which surfaces a bridged
+                                            # message/token/cost limit that ALREADY recorded its
+                                            # own event at its detection point (e.g.
+                                            # check_message_limit). Recording the latter here would
+                                            # both duplicate that event and mislabel it "working".
+                                            if err.type == "working":
+                                                transcript()._event(
+                                                    SampleLimitEvent(
+                                                        type=err.type,
+                                                        message=err.message,
+                                                        limit=err.limit,
+                                                    )
+                                                )
+
+                                            # capture most recent state for scoring
+                                            state = sample_state() or state
+                                            limit = EvalSampleLimit(
+                                                type=err.type,
+                                                limit=err.limit
+                                                if err.limit is not None
+                                                else -1,
+                                            )
+
+                                        # this was not a user interrupt or working time limit so propagate
+                                        else:
+                                            raise
+                                    finally:
+                                        # ensures that monitor_working_limit() and any coroutines
+                                        # created w/ background() are cancelled
+                                        tg.cancel_scope.cancel()
+
+                                try:
+                                    # emit/log sample start
+                                    if logger is not None and not sample_row_started:
+                                        await logger.start_sample(sample_summary)
+
+                                    # only emit the sample start once: not on retries
+                                    if not error_retries:
+                                        await emit_sample_start(
+                                            eval_set_id,
+                                            run_id,
+                                            task_id,
+                                            state.uuid,
+                                            sample_summary,
                                         )
 
-                                    # this was not a user interrupt or working time limit so propagate
-                                    else:
-                                        raise
-                                finally:
-                                    # ensures that monitor_working_limit() and any coroutines
-                                    # created w/ background() are cancelled
-                                    tg.cancel_scope.cancel()
-
-                            try:
-                                # emit/log sample start
-                                if logger is not None and not sample_row_started:
-                                    await logger.start_sample(sample_summary)
-
-                                # only emit the sample start once: not on retries
-                                if not error_retries:
-                                    await emit_sample_start(
+                                    await emit_sample_attempt_start(
                                         eval_set_id,
                                         run_id,
                                         task_id,
                                         state.uuid,
                                         sample_summary,
+                                        attempt=len(error_retries) + 1,
                                     )
+                                    attempt_started = True
 
-                                await emit_sample_attempt_start(
-                                    eval_set_id,
-                                    run_id,
-                                    task_id,
-                                    state.uuid,
-                                    sample_summary,
-                                    attempt=len(error_retries) + 1,
-                                )
-                                attempt_started = True
-
-                                async with anyio.create_task_group() as tg:
-                                    tg.start_soon(run, tg)
-                            except Exception as ex:
-                                raise inner_exception(ex)
-                            finally:
-                                # capture sample limits
-                                record_sample_limit_data(
-                                    len((sample_state() or state).messages)
-                                )
+                                    async with anyio.create_task_group() as tg:
+                                        tg.start_soon(run, tg)
+                                except Exception as ex:
+                                    raise inner_exception(ex)
+                                finally:
+                                    # capture sample limits
+                                    record_sample_limit_data(
+                                        len((sample_state() or state).messages)
+                                    )
 
                     except SandboxTimeoutError as ex:
                         raise RuntimeError(str(ex)) from ex

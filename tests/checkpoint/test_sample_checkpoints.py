@@ -303,7 +303,7 @@ def _usage_seed() -> CheckpointUsage:
     )
 
 
-def test_prior_usage_seeds_are_applied_when_enabled() -> None:
+def test_prior_usage_is_returned_when_enabled() -> None:
     from inspect_ai._eval.task.run import _prior_usage
     from inspect_ai.util._checkpoint._triggers import Manual
     from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
@@ -449,6 +449,69 @@ def test_prior_usage_at_a_ceiling_does_not_raise_for_scoring_resume() -> None:
         _seeded_nodes(_GuardSeed(token_usage=100)),
         attempt="resume_for_scoring",
     )
+
+
+def test_prior_usage_under_a_lowered_live_override_fails_the_resume() -> None:
+    """The guard must see a live override, not just the configured limit.
+
+    `run.py` enters `sample_limit_override_scope` before calling
+    `_raise_if_prior_usage_exhausted`, precisely so a live `ctl config`
+    override that lowers `time_limit` is reflected in `node.limit` here. A
+    seed safe against the configured 60s limit but past a live override of
+    40s must still be caught — otherwise it passes this guard and cancels
+    the scope moments later, inside `hydrate()`.
+    """
+    from inspect_ai.model._model_output import ModelUsage
+    from inspect_ai.util._limit import (
+        LimitExceededError,
+        cost_limit,
+        message_limit,
+        seed_limit_usage,
+        time_limit,
+        token_limit,
+        turn_limit,
+        working_limit,
+    )
+    from inspect_ai.util._limit_overrides import (
+        sample_limit_override_scope,
+        set_sample_limit_override,
+    )
+
+    task_id = "lowered-time-override"
+    time_node = time_limit(60.0)
+    token_node = token_limit(100)
+    nodes = _GuardNodes(
+        token=token_node,
+        cost=cost_limit(1.0),
+        turn=turn_limit(10),
+        time=time_node,
+        working=working_limit(50.0),
+    )
+    seed_limit_usage(
+        token=nodes.token,
+        cost=nodes.cost,
+        turn=nodes.turn,
+        time=nodes.time,
+        working=nodes.working,
+        token_usage=ModelUsage(total_tokens=0),
+        cost_usage=0.0,
+        turns=0,
+        time_usage=50.0,  # under the configured 60s
+        working_usage=0.0,
+    )
+
+    with sample_limit_override_scope(
+        task_id, time=time_node, token=token_node, message=message_limit(None)
+    ):
+        set_sample_limit_override(task_id, "time_limit", 40)
+
+        with pytest.raises(LimitExceededError) as exc_info:
+            _check_exhausted(nodes)
+
+        set_sample_limit_override(task_id, "time_limit", None)
+
+    assert exc_info.value.type == "time"
+    assert exc_info.value.limit == 40
 
 
 @pytest.mark.parametrize("attempt", ["initial", "resume"])
