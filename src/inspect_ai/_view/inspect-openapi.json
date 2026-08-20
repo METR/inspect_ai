@@ -1245,6 +1245,16 @@
             "title": "Turn",
             "type": "integer"
           },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "uuid": {
             "anyOf": [
               {
@@ -1291,6 +1301,17 @@
             ],
             "title": "Max Consecutive Failures"
           },
+          "restore_usage": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restore Usage"
+          },
           "sandbox_paths": {
             "anyOf": [
               {
@@ -1336,6 +1357,60 @@
           }
         },
         "title": "CheckpointSampleConfig",
+        "type": "object"
+      },
+      "CheckpointUsage": {
+        "additionalProperties": true,
+        "description": "Sample usage as of this checkpoint, for continuation on resume.",
+        "properties": {
+          "cost": {
+            "default": 0.0,
+            "title": "Cost",
+            "type": "number"
+          },
+          "model_usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelUsage"
+            },
+            "title": "Model Usage",
+            "type": "object"
+          },
+          "role_usage": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ModelUsage"
+            },
+            "title": "Role Usage",
+            "type": "object"
+          },
+          "time": {
+            "default": 0.0,
+            "title": "Time",
+            "type": "number"
+          },
+          "token_limit_usage": {
+            "$ref": "#/components/schemas/ModelUsage"
+          },
+          "turns": {
+            "default": 0,
+            "title": "Turns",
+            "type": "integer"
+          },
+          "working_time": {
+            "default": 0.0,
+            "title": "Working Time",
+            "type": "number"
+          }
+        },
+        "required": [
+          "model_usage",
+          "role_usage",
+          "token_limit_usage",
+          "cost",
+          "turns",
+          "time",
+          "working_time"
+        ],
+        "title": "CheckpointUsage",
         "type": "object"
       },
       "Citation": {
