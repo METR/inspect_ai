@@ -2009,10 +2009,10 @@ async def task_run_sample(
                                     time_usage=clock_usage.time,
                                     working_usage=clock_usage.working_time,
                                 )
-                                # entered above, so a live override already applies to
-                                # `.limit` here — otherwise a lowered override could pass
-                                # this check and still cancel the scope moments later,
-                                # inside hydrate().
+                                # Runs inside the override scope so `.limit` already
+                                # reflects a live override — otherwise a lowered one
+                                # would pass this check and still cancel the scope
+                                # moments later, inside hydrate().
                                 _raise_if_prior_usage_exhausted(
                                     attempt=resume_checkpoint.attempt,
                                     token=state._token_limit,
