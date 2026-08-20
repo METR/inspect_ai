@@ -80,6 +80,19 @@ inspect eval arc.py --checkpoint             # CRASH!
 inspect eval-retry logs/<log-file-name>.eval # recover
 ```
 
+::: callout-important
+## Re-pass your checkpoint config on retry
+
+The `--checkpoint` configuration is not recorded in the `.eval` log, so `inspect eval-retry` starts from the default. With default configuration the retry still finds and restores your checkpoints — but any options you set are dropped. Pass the same `--checkpoint` you used originally:
+
+``` bash
+inspect eval arc.py --checkpoint=cfg.yaml   # CRASH!
+inspect eval-retry logs/<log-file-name>.eval --checkpoint=cfg.yaml
+```
+
+This matters most for `checkpoints_location` (without it the retry looks in the default location and finds nothing) and for `restore_usage` (without it the resumed sample silently restarts its budget at zero).
+:::
+
 For incomplete samples, Inspect locates the checkpoint directory, restores each sample's most recent committed checkpoint, and continues. The following is restored before the agent runs:
 
 1.  Agent State: Any state values the agent registered (e.g. message or compaction history).
