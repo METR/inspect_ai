@@ -168,17 +168,26 @@ async def sandbox_service(
     # function to handle requests catching errors and logging a warning
     # (catch broadly so an unexpected error reading the request queue can't
     # escape and tear down the polling loop)
-    async def safe_handle_requests() -> None:
+    async def safe_handle_requests(
+        task_group: "anyio.abc.TaskGroup | None" = None,
+    ) -> None:
         try:
-            await service.handle_requests()
+            await service.handle_requests(task_group)
         except Exception as ex:
             logger.warning(f"Error waiting for sandbox rpc: {ex}")
 
     # wait for and process methods
     if handle_requests:
-        while not until():
-            await anyio.sleep(polling_interval)
-            await safe_handle_requests()
+        # One task group for the lifetime of the service. Handlers are started
+        # in it and deliberately NOT awaited here: `_handle_request` performs
+        # the model generation itself, so awaiting each batch meant a long
+        # generation blocked discovery of every request that arrived while it
+        # ran -- a one-word prompt submitted 12s into a 140s generation was not
+        # picked up for 140s. Leaving this block drains anything still running.
+        async with anyio.create_task_group() as tg:
+            while not until():
+                await anyio.sleep(polling_interval)
+                await safe_handle_requests(tg)
         return None
     else:
         return safe_handle_requests
@@ -261,6 +270,11 @@ class SandboxService:
         self._requests_dir: str = ""
         self._responses_dir: str = ""
         self._client_script: str = ""
+        # Request files already dispatched. Required once handlers are no longer
+        # awaited before the next listing: a request file is only unlinked after
+        # its response is written, so an `ls` issued while a request is still
+        # being serviced will list it again.
+        self._in_flight: set[str] = set()
 
     def add_method(self, name: str, method: SandboxServiceMethod) -> None:
         """Add a method to the service.
@@ -296,8 +310,18 @@ class SandboxService:
         if self._started:
             self._started.set()
 
-    async def handle_requests(self) -> None:
-        """Handle all pending service requests."""
+    async def handle_requests(
+        self, task_group: "anyio.abc.TaskGroup | None" = None
+    ) -> None:
+        """Handle pending service requests.
+
+        Args:
+            task_group: If provided, dispatch handlers into this group and return
+              without waiting for them, so the caller can keep polling while
+              requests are still being serviced. If None, wait for this batch
+              before returning (the original behaviour, kept for callers that
+              drive `handle_requests` themselves).
+        """
         # NUL-delimited so hostile filenames (e.g. containing newlines) can't
         # forge extra entries in the listing
         result = await self._exec(
@@ -317,7 +341,14 @@ class SandboxService:
         # process requests
         if result.success:
             request_files = [file for file in result.stdout.split("\0") if file]
+            # skip requests dispatched on an earlier pass but not yet answered
+            request_files = [f for f in request_files if f not in self._in_flight]
             if request_files:
+                if task_group is not None:
+                    for file in request_files:
+                        self._in_flight.add(file)
+                        task_group.start_soon(self._handle_request_tracked, file)
+                    return
                 async with anyio.create_task_group() as tg:
                     for file in request_files:
                         tg.start_soon(
@@ -332,6 +363,18 @@ class SandboxService:
                 f"Error listing requests for sandbox service '{self._name}': "
                 f"{result.stderr}"
             )
+
+    async def _handle_request_tracked(self, request_file: str) -> None:
+        """Service a request, releasing its in-flight slot however it ends."""
+        try:
+            await coro_log_exceptions(
+                logger,
+                "handling sandbox service request",
+                self._handle_request,
+                request_file,
+            )
+        finally:
+            self._in_flight.discard(request_file)
 
     async def _handle_request(self, request_file: str) -> None:
         request_path = PurePosixPath(request_file)
