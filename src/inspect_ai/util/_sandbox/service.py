@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from logging import getLogger
 from pathlib import PurePosixPath
@@ -37,6 +38,12 @@ ERROR = "error"
 RESULT = "result"
 
 POLLING_INTERVAL = 0.1
+
+# Opt-in override for the HOST-side poll interval, honoured in `sandbox_service`.
+# Unset by default, so upstream behaviour and the per-sandbox floor are unchanged
+# for everyone who does not set it. Note this is the host discovering REQUESTS;
+# the in-sandbox client already polls for responses at POLLING_INTERVAL above.
+POLLING_INTERVAL_ENV_VAR = "INSPECT_SANDBOX_SERVICE_POLLING_INTERVAL"
 
 SERVICE_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 FILENAME_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -151,7 +158,31 @@ async def sandbox_service(
 
     # sort out polling interval
     default_polling_interval = sandbox.default_polling_interval()
-    if polling_interval is None:
+    override = os.environ.get(POLLING_INTERVAL_ENV_VAR)
+    if override is not None:
+        # Explicit opt-in escape hatch, bypassing BOTH the caller's value and the
+        # per-sandbox floor. The floor exists because each poll costs a sandbox
+        # exec -- on k8s an API-server GET plus a fresh TLS WebSocket plus a
+        # shell spawn -- so fast polling across many concurrent samples loads the
+        # cluster control plane. That concern does not apply to a single-sample
+        # human baseline, where the floor is pure added latency on every model
+        # call. Note the poll rate is per SERVICE, not per client: N concurrent
+        # agents in one sandbox share one loop and do not multiply it.
+        try:
+            polling_interval = float(override)
+        except ValueError:
+            raise PrerequisiteError(
+                f"{POLLING_INTERVAL_ENV_VAR} must be a number (got {override!r})"
+            ) from None
+        if polling_interval <= 0:
+            raise PrerequisiteError(
+                f"{POLLING_INTERVAL_ENV_VAR} must be > 0 (got {polling_interval})"
+            )
+        logger.warning(
+            f"Sandbox service polling interval overridden to {polling_interval}s "
+            f"via {POLLING_INTERVAL_ENV_VAR} (sandbox default {default_polling_interval}s)"
+        )
+    elif polling_interval is None:
         polling_interval = default_polling_interval
     else:
         # use the default as a limit which you can't go beneath
