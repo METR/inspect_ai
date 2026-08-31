@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Bugfix: Sustained rate limiting no longer pins the adaptive connection limit after a single reduction; it keeps adapting up and down as conditions change.
 - Eval Log: Buffer manifests are no longer written with indentation, which accounted for ~41% of their bytes on every `log_shared` sync.
 - Eval Log: Buffer manifest segment entries are now `TypedDict`s rather than pydantic models, cutting manifest parse time and GC pressure on the sync thread for runs with many segments.
 - Control Channel: `inspect ctl config --max-samples` now works for tasks using adaptive connections — an integer pins sample concurrency, and `clear` resumes adaptive tracking.
