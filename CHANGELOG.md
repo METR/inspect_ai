@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Eval Log: Reading zstd-compressed `.eval` files no longer fails with `AttributeError: ... '_needs_input'` on Python builds that include CPython's gh-156002 zipfile change.
 - Eval Log: Buffer manifests are no longer written with indentation, which accounted for ~41% of their bytes on every `log_shared` sync.
 - Eval Log: Buffer manifest segment entries are now `TypedDict`s rather than pydantic models, cutting manifest parse time and GC pressure on the sync thread for runs with many segments.
 
