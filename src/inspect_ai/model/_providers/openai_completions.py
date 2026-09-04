@@ -1,6 +1,7 @@
 from logging import getLogger
 from typing import TYPE_CHECKING, Any, Literal
 
+import httpx2
 from openai import (
     APIError,
     AsyncAzureOpenAI,
@@ -32,6 +33,7 @@ from .._openai import (
     openai_handle_bad_request,
     openai_handle_stream_error,
     openai_media_filter,
+    openai_timeout_arg,
 )
 from .util.hooks import HttpxHooks
 
@@ -55,6 +57,7 @@ async def generate_completions(
     openai_api: "OpenAIAPI",
     batcher: OpenAIBatcher[ChatCompletion] | None,
     streaming: bool = False,
+    nonstreaming_timeout: httpx2.Timeout | None = None,
 ) -> ModelOutput | tuple[ModelOutput | Exception, ModelCall]:
     # batching and streaming are mutually exclusive
     streaming = streaming and batcher is None
@@ -116,7 +119,9 @@ async def generate_completions(
             async with await client.chat.completions.create(**request) as stream:
                 completion = await openai_chat_completion_stream_final(stream)
         else:
-            completion = await client.chat.completions.create(**request)
+            completion = await client.chat.completions.create(
+                **request, **openai_timeout_arg(nonstreaming_timeout)
+            )
         # completion is `CharCompletion | Any`. The lazy type inference engine
         # threw up its hands because of the `**request`.
         assert isinstance(completion, ChatCompletion)

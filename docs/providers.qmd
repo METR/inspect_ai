@@ -126,6 +126,8 @@ inspect eval math.py --model openai/o4-mini \
     -M service_tier=flex -M client_timeout=1200
 ```
 
+Setting `client_timeout` explicitly also turns off the automatic sizing of the request budget from `max_tokens` described in [HTTP Client Settings](models-concurrency.qmd#http-client-settings).
+
 ### OpenAI on Azure {#openai-on-azure}
 
 The `openai` provider supports OpenAI models deployed on the [Azure AI Foundry](https://ai.azure.com/). To use OpenAI models on Azure AI, specify the following environment variables:

@@ -71,12 +71,16 @@ except ImportError:  # pragma: no cover - httpx moved its internals
 
 DEFAULT_CONNECT_TIMEOUT = 60.0
 DEFAULT_REQUEST_TIMEOUT = 600.0
+DEFAULT_OUTPUT_TOKENS_PER_SECOND = 20.0
+DEFAULT_TIMEOUT_MARGIN = 300.0
 DEFAULT_POOL_CONNECTIONS = 1000
 DEFAULT_KEEPALIVE_EXPIRY = 5.0
 DEFAULT_CONNECT_RETRIES = 1
 
 CONNECT_TIMEOUT_ENV = "INSPECT_HTTP_CONNECT_TIMEOUT"
 REQUEST_TIMEOUT_ENV = "INSPECT_HTTP_REQUEST_TIMEOUT"
+OUTPUT_TOKENS_PER_SECOND_ENV = "INSPECT_HTTP_OUTPUT_TOKENS_PER_SECOND"
+TIMEOUT_MARGIN_ENV = "INSPECT_HTTP_TIMEOUT_MARGIN"
 POOL_CONNECTIONS_ENV = "INSPECT_HTTP_POOL_CONNECTIONS"
 POOL_KEEPALIVE_CONNECTIONS_ENV = "INSPECT_HTTP_POOL_KEEPALIVE_CONNECTIONS"
 KEEPALIVE_EXPIRY_ENV = "INSPECT_HTTP_KEEPALIVE_EXPIRY"
@@ -143,6 +147,60 @@ def default_timeout(
     return httpx.Timeout(
         timeout=_env_float(REQUEST_TIMEOUT_ENV, request_timeout),
         connect=connect_timeout(),
+    )
+
+
+def max_tokens_timeout(
+    max_tokens: int | None, base: httpx.Timeout | float | None
+) -> httpx.Timeout | None:
+    """A read budget large enough to generate `max_tokens`, or None to keep `base`.
+
+    A non-streamed generation delivers its whole body at the end, so the read
+    deadline has to cover the entire generation. `base` — 600s by default —
+    is set for a request of ordinary length, and a reasoning-heavy call with a
+    large `max_tokens` can legitimately outrun it, failing by construction
+    after the provider has already generated (and billed) the completion.
+
+    The budget is `margin + max_tokens / tokens_per_second`, with a
+    deliberately conservative rate: `max_tokens` is a ceiling rather than a
+    prediction, so this is a bound on the longest legitimate request, not an
+    estimate of a typical one. Returns None whenever `base` already covers it,
+    which makes this a floor-raise only — a request that fits inside today's
+    budget is left exactly as it is. A rate of 0 disables the derivation.
+
+    Only `read` moves. httpx expands a bare float across all four phases, so
+    handing an SDK the derived number alone would apply it to `connect` too,
+    and `_floor_connect_timeout` only ever raises a connect deadline — a
+    black-holed SYN would then hang for the whole derived budget.
+
+    Callers must apply the result to non-streaming requests only. On a
+    streaming request the same budget is a *per-chunk* idle deadline rather
+    than a total, where a `max_tokens`-derived value is both meaningless and a
+    silent weakening of stream stall detection (see
+    `design/stream-idle-timeout.md`).
+    """
+    if max_tokens is None or max_tokens <= 0:
+        return None
+
+    # 0 is the kill switch, not a division by zero.
+    rate = _env_float(OUTPUT_TOKENS_PER_SECOND_ENV, DEFAULT_OUTPUT_TOKENS_PER_SECOND)
+    if rate <= 0:
+        return None
+
+    derived = _env_float(TIMEOUT_MARGIN_ENV, DEFAULT_TIMEOUT_MARGIN) + max_tokens / rate
+
+    # A base of None is "no deadline at all", which no derived value improves on.
+    if base is None:
+        return None
+    base_timeout = base if isinstance(base, httpx.Timeout) else httpx.Timeout(base)
+    if base_timeout.read is None or derived <= base_timeout.read:
+        return None
+
+    return httpx.Timeout(
+        connect=base_timeout.connect,
+        read=derived,
+        write=base_timeout.write,
+        pool=base_timeout.pool,
     )
 
 

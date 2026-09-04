@@ -1,5 +1,6 @@
 ## Unreleased
 
+- OpenAI: Long non-streaming generations with a large `max_tokens` no longer time out at 10 minutes; the request budget now scales with `max_tokens`.
 - Inspect View: Requests for unreadable log headers now return 403 instead of 500.
 - Eval Log: Reading zstd-compressed `.eval` files no longer fails with `AttributeError: ... '_needs_input'` on Python builds that include CPython's gh-156002 zipfile change.
 - Eval Log: Buffer manifests are no longer written with indentation, which accounted for ~41% of their bytes on every `log_shared` sync.
