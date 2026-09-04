@@ -127,15 +127,21 @@ is `INSPECT_HTTP_REQUEST_TIMEOUT` and 60 is `INSPECT_HTTP_CONNECT_TIMEOUT`.
 `self.client_timeout` is set from the `client_timeout` model arg, or 900 when
 `service_tier == "flex"`.
 
-**The three non-streaming call sites**, all built the same way — one
-`request` dict, snapshotted into the `ModelCall`, then a branch on
-batcher / streaming / plain:
+**The non-streaming call sites**, all built the same way — one `request`
+dict, snapshotted into the `ModelCall`, then a branch on batcher / streaming
+/ plain:
 
 | site | reached from |
 |---|---|
-| `openai_completions.py:119` `client.chat.completions.create(**request)` | `openai/` chat completions |
-| `openai_responses.py:205` `client.responses.create(**request)` | `openai/` responses **and** `openai-api/` compatible providers, which call `generate_responses` directly |
-| `openai_compatible.py:368` `self.client.chat.completions.create(**request)` | `openai-api/` compatible providers (vLLM, SGLang, Together, OpenRouter, Ollama, …) |
+| `openai_completions.py` `client.chat.completions.create(**request)` | `openai/` chat completions |
+| `openai_responses.py` `client.responses.create(**request)` | `openai/` responses **and** `openai-api/` compatible providers, which call `generate_responses` directly |
+| `openai_compatible.py` `_generate_completion` | `openai-api/` compatible providers (vLLM, SGLang, Ollama, …) |
+| `together.py` `_generate_completion` | Together — overrides the base method to route batch requests, so it does **not** inherit the base site |
+| `openai_compatible_completions.py` `client.completions.create(...)` | the legacy `/v1/completions` path, which bypasses `_generate_completion` and never streams |
+
+OpenRouter also overrides `_generate_completion` but delegates to `super()`,
+so it is covered by the base site. SageMaker's same-named override has a
+different signature and its own HTTP stack, and is out of scope.
 
 `OpenAICompatibleAPI` is **not** a subclass of `OpenAIAPI` — it derives from
 `ModelAPI` and carries its own completions call site and its own
@@ -248,7 +254,7 @@ Deriving from `ModelInfo.output_tokens` is a reasonable follow-up once the
 | batch (`batcher is not None`) | never | no long-lived request to bound |
 | responses `background=True` | inert | `create` returns immediately; the wait is in `wait_for_background_response` polling. Not special-cased — it simply never matters. |
 
-All three call sites are covered. The `openai-api/` compatible providers
+All of these call sites are covered. The `openai-api/` compatible providers
 are included deliberately: same non-streaming default, same exposure, same
 one-line hazard, and their `client_timeout` precedence is simpler (no flex
 bump to distinguish from a user-set value).
@@ -326,6 +332,12 @@ change, so it must be documented alongside the `-M max_retries=0` lever.
 itself is a separate question worth raising — Inspect's retry loop is
 strictly better instrumented.)
 
+**No upper clamp.** The derived budget scales without bound with
+`max_tokens` (128k → ~6700s). A cap was considered and rejected: it would
+reintroduce, for the largest requests, exactly the fail-by-construction
+behaviour this change exists to remove. The amplification above is the reason
+to prefer owning retries over capping the deadline.
+
 **Interaction with `GenerateConfig.timeout`.** A retry budget below the
 derived deadline stops retries mid-request. Both are unset by default, so
 this only affects users who set `--timeout`, and the resulting behaviour
@@ -384,7 +396,9 @@ both carry it:
 8. **The helper itself**: formula, floor comparison, a base with no deadline
    left alone, env overrides, junk env values falling back, zero rate.
 
-All three call sites get 1–3 at minimum.
+All three shared call sites get 1–3 at minimum. The Together and
+`/v1/completions` overrides still need their own coverage — they were found
+by review after the tests above were written.
 
 ## Alternatives considered
 

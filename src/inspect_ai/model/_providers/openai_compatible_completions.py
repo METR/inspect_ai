@@ -31,6 +31,7 @@ from inspect_ai.model._model_output import (
     as_stop_reason,
 )
 from inspect_ai.model._openai import (
+    openai_timeout_arg,
     parse_completion_logprobs,
     parse_vllm_prompt_logprobs_raw,
 )
@@ -147,7 +148,11 @@ async def generate_raw_completions(
     model_call = set_active_model_event_call(request_kwargs)
 
     try:
-        response = await api.client.completions.create(**request_kwargs)
+        # /v1/completions never streams here, so the derived budget always
+        # applies (kept out of request_kwargs, which is the logged ModelCall)
+        response = await api.client.completions.create(
+            **request_kwargs, **openai_timeout_arg(api._nonstreaming_timeout(config))
+        )
     except NotFoundError:
         model_call.set_error(
             as_error_response("NotFoundError: /v1/completions not supported"),
