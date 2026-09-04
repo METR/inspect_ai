@@ -3,6 +3,7 @@ from logging import getLogger
 from typing import Any, Literal
 
 import anyio
+import httpx2
 from openai import (
     APIStatusError,
     AsyncAzureOpenAI,
@@ -21,7 +22,10 @@ from openai.types.responses import Response
 from openai.types.shared_params.reasoning import Reasoning
 from typing_extensions import override
 
-from inspect_ai._util.http_defaults_httpx2 import default_client_kwargs
+from inspect_ai._util.http_defaults_httpx2 import (
+    default_client_kwargs,
+    max_tokens_timeout,
+)
 from inspect_ai._util.logger import warn_once
 from inspect_ai.model._generate_config import has_image_output, normalized_batch_config
 from inspect_ai.model._providers.openai_completions import (
@@ -222,6 +226,9 @@ class OpenAIAPI(ModelAPI):
         self.client_timeout = client_timeout or (
             900.0 if self.service_tier == "flex" else None
         )
+        # a user-named budget is a ceiling and suppresses the derived one; the
+        # flex bump above is ours, so it only raises the floor to derive from
+        self.explicit_client_timeout = client_timeout is not None
 
         # resolve the AWS region for Bedrock (also pop the aws_region model arg
         # so it isn't double-passed to AsyncBedrockOpenAI via **model_args)
@@ -543,6 +550,7 @@ class OpenAIAPI(ModelAPI):
                 config = config.model_copy(update={"reasoning_summary": "none"})
 
         streaming = self._resolve_streaming(use_responses)
+        timeout = self._nonstreaming_timeout(config)
 
         async def generate_once(
             streaming: bool,
@@ -567,6 +575,7 @@ class OpenAIAPI(ModelAPI):
                     model_info=self,
                     batcher=self._responses_batcher,
                     streaming=streaming,
+                    nonstreaming_timeout=timeout,
                 )
                 if use_responses
                 else generate_completions(
@@ -583,6 +592,7 @@ class OpenAIAPI(ModelAPI):
                     openai_api=self,
                     batcher=self._completions_batcher,
                     streaming=streaming,
+                    nonstreaming_timeout=timeout,
                 )
             )
 
@@ -608,6 +618,19 @@ class OpenAIAPI(ModelAPI):
             response = await generate_once(False)
 
         return response
+
+    def _nonstreaming_timeout(self, config: GenerateConfig) -> httpx2.Timeout | None:
+        """Read budget for this call if it goes out non-streamed, else None.
+
+        Computed here rather than at the call site because this is the only
+        object that knows whether `client_timeout` was named by the user (a
+        ceiling to honour) or bumped by us for `service_tier=flex` (a floor to
+        derive from). Applying it is the call site's job, and only on its
+        non-streaming branch.
+        """
+        if self.explicit_client_timeout:
+            return None
+        return max_tokens_timeout(config.max_tokens, self.client.timeout)
 
     def _resolve_streaming(self, use_responses: bool) -> bool:
         """Whether to stream this generate call.

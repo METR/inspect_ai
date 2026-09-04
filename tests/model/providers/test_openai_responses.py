@@ -318,6 +318,8 @@ async def _generate_responses_with_mock(
     config: GenerateConfig = GenerateConfig(),
     background: bool | None = None,
     capture_request: dict | None = None,
+    streaming: bool = False,
+    nonstreaming_timeout=None,
 ):
     """Run generate_responses() against a mocked client returning mock_response."""
     from unittest.mock import AsyncMock, MagicMock
@@ -357,6 +359,8 @@ async def _generate_responses_with_mock(
         synthesize_phase=False,
         model_info=model_info,
         batcher=None,
+        streaming=streaming,
+        nonstreaming_timeout=nonstreaming_timeout,
     )
     if capture_request is not None:
         capture_request.update(client.responses.create.call_args.kwargs)
@@ -2588,3 +2592,62 @@ async def test_responses_streaming_converts_error_event_safeguard_block() -> Non
     assert output.choices[0].stop_reason == "content_filter"
     assert "blocked" in output.completion
     assert model_call.error is True
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["nonstreaming", "streaming"])
+async def test_responses_timeout_reaches_only_the_nonstreaming_branch(
+    streaming: bool,
+) -> None:
+    """The derived read budget is a keyword on the plain create() call only.
+
+    Both branches call `create(**request)`, so a timeout merged into the
+    request dict would also become the streaming path's per-chunk idle budget
+    and would be logged as a wire parameter it isn't.
+    """
+    from typing import Any
+
+    import httpx2
+    from openai.types.responses import Response, ResponseCompletedEvent
+
+    completed = Response.model_construct(
+        id="resp_test",
+        created_at=0.0,
+        model="gpt-4o",
+        object="response",
+        output=[],
+        tools=[],
+        status="completed",
+    )
+
+    class _FakeEventStream:
+        async def __aenter__(self) -> "_FakeEventStream":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                yield ResponseCompletedEvent.model_construct(
+                    type="response.completed", sequence_number=0, response=completed
+                )
+
+            return gen()
+
+    derived = httpx2.Timeout(1900.0, connect=60.0)
+    request: dict = {}
+    _, model_call = await _generate_responses_with_mock(
+        _FakeEventStream() if streaming else completed,
+        config=GenerateConfig(max_tokens=32_000),
+        capture_request=request,
+        streaming=streaming,
+        nonstreaming_timeout=derived,
+    )
+
+    if streaming:
+        assert request["stream"] is True
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] is derived
+    # never a wire parameter, on either branch
+    assert "timeout" not in model_call.request

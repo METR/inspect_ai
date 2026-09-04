@@ -589,3 +589,135 @@ async def test_chat_completions_streaming_converts_mid_stream_safeguard_block() 
     assert output.choices[0].stop_reason == "content_filter"
     assert "blocked" in output.completion
     assert model_call.error is True
+
+
+def test_openai_nonstreaming_timeout_derived_from_max_tokens() -> None:
+    """A large max_tokens raises the read budget; small or explicit ones don't.
+
+    A non-streamed generation delivers its body only when it finishes, so the
+    600s read deadline has to cover the whole thing — a reasoning-heavy call
+    with a large max_tokens fails by construction after the provider has
+    already generated (and billed) the completion.
+    """
+    from typing import Any
+
+    from inspect_ai.model._providers.openai import OpenAIAPI
+
+    def api(**model_args: Any) -> OpenAIAPI:
+        return OpenAIAPI(model_name="openai/gpt-4o", api_key="test-key", **model_args)
+
+    def read(model: OpenAIAPI, max_tokens: int | None) -> float | None:
+        derived = model._nonstreaming_timeout(GenerateConfig(max_tokens=max_tokens))
+        return None if derived is None else derived.read
+
+    # margin 300 + max_tokens / 20, once it clears the 600s default
+    assert read(api(), 32_000) == pytest.approx(1900.0)
+    # a floor-raise only: these already fit, so nothing changes
+    assert read(api(), 4_096) is None
+    assert read(api(), None) is None
+    # an explicit client_timeout is the user naming their ceiling
+    assert read(api(client_timeout=1200), 32_000) is None
+    # the flex bump is ours, so it raises the floor rather than suppressing
+    assert read(api(service_tier="flex"), 8_192) is None
+    assert read(api(service_tier="flex"), 16_384) == pytest.approx(1119.2)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["nonstreaming", "streaming"])
+async def test_chat_completions_timeout_reaches_only_the_nonstreaming_branch(
+    streaming: bool,
+) -> None:
+    """The derived timeout is a keyword on the plain create() call, nothing more.
+
+    Both branches call `create(**request)`, so a timeout merged into the
+    request dict would also become the streaming path's per-chunk idle
+    budget — converting a stall signal into a max_tokens-derived one — and
+    would be logged in the ModelCall as a wire parameter it isn't.
+    """
+    from typing import Any
+    from unittest.mock import AsyncMock, MagicMock
+
+    import httpx2
+    from openai._types import NOT_GIVEN
+    from openai.types.chat import ChatCompletion, ChatCompletionChunk
+
+    from inspect_ai.model._providers.openai_completions import generate_completions
+    from inspect_ai.model._providers.util.hooks import HttpxHooks
+
+    message = dict(role="assistant", content="hello")
+
+    class _FakeChunkStream:
+        async def __aenter__(self) -> "_FakeChunkStream":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                yield ChatCompletionChunk.model_validate(
+                    dict(
+                        id="c1",
+                        object="chat.completion.chunk",
+                        created=0,
+                        model="gpt-4o",
+                        choices=[
+                            dict(index=0, delta=message, finish_reason="stop"),
+                        ],
+                    )
+                )
+
+            return gen()
+
+    completion = ChatCompletion.model_validate(
+        dict(
+            id="c1",
+            object="chat.completion",
+            created=0,
+            model="gpt-4o",
+            choices=[dict(index=0, message=message, finish_reason="stop")],
+        )
+    )
+
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(
+        return_value=_FakeChunkStream() if streaming else completion
+    )
+
+    http_hooks = MagicMock(spec=HttpxHooks)
+    http_hooks.start_request = MagicMock(return_value="req_1")
+    http_hooks.end_request = MagicMock(return_value=None)
+
+    openai_api = MagicMock()
+    openai_api.api_model_name.return_value = "gpt-4o"
+    openai_api.service_tier = None
+    openai_api.is_o_series.return_value = False
+    openai_api.is_gpt.return_value = True
+    openai_api.is_gpt_5.return_value = False
+
+    derived = httpx2.Timeout(1900.0, connect=60.0)
+    result = await generate_completions(
+        client=client,
+        http_hooks=http_hooks,
+        model_name="gpt-4o",
+        input=[ChatMessageUser(content="hi")],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=32_000),
+        prompt_cache_key=NOT_GIVEN,
+        prompt_cache_retention=NOT_GIVEN,
+        safety_identifier=NOT_GIVEN,
+        openai_api=openai_api,
+        batcher=None,
+        streaming=streaming,
+        nonstreaming_timeout=derived,
+    )
+
+    assert isinstance(result, tuple)
+    _, model_call = result
+    kwargs = client.chat.completions.create.call_args.kwargs
+    if streaming:
+        assert "timeout" not in kwargs
+    else:
+        assert kwargs["timeout"] is derived
+    # never a wire parameter, on either branch
+    assert "timeout" not in model_call.request

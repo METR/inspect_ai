@@ -23,9 +23,11 @@ from inspect_ai._util.http_defaults import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_POOL_CONNECTIONS,
     KEEPALIVE_EXPIRY_ENV,
+    OUTPUT_TOKENS_PER_SECOND_ENV,
     POOL_CONNECTIONS_ENV,
     POOL_KEEPALIVE_CONNECTIONS_ENV,
     REQUEST_TIMEOUT_ENV,
+    TIMEOUT_MARGIN_ENV,
 )
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._providers.anthropic import AnthropicAPI
@@ -216,6 +218,110 @@ def test_an_unusable_env_value_keeps_the_caller_default(
     monkeypatch.setenv(POOL_CONNECTIONS_ENV, value)
     assert defaults.default_timeout(request_timeout=60.0).read == 60.0
     assert defaults.default_limits(max_connections=None).max_connections is None
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+@pytest.mark.parametrize(
+    "max_tokens,expected_read",
+    [
+        # margin 300 + max_tokens / 20, once it clears the 600s base
+        (32_000, 1900.0),
+        (16_384, 1119.2),
+        (8_192, 709.6),
+    ],
+    ids=["32k", "16k", "8k"],
+)
+def test_a_large_max_tokens_raises_only_the_read_budget(
+    defaults: Any, flavor: Any, max_tokens: int, expected_read: float
+) -> None:
+    base = flavor.Timeout(600.0, connect=60.0)
+    derived = defaults.max_tokens_timeout(max_tokens, base)
+    assert derived is not None
+    assert derived.read == pytest.approx(expected_read)
+    # only `read` moves: a bare float would expand across every phase, and
+    # _floor_connect_timeout only ever raises a connect deadline, so a
+    # black-holed SYN would hang for the whole derived budget.
+    assert derived.connect == base.connect
+    assert derived.write == base.write
+    assert derived.pool == base.pool
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+@pytest.mark.parametrize(
+    "max_tokens",
+    [None, 0, 4_096, 6_000],
+    ids=["unset", "zero", "small", "just-under"],
+)
+def test_a_budget_that_already_covers_the_work_is_left_alone(
+    defaults: Any, flavor: Any, max_tokens: int | None
+) -> None:
+    # A floor-raise only: anything that fits inside today's budget must come
+    # back unchanged, so those requests stay byte-identical to today.
+    assert (
+        defaults.max_tokens_timeout(max_tokens, flavor.Timeout(600.0, connect=60.0))
+        is None
+    )
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+def test_a_higher_base_budget_raises_the_bar_to_derive_over(
+    defaults: Any, flavor: Any
+) -> None:
+    # service_tier=flex bumps the client to 900s; 16k derives to 1119 (over it)
+    # but 8k derives to 710 (under), so only the former still applies.
+    flex = flavor.Timeout(900.0, connect=60.0)
+    assert defaults.max_tokens_timeout(8_192, flex) is None
+    derived = defaults.max_tokens_timeout(16_384, flex)
+    assert derived is not None and derived.read == pytest.approx(1119.2)
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+def test_a_base_with_no_deadline_is_never_narrowed(defaults: Any, flavor: Any) -> None:
+    # No derived value improves on "wait indefinitely", and imposing one would
+    # be the first deadline this request ever had.
+    assert defaults.max_tokens_timeout(32_000, None) is None
+    assert (
+        defaults.max_tokens_timeout(32_000, flavor.Timeout(None, connect=60.0)) is None
+    )
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+@pytest.mark.parametrize(
+    "rate,margin,expected_read",
+    [
+        ("10", None, 3500.0),
+        (None, "60", 1660.0),
+        ("garbage", None, 1900.0),
+        ("-1", None, 1900.0),
+    ],
+    ids=["rate", "margin", "junk-rate", "negative-rate"],
+)
+def test_the_formula_is_tunable_by_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    defaults: Any,
+    flavor: Any,
+    rate: str | None,
+    margin: str | None,
+    expected_read: float,
+) -> None:
+    if rate is not None:
+        monkeypatch.setenv(OUTPUT_TOKENS_PER_SECOND_ENV, rate)
+    if margin is not None:
+        monkeypatch.setenv(TIMEOUT_MARGIN_ENV, margin)
+    derived = defaults.max_tokens_timeout(32_000, flavor.Timeout(600.0, connect=60.0))
+    assert derived is not None
+    assert derived.read == pytest.approx(expected_read)
+
+
+@pytest.mark.parametrize("defaults,flavor", FLAVORS)
+def test_a_zero_rate_disables_the_derivation(
+    monkeypatch: pytest.MonkeyPatch, defaults: Any, flavor: Any
+) -> None:
+    # The kill switch, and the reason a zero rate is not a division by zero.
+    monkeypatch.setenv(OUTPUT_TOKENS_PER_SECOND_ENV, "0")
+    assert (
+        defaults.max_tokens_timeout(32_000, flavor.Timeout(600.0, connect=60.0)) is None
+    )
 
 
 @pytest.mark.parametrize("defaults", DEFAULT_MODULES)

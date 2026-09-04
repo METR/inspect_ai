@@ -1038,3 +1038,99 @@ def test_openrouter_resolve_stream_declines_reasoning() -> None:
         assert thinking.resolve_stream(GenerateConfig()) is False
         # reasoning explicitly disabled wins over effort/tokens
         assert openrouter_api(reasoning_enabled=False).resolve_stream(effort) is True
+
+
+def test_compatible_nonstreaming_timeout_derived_from_max_tokens() -> None:
+    """Compat providers are non-streaming by default and share the exposure.
+
+    `client_timeout` here is only ever user-set (there is no flex bump), so
+    naming it suppresses the derived budget outright.
+    """
+
+    def api(**model_args: Any) -> OpenAICompatibleAPI:
+        return OpenAICompatibleAPI(
+            model_name="openai-api/openai/gpt-5",
+            api_key="test",
+            base_url="https://example.com",
+            **model_args,
+        )
+
+    def read(model: OpenAICompatibleAPI, max_tokens: int | None) -> float | None:
+        derived = model._nonstreaming_timeout(GenerateConfig(max_tokens=max_tokens))
+        return None if derived is None else derived.read
+
+    assert read(api(), 32_000) == pytest.approx(1900.0)
+    assert read(api(), 4_096) is None
+    assert read(api(), None) is None
+    assert read(api(client_timeout=1200), 32_000) is None
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstreaming", "streaming"])
+async def test_compatible_timeout_reaches_only_the_nonstreaming_branch(
+    stream: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same hazard as the native provider: keyword on the plain create() only."""
+    from unittest.mock import AsyncMock
+
+    from openai.types.chat import ChatCompletion
+
+    message = dict(role="assistant", content="hello")
+
+    class _FakeChunkStream:
+        async def __aenter__(self) -> "_FakeChunkStream":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def __aiter__(self) -> Any:
+            async def gen() -> Any:
+                yield ChatCompletionChunk.model_validate(
+                    dict(
+                        id="c1",
+                        object="chat.completion.chunk",
+                        created=0,
+                        model="gpt-5",
+                        choices=[dict(index=0, delta=message, finish_reason="stop")],
+                    )
+                )
+
+            return gen()
+
+    completion = ChatCompletion.model_validate(
+        dict(
+            id="c1",
+            object="chat.completion",
+            created=0,
+            model="gpt-5",
+            choices=[dict(index=0, message=message, finish_reason="stop")],
+        )
+    )
+
+    api = OpenAICompatibleAPI(
+        model_name="openai-api/openai/gpt-5",
+        api_key="test",
+        base_url="https://example.com",
+        stream=stream,
+    )
+    # stub only create(), so the real client's 600s budget is what the
+    # derivation reads
+    create = AsyncMock(return_value=_FakeChunkStream() if stream else completion)
+    monkeypatch.setattr(api.client.chat.completions, "create", create)
+
+    result = await api.generate(
+        input=[ChatMessageUser(content="hi")],
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(max_tokens=32_000),
+    )
+    assert isinstance(result, tuple)
+    _, model_call = result
+
+    kwargs = create.call_args.kwargs
+    if stream:
+        assert kwargs["stream"] is True
+        assert "timeout" not in kwargs
+    else:
+        assert kwargs["timeout"].read == pytest.approx(1900.0)
+    assert "timeout" not in model_call.request

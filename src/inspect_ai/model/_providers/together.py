@@ -33,6 +33,7 @@ from .._openai import (
     chat_message_assistant_from_openai,
     openai_chat_completion_stream_final,
     openai_stop_details,
+    openai_timeout_arg,
 )
 from ._together_batch import TogetherBatcher
 from .openai_compatible import OpenAICompatibleAPI
@@ -216,7 +217,10 @@ class TogetherAIAPI(OpenAICompatibleAPI):
             async with await self.client.chat.completions.create(**request) as stream:
                 return await openai_chat_completion_stream_final(stream)
         return cast(
-            ChatCompletion, await self.client.chat.completions.create(**request)
+            ChatCompletion,
+            await self.client.chat.completions.create(
+                **request, **openai_timeout_arg(self._nonstreaming_timeout(config))
+            ),
         )
 
     def _resolve_batcher(self, config: GenerateConfig) -> None:

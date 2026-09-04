@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, TypeAlias, cast
 
 if TYPE_CHECKING:
+    import httpx2
+
     from inspect_ai.model._model import RetryDecision
 
 from openai import (
@@ -1252,6 +1254,18 @@ def parse_completion_logprobs(sdk_logprobs: Any) -> Logprobs | None:
 
 def openai_should_retry(ex: BaseException) -> bool:
     return openai_classify_retry(ex) is not None
+
+
+def openai_timeout_arg(timeout: "httpx2.Timeout | None") -> dict[str, Any]:
+    """`timeout=` kwargs for an SDK create() call, empty when its default stands.
+
+    Returned as kwargs rather than a value so a caller can splat it into the
+    non-streaming branch alone. It must never be merged into the shared
+    `request` dict: both branches call `create(**request)`, so a timeout there
+    would also become the streaming path's per-chunk idle budget, and would be
+    logged in the ModelCall as a wire parameter it isn't.
+    """
+    return {} if timeout is None else {"timeout": timeout}
 
 
 def openai_classify_retry(ex: BaseException) -> "RetryDecision | None":

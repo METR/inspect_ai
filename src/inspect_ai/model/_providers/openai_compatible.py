@@ -26,6 +26,7 @@ from inspect_ai.model._openai import (
     chat_choices_from_openai,
     openai_chat_completion_stream_final,
     openai_classify_retry,
+    openai_timeout_arg,
 )
 from inspect_ai.model._openai_responses import ResponsesModelInfo
 from inspect_ai.model._providers.openai_responses import generate_responses
@@ -39,7 +40,11 @@ from inspect_ai.model._providers.util.llama31 import Llama31Handler
 from inspect_ai.tool import ToolChoice, ToolInfo
 from inspect_ai.util._json import JSON_SCHEMA_EXTENDED_FIELDS
 
-from ..._util.http_defaults_httpx2 import connect_timeout, default_client_kwargs
+from ..._util.http_defaults_httpx2 import (
+    connect_timeout,
+    default_client_kwargs,
+    max_tokens_timeout,
+)
 from .._chat_message import ChatMessage, ChatMessageTool
 from .._generate_config import GenerateConfig
 from .._model import ModelAPI, RetryDecision
@@ -232,6 +237,7 @@ class OpenAICompatibleAPI(ModelAPI):
                 batcher=None,
                 handle_bad_request=self.handle_bad_request,
                 streaming=self.resolve_stream(config),
+                nonstreaming_timeout=self._nonstreaming_timeout(config),
             )
 
         else:
@@ -344,6 +350,16 @@ class OpenAICompatibleAPI(ModelAPI):
                 )
                 return output, model_call
 
+    def _nonstreaming_timeout(self, config: GenerateConfig) -> httpx2.Timeout | None:
+        """Read budget for this call if it goes out non-streamed, else None.
+
+        `client_timeout` here is only ever user-set (there is no flex bump to
+        distinguish it from), so naming it suppresses the derived budget.
+        """
+        if self.client_timeout is not None:
+            return None
+        return max_tokens_timeout(config.max_tokens, self.client.timeout)
+
     def resolve_tools(
         self, tools: list[ToolInfo], tool_choice: ToolChoice, config: GenerateConfig
     ) -> tuple[list[ToolInfo], ToolChoice, GenerateConfig]:
@@ -365,7 +381,10 @@ class OpenAICompatibleAPI(ModelAPI):
                 return await openai_chat_completion_stream_final(stream)
         else:
             return cast(
-                ChatCompletion, await self.client.chat.completions.create(**request)
+                ChatCompletion,
+                await self.client.chat.completions.create(
+                    **request, **openai_timeout_arg(self._nonstreaming_timeout(config))
+                ),
             )
 
     def service_model_name(self) -> str:

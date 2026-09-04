@@ -193,6 +193,12 @@ The defaults differ from the provider SDKs' in one respect that matters for long
 | `INSPECT_HTTP_POOL_KEEPALIVE_CONNECTIONS` | the connection pool size | Idle connections kept for reuse. |
 | `INSPECT_HTTP_KEEPALIVE_EXPIRY` | 5 | Seconds an idle connection is kept. |
 | `INSPECT_HTTP_CONNECT_RETRIES` | 1 | Retries of connection establishment. Only the connect is retried, never the request, so this is safe for non-idempotent calls. Unavailable through a proxy, which httpx does not retry. |
+| `INSPECT_HTTP_OUTPUT_TOKENS_PER_SECOND` | 20 | Output rate used to size the request budget of a non-streaming call from its `max_tokens`. Set to 0 to disable that sizing. |
+| `INSPECT_HTTP_TIMEOUT_MARGIN` | 300 | Seconds added to that budget for queueing and time-to-first-token. |
+
+A non-streamed request is a special case: the response body arrives only when generation finishes, so the request budget has to cover the whole generation. A reasoning-heavy call with a large `max_tokens` can legitimately outrun 600 seconds and fail by construction — after the provider has already generated, and billed, the completion. For those requests (OpenAI and OpenAI-compatible providers, which do not stream by default) Inspect raises the budget to `INSPECT_HTTP_TIMEOUT_MARGIN + max_tokens / INSPECT_HTTP_OUTPUT_TOKENS_PER_SECOND` whenever that exceeds the budget the request would otherwise get. It only ever raises, so a request that already fits is unaffected, and it never applies to a streaming request — there the budget is a per-chunk deadline, which `--stream-idle-timeout` is the right tool for.
+
+Two things to know about the raised budget. Setting `-M client_timeout` yourself turns the sizing off for that model, on the basis that you have named your own ceiling. And provider SDKs retry internally (the `openai` package twice by default), so a timeout can cost up to three times the budget before Inspect's own retry loop sees it — pass `-M max_retries=0` to leave retrying entirely to Inspect.
 
 Two of these interact with settings a provider may already have:
 

@@ -4,6 +4,7 @@ from logging import getLogger
 from typing import Any
 
 import anyio
+import httpx2
 from openai import (
     APIError,
     APIStatusError,
@@ -54,6 +55,7 @@ from .._openai import (
     openai_handle_bad_request,
     openai_handle_stream_error,
     openai_media_filter,
+    openai_timeout_arg,
 )
 from .._openai_responses import (
     ResponsesModelInfo,
@@ -118,6 +120,7 @@ async def generate_responses(
     | None = None,
     model_family: str | None = None,
     streaming: bool = False,
+    nonstreaming_timeout: httpx2.Timeout | None = None,
 ) -> ModelOutput | tuple[ModelOutput | Exception, ModelCall]:
     # background in extra_body should be applied
     if background is None and config.extra_body:
@@ -201,7 +204,9 @@ async def generate_responses(
         elif request.get("stream"):
             model_response = await _generate_responses_stream(client, request)
         else:
-            model_response = await client.responses.create(**request)
+            model_response = await client.responses.create(
+                **request, **openai_timeout_arg(nonstreaming_timeout)
+            )
         # model_response is `Response | Any`. The lazy type inference engine
         # threw up its hands because of the `**request`.
         assert isinstance(model_response, Response)
