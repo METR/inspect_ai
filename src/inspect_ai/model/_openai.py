@@ -1357,7 +1357,9 @@ def openai_classify_retry(ex: BaseException) -> "RetryDecision | None":
         # a failure delivered mid-stream (after HTTP 200) is raised by the
         # SDK as a bare APIError with no status code, so only the body's
         # `code`/`type` are available
-        return classify_error_body(ex.code, ex.type)
+        return classify_error_body(
+            ex.code, ex.type, transient_names={"middlemantimeout"}
+        )
     return None
 
 

@@ -159,15 +159,21 @@ def test_openai_classify_transient_5xx() -> None:
     assert decision.retry_after is None
 
 
-def test_openai_classify_non_retryable_4xx_returns_none() -> None:
+@pytest.mark.parametrize("status", [400, 401, 404])
+@pytest.mark.parametrize(
+    "body", [None, {"type": "middleman_timeout", "code": "middleman_timeout"}]
+)
+def test_openai_classify_non_retryable_4xx_returns_none(
+    status: int, body: dict[str, str] | None
+) -> None:
     from openai import APIStatusError
 
     from inspect_ai.model._openai import openai_classify_retry
 
     ex = APIStatusError(
         message="bad request",
-        response=_httpx2_response(400),
-        body=None,
+        response=_httpx2_response(status),
+        body=body,
     )
     assert openai_classify_retry(ex) is None
 
@@ -229,6 +235,25 @@ def test_openai_classify_mid_stream_server_error_as_transient() -> None:
     decision3 = openai_classify_retry(ex3)
     assert decision3 is not None
     assert decision3.kind == "transient"
+
+
+@pytest.mark.parametrize("code", ["middleman_timeout", None, 400, 401, 404])
+def test_openai_mid_stream_middleman_timeout(code: str | int | None) -> None:
+    from openai import APIError
+
+    from inspect_ai.model._openai import openai_classify_retry
+
+    ex = APIError(
+        message="middleman: upstream stream timed out",
+        request=httpx2.Request("POST", "https://example.com/v1/chat/completions"),
+        body={"type": "middleman_timeout", "code": code},
+    )
+    decision = openai_classify_retry(ex)
+    if isinstance(code, int):
+        assert decision is None
+    else:
+        assert decision is not None and decision.kind == "transient"
+        assert decision.retry
 
 
 def test_openai_classify_mid_stream_rate_limit_as_rate_limit() -> None:
@@ -490,7 +515,8 @@ def test_anthropic_mid_stream_rate_limit_classifies_as_rate_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    "error_type", ["overloaded_error", "api_error", "timeout_error"]
+    "error_type",
+    ["overloaded_error", "api_error", "timeout_error", "middleman_timeout"],
 )
 def test_anthropic_mid_stream_transient_types_classify_as_transient(
     error_type: str,
@@ -530,7 +556,10 @@ def test_anthropic_mid_stream_permanent_error_does_not_retry() -> None:
     assert decision.retry is False
 
 
-def test_anthropic_transient_body_type_on_permanent_status_does_not_retry() -> None:
+@pytest.mark.parametrize("error_type", ["api_error", "middleman_timeout"])
+def test_anthropic_transient_body_type_on_permanent_status_does_not_retry(
+    error_type: str,
+) -> None:
     """Type-based classification is scoped to status 200 (the mid-stream case).
 
     A real HTTP error status — e.g. a proxy's 4xx wrapping an
@@ -545,7 +574,7 @@ def test_anthropic_transient_body_type_on_permanent_status_does_not_retry() -> N
     ex = APIStatusError(
         message="not found",
         response=_httpx2_response(404),
-        body={"type": "error", "error": {"type": "api_error", "message": "no route"}},
+        body={"type": "error", "error": {"type": error_type, "message": "no route"}},
     )
     decision = api.should_retry(ex)
     assert isinstance(decision, RetryDecision)
@@ -882,20 +911,31 @@ def test_google_429_without_status_text_still_classifies_as_rate_limit() -> None
     assert decision.kind == "rate_limit"
 
 
-def test_google_503_unavailable_classifies_as_transient() -> None:
+@pytest.mark.parametrize(
+    "code,status,details",
+    [
+        (503, "UNAVAILABLE", None),
+        (504, "DEADLINE_EXCEEDED", None),
+        (504, "DEADLINE_EXCEEDED", [{"reason": "middleman_timeout"}]),
+    ],
+)
+def test_google_server_error_classifies_as_transient(
+    code: int, status: str, details: list[dict[str, str]] | None
+) -> None:
     from google.genai.errors import APIError
 
     from inspect_ai.model._providers.google import GoogleGenAIAPI
 
     api = GoogleGenAIAPI.__new__(GoogleGenAIAPI)
     ex = APIError.__new__(APIError)
-    ex.code = 503
-    ex.status = "UNAVAILABLE"
+    ex.code = code
+    ex.status = status
     ex.message = ""
-    ex.details = None
+    ex.details = details
     ex.response = None
     decision = api.should_retry(ex)
     assert isinstance(decision, RetryDecision)
+    assert decision.retry
     assert decision.kind == "transient"
 
 

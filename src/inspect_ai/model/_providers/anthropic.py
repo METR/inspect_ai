@@ -1494,7 +1494,12 @@ class AnthropicAPI(ModelAPI):
                 error_type = _error_type_from_body(ex.body)
                 if error_type == "rate_limit_error":
                     return RetryDecision.rate_limit(retry_after=retry_after)
-                if error_type in ("overloaded_error", "api_error", "timeout_error"):
+                if error_type in (
+                    "overloaded_error",
+                    "api_error",
+                    "timeout_error",
+                    "middleman_timeout",
+                ):
                     return RetryDecision.transient(retry_after=retry_after)
             if isinstance(ex.body, dict | str):
                 # message-based fallback for error bodies without a
