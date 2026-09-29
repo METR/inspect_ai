@@ -70,6 +70,10 @@ logger = getLogger(__name__)
 # who don't recognize the keys ignore them).
 PLAN_RENDERING_META_KEY = "inspect.plan_rendering"
 RAW_EVENTS_META_KEY = "inspect.raw_events"
+SHARED_APPROVALS_META_KEY = "inspect.shared_approvals"
+
+# Stable logical request ID on shared permission requests and Approval metadata.
+APPROVAL_ID_META_KEY = "inspect.approval_id"
 
 # Sentinel value inside a ``RAW_EVENTS_META_KEY`` subscription list
 # meaning "forward every event type" (the all-events glob). Kept as a
@@ -145,6 +149,11 @@ TOOL_CALL_CANCELABLE_META_KEY = "inspect.tool_call_cancelable"
 # alongside (not instead of) ``session/update`` when the client signed
 # ``inspect.raw_events`` at initialize.
 INSPECT_EVENT_METHOD = "inspect/event"
+
+# Sent only to shared-approval participants: sessionId, approvalId, optional
+# optionId, and a per-connection winner flag. A missing optionId cancels the
+# request. Resolution can precede the ApprovalEvent that confirms application.
+APPROVAL_RESOLVED_METHOD = "inspect/approval_resolved"
 
 # TUI-grade action methods. Always advertised — no capability opt-in.
 # Clients that don't know about them simply don't call them.

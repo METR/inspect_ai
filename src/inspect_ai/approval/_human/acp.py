@@ -1,26 +1,17 @@
 """ACP routing for human tool-call approval prompts.
 
-When one or more ACP clients are attached to the running sample
-(e.g. Zed connected via ``inspect acp --stdio``), the
+When an ACP server is enabled for the running sample, the
 ``human_approver`` routes its prompts through ACP's
-``session/request_permission`` rather than opening the in-proc
-Textual panel. When no clients are attached, this module's entry
-point returns ``None`` and the caller (``human_approver``) falls
-through to the existing panel / console flow — no behavior change
-in the no-client case.
+``session/request_permission`` and waits for a client to attach.
+Without an ACP server, the caller retains the existing panel or
+console flow.
 
-Single-driver semantics: the request is sent to ONE client at a
-time — the driver, which is the client whose ``session/prompt``
-most recently landed on this session (fallback: first-attached
-when no prompt has been sent yet). If the driver's request raises
-(typically ``ConnectionError`` on mid-prompt disconnect), the shim
-falls through to the next attached client in attach order. ACP has
-no protocol-level cancel for outbound requests, so broadcasting
-would leave losing editors with a stale permission card forever
-(whatever they later click is silently discarded). Routing to one
-driver means the operator only sees the prompt on the client
-they're actually using; others observe via the normal event
-stream.
+Legacy clients receive requests exclusively, with fallback on
+disconnect. When the driver opts into shared approvals, compatible
+clients (including late attachments) receive the same request.
+The first valid choice wins, and an explicit resolution notification
+clears each participant's card. Legacy clients are never included in
+that broadcast because they cannot clear a remotely resolved card.
 
 Wait-forever: no timeout. The human at the editor is the source
 of truth; default-deny on timeout would be surprising and matches
@@ -43,7 +34,8 @@ even though the orchestration is asyncio.
 from __future__ import annotations
 
 from logging import getLogger
-from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Protocol, cast
+from uuid import uuid4
 
 import anyio
 from acp.schema import (
@@ -66,7 +58,7 @@ from .._approval import Approval, ApprovalDecision
 if TYPE_CHECKING:
     from acp.schema import ContentToolCallContent
 
-    from inspect_ai.agent._acp.transport import ApproverClient
+    from inspect_ai.agent._acp.transport import ApproverClient, SharedApproverClient
     from inspect_ai.tool._tool_call import ToolCallContent
 
 logger = getLogger(__name__)
@@ -383,62 +375,177 @@ async def _request_from_driver_with_fallback(
     request: RequestPermissionRequest,
     choices: list[ApprovalDecision],
 ) -> Approval:
-    """Send ``request`` to the driver; park-and-retry on chain exhaustion.
+    """Route one approval and resolve every opted-in participant on exit.
 
-    Routing model: single-driver, with a fallback chain. ACP has no
-    protocol-level cancel for outbound requests, so broadcasting to N
-    clients leaves the losers' editors showing a stale permission card
-    forever (whatever they click later is silently discarded). Picking
-    one driver keeps the UX coherent.
-
-    Exclusive-routing semantics: when no client is attached (including
-    the "no client has ever attached" case on the very first
-    interaction), this parks on
-    :meth:`AcpTransport.subscribe_approver_attach` until one arrives.
-    ``--acp-server`` committed the eval to ACP as the human channel;
-    falling through to the in-proc panel would break the
-    notification-driven workflow. The decision to commit happens at
-    the entry (``request_human_approval_via_acp`` returns ``None`` if
-    no live ACP transport is bound at all); once we're here, we wait.
-
-    Behavior (per iteration):
-
-    1. **Subscribe FIRST** to the next-attach event, so any attach
-       that races our snapshot/dispatch lands on a live subscriber
-       (and ``anyio.Event.set`` makes the subsequent ``event.wait``
-       return immediately). Critical: doing this AFTER the snapshot
-       creates a window where an attach fires with no subscriber and
-       we park forever despite a live client being present.
-    2. Snapshot the driver chain. If empty, park on the attach event
-       (subscribed in step 1) — no fallback.
-    3. Otherwise, try each client in chain order. Drain notifications
-       first (best-effort ordering barrier), then ``request_permission``.
-       On success, return the approval. On per-client failure, try
-       the next.
-    4. If every client in the snapshot raised (operator switched
-       away mid-approval), park on the attach event. The fresh
-       client is fully bound, promoted, AND ready (replay completed)
-       before the notify fires — see ``_post_bind_setup_locked`` and
-       ``LiveAcpTransport.notify_approver_attach``.
-    5. Cancellation (sample-level cancel, Esc-interrupt) unwinds via
-       ``anyio.Event.wait`` cleanly — no try/except on the cancel exc.
-
-    Why re-snapshot rather than reuse: by the time the wait returns,
-    the freshly-attached client has already been promoted to position
-    0 of the chain. Re-querying ``approver_driver_chain()`` picks them
-    up automatically. Spurious wake-ups (client attaches then
-    disconnects before we reach it) are harmless — the ``for`` loop
-    sees no surviving client, raises, and we loop back to the wait.
-
-    Re-issue safety: ``RequestPermissionRequest`` has no mutable
-    per-send state, so the same ``request`` object can be sent to
-    multiple clients across retries.
-
-    "Wait forever for a response" matches the in-proc human approver:
-    if the operator is afk (or absent entirely), the sample blocks
-    until they show up or the sample is cancelled. Explicit design
-    decision in the Phase 14 doc; unchanged here.
+    Shared clients receive a stable ID in the permission request and the
+    resulting Approval metadata. Legacy clients keep exclusive routing.
+    Resolution identifies the winning connection, but the ApprovalEvent
+    remains the authority that the decision was applied to the tool call.
     """
+    from inspect_ai.agent._acp.inspect_ext import APPROVAL_ID_META_KEY
+
+    approval_id = str(uuid4())
+    participants: dict[int, SharedApproverClient] = {}
+    result: _ApprovalResult | None = None
+    try:
+        result = await _dispatch_permission(
+            session, request, choices, approval_id, participants
+        )
+        if participants:
+            result.approval.metadata = {
+                **(result.approval.metadata or {}),
+                APPROVAL_ID_META_KEY: approval_id,
+            }
+        await _resolve_shared_approvals(participants, request, approval_id, result)
+        await anyio.lowlevel.checkpoint_if_cancelled()
+        return result.approval
+    except BaseException:
+        # A timeout can interrupt notification after a winner is chosen.
+        # Clear that provisional decision everywhere; no Approval returns.
+        await _resolve_shared_approvals(participants, request, approval_id, None)
+        raise
+
+
+class _ApprovalResult(NamedTuple):
+    approval: Approval
+    client: ApproverClient
+
+
+async def _resolve_shared_approvals(
+    participants: dict[int, SharedApproverClient],
+    request: RequestPermissionRequest,
+    approval_id: str,
+    result: _ApprovalResult | None,
+) -> None:
+    # Cleanup survives sample cancellation, while a slow/disconnected
+    # peer cannot indefinitely delay the decision or sample teardown.
+    with anyio.move_on_after(1, shield=result is None):
+        async with anyio.create_task_group() as group:
+            for client in participants.values():
+                group.start_soon(
+                    _resolve_shared_approval,
+                    client,
+                    request.session_id,
+                    approval_id,
+                    result,
+                )
+
+
+async def _resolve_shared_approval(
+    client: SharedApproverClient,
+    session_id: str,
+    approval_id: str,
+    result: _ApprovalResult | None,
+) -> None:
+    try:
+        await client.approval_resolved(
+            session_id,
+            approval_id,
+            result.approval.decision if result is not None else None,
+            winner=result is not None and result.client is client,
+        )
+    except Exception as exc:
+        logger.debug("ACP approval resolution failed for client %r: %s", client, exc)
+
+
+async def _drain_approval_context(client: ApproverClient) -> None:
+    try:
+        await client.drain_notifications()
+    except Exception as exc:
+        logger.warning(
+            "ACP approval drain_notifications failed for client %r; "
+            "proceeding with request anyway: %s",
+            client,
+            exc,
+        )
+
+
+async def _request_shared_approval(
+    session: _ApprovalRoutingSession,
+    request: RequestPermissionRequest,
+    choices: list[ApprovalDecision],
+    approval_id: str,
+    participants: dict[int, SharedApproverClient],
+    attempted: set[int],
+) -> _ApprovalResult | None:
+    """First valid choice wins among ready shared clients, including late joins."""
+    from inspect_ai.agent._acp.inspect_ext import APPROVAL_ID_META_KEY
+    from inspect_ai.agent._acp.transport import SharedApproverClient
+
+    request = request.model_copy(
+        update={
+            "field_meta": {
+                **(request.field_meta or {}),
+                APPROVAL_ID_META_KEY: approval_id,
+            }
+        }
+    )
+    result: _ApprovalResult | None = None
+    active = 0
+    changed = anyio.Event()
+    unsubscribe = session.subscribe_approver_attach(lambda: changed.set())
+
+    async def ask(client: SharedApproverClient) -> None:
+        nonlocal active, result
+        try:
+            await _drain_approval_context(client)
+            participants[id(client)] = client
+            response = await client.request_permission(request)
+            outcome = response.outcome
+            if (
+                outcome.outcome == "selected"
+                and outcome.option_id in choices
+                and result is None
+            ):
+                # No await between checking and assigning: all requests
+                # run on the same event loop, so exactly one client wins.
+                result = _ApprovalResult(
+                    approval=_approval_from_response(response, choices), client=client
+                )
+        except Exception as exc:
+            logger.debug("ACP shared approval failed for client %r: %s", client, exc)
+        finally:
+            active -= 1
+            changed.set()
+
+    try:
+        async with anyio.create_task_group() as group:
+            while result is None:
+                changed = anyio.Event()
+                for client in session.approver_driver_chain():
+                    if (
+                        isinstance(client, SharedApproverClient)
+                        and client.supports_shared_approvals
+                        and id(client) not in attempted
+                    ):
+                        attempted.add(id(client))
+                        active += 1
+                        group.start_soon(ask, client)
+                if active == 0:
+                    break
+                await changed.wait()
+            group.cancel_scope.cancel()
+        return result
+    finally:
+        unsubscribe()
+
+
+async def _dispatch_permission(
+    session: _ApprovalRoutingSession,
+    request: RequestPermissionRequest,
+    choices: list[ApprovalDecision],
+    approval_id: str,
+    participants: dict[int, SharedApproverClient],
+) -> _ApprovalResult:
+    """Use the driver policy, waiting for a fresh attach when clients exhaust.
+
+    Subscribe before snapshotting so an attachment cannot be lost between
+    dispatch and parking. A shared driver fans out only to opted-in clients;
+    a legacy driver remains exclusive until it responds or disconnects.
+    Context drains before each request so the operator sees the narration.
+    """
+    from inspect_ai.agent._acp.transport import SharedApproverClient
+
     cancel_exc = anyio.get_cancelled_exc_class()
     while True:
         # Subscribe BEFORE snapshotting / dispatching so an attach
@@ -450,41 +557,26 @@ async def _request_from_driver_with_fallback(
         unsub = session.subscribe_approver_attach(event.set)
         try:
             clients_in_order = session.approver_driver_chain()
+            attempted_shared: set[int] = set()
             if clients_in_order:
                 for client in clients_in_order:
-                    # Drain pending ``session/update`` notifications
-                    # BEFORE the request goes out, so the operator sees
-                    # the model's accompanying ``agent_message_chunk``
-                    # (the "why" the agent gave) above the approval
-                    # card rather than AFTER it (or never, if they
-                    # decide before the chunk arrives). Notifications
-                    # travel via the in-process pub/sub bus +
-                    # per-connection forwarder task, while
-                    # ``request_permission`` calls ``conn.send_request``
-                    # directly on the agent task — without this barrier
-                    # the request can win the race to the wire and the
-                    # operator decides with no narration context. See
-                    # the ``Forwarders.drain`` docstring for the
-                    # ordering mechanics.
-                    #
-                    # Drain is BEST-EFFORT ordering, NOT a gate on
-                    # whether the request goes out. If drain itself
-                    # raises a non-cancel exception, log + proceed with
-                    # the request — otherwise a drain bug would
-                    # silently skip the driver and route the approval
-                    # to a fallback client, which is a worse failure
-                    # mode than slightly-out-of-order notifications.
-                    try:
-                        await client.drain_notifications()
-                    except cancel_exc:
-                        raise
-                    except Exception as drain_exc:
-                        logger.warning(
-                            "ACP approval drain_notifications failed for "
-                            "client %r; proceeding with request anyway: %s",
-                            client,
-                            drain_exc,
-                        )
+                    if (
+                        isinstance(client, SharedApproverClient)
+                        and client.supports_shared_approvals
+                    ):
+                        if id(client) not in attempted_shared:
+                            shared_result = await _request_shared_approval(
+                                session,
+                                request,
+                                choices,
+                                approval_id,
+                                participants,
+                                attempted_shared,
+                            )
+                            if shared_result is not None:
+                                return shared_result
+                        continue
+                    await _drain_approval_context(client)
                     try:
                         response = await client.request_permission(request)
                     except cancel_exc:
@@ -501,7 +593,10 @@ async def _request_from_driver_with_fallback(
                         continue
                     else:
                         # Successful dispatch — finally below unsubscribes.
-                        return _approval_from_response(response, choices)
+                        return _ApprovalResult(
+                            approval=_approval_from_response(response, choices),
+                            client=client,
+                        )
             # No clients attached (yet, or after they all raised).
             # Park until a fresh attach lands (or return immediately
             # if an attach raced us between subscribe and now). Under
@@ -523,13 +618,11 @@ async def request_human_approval_via_acp(
 
     Returns:
         - An :class:`Approval` when at least one ACP client responded.
-        - ``None`` when no ACP clients are attached, when no live
-          ACP session is bound for the current sample, when every
-          attached client failed (disconnect, transport error), or
-          when an unexpected internal error occurred building or
-          racing the request. The caller falls through to the
-          existing in-proc panel / console human-approval flow in any
-          of those cases.
+        - ``None`` when no ACP server or live session is available,
+          or an unexpected internal error prevents routing. With ACP
+          enabled, an absent or disconnected client leaves the request
+          waiting for a fresh attachment rather than falling through
+          to the panel or console.
 
     The ``message`` argument (the assistant text accompanying the
     tool call) is accepted for signature parity with the in-proc

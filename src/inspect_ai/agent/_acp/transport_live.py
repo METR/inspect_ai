@@ -467,11 +467,12 @@ class _ApproverClientRegistry(_ClientDriverRegistry[ApproverClient]):
     """Driver-chain registry for ``ApproverClient`` instances.
 
     The configured ``human_approver`` routes tool-approval prompts to
-    a SINGLE driver — the last client to send a ``session/prompt`` on
+    a driver — the last client to send a ``session/prompt`` on
     this session, with first-attached as the fallback when no prompt
     has been sent yet. Clients register on bind
     (``Forwarders.start``) and detach on unbind / disconnect
-    (``Forwarders.stop``).
+    (``Forwarders.stop``). The approval shim also dispatches to compatible
+    peers when the driver opts into shared approvals.
 
     All behaviour comes from :class:`_ClientDriverRegistry`; this class
     exists for nominal type distinctness and to anchor the doc-string

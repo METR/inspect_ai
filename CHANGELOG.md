@@ -1,5 +1,6 @@
 ## Unreleased
 
+- ACP: Compatible clients can share pending approvals, with the first decision clearing the request on every connected client.
 - Logs: Reading samples with `resolve_attachments` is much faster for long conversations; in full mode, deeply nested model API call content may keep two more nesting levels.
 - Bugfix: `self_critique()`, and `model_graded_qa()`/`model_graded_fact()` with `model_role=None`, now critique or grade with the correct model when one task is evaluated against several models.
 

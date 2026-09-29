@@ -45,10 +45,12 @@ from acp.schema import (
 from shortuuid import uuid
 
 from inspect_ai.agent._acp.inspect_ext import (
+    APPROVAL_RESOLVED_METHOD,
     INSPECT_CANCEL_SAMPLE_METHOD,
     INSPECT_CANCEL_TOOL_CALL_METHOD,
     INTERACTIVE_META_KEY,
     PICKER_META_KEY,
+    SHARED_APPROVALS_META_KEY,
     build_picker_notification,
     detect_capabilities,
     picker_target_meta_dict,
@@ -172,6 +174,7 @@ class ConnectionState:
     # session's elicitation-client registry — clients without this
     # capability never receive ``elicitation/create`` requests.
     client_supports_elicitation_form: bool = False
+    client_supports_shared_approvals: bool = False
 
     @property
     def wire_session_id(self) -> str | None:
@@ -231,7 +234,8 @@ class ConnectionHandler:
         """Standard ACP handshake. Negotiate protocol version + advertise capabilities.
 
         Also captures client-capability flags (``client_renders_plan``,
-        ``raw_events_subscription``, ``client_supports_elicitation_form``)
+        ``raw_events_subscription``, ``client_supports_elicitation_form``,
+        ``client_supports_shared_approvals``)
         so the per-connection forwarder can switch behavior per client.
         """
         # Capture client-capability flags. See ``detect_capabilities``
@@ -240,6 +244,10 @@ class ConnectionHandler:
             self.state.client_renders_plan,
             self.state.raw_events_subscription,
         ) = detect_capabilities(client_info, client_capabilities)
+        meta = getattr(client_capabilities, "field_meta", None) or {}
+        self.state.client_supports_shared_approvals = (
+            meta.get(SHARED_APPROVALS_META_KEY) is True
+        )
 
         # Elicitation/form capability — frozen for the connection lifetime.
         # The presence of ``ElicitationFormCapabilities`` (an empty marker
@@ -1075,6 +1083,37 @@ class ConnectionHandler:
         payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
         raw = await self.connection.send_request("session/request_permission", payload)
         return RequestPermissionResponse.model_validate(raw)
+
+    @property
+    def supports_shared_approvals(self) -> bool:
+        """Whether this peer handles shared approval resolution notifications."""
+        return self.state.client_supports_shared_approvals
+
+    async def approval_resolved(
+        self,
+        session_id: str,
+        approval_id: str,
+        option_id: str | None,
+        *,
+        winner: bool,
+    ) -> None:
+        """Resolve a shared request using this connection's client-facing ID."""
+        binding = self.state.binding
+        if (
+            not self.supports_shared_approvals
+            or self.connection is None
+            or not isinstance(binding, Bound)
+            or binding.target_session_id != session_id
+        ):
+            return
+        payload: dict[str, Any] = {
+            "sessionId": binding.wire_session_id,
+            "approvalId": approval_id,
+            "winner": winner,
+        }
+        if option_id is not None:
+            payload["optionId"] = option_id
+        await self.connection.send_notification(APPROVAL_RESOLVED_METHOD, payload)
 
     async def drain_notifications(self) -> None:
         """Wait until pending ``session/update`` notifications have been sent.

@@ -300,6 +300,7 @@ def test_client_capabilities_advertises_plan_rendering_and_event_subscription() 
         "_meta": {
             "inspect.plan_rendering": True,
             "inspect.raw_events": _EXPECTED_RAW_EVENTS,
+            "inspect.shared_approvals": True,
         },
     }
 
@@ -346,6 +347,7 @@ async def test_enumerate_session_initialize_sets_plan_rendering(
     assert client_capabilities.field_meta == {
         "inspect.plan_rendering": True,
         "inspect.raw_events": _EXPECTED_RAW_EVENTS,
+        "inspect.shared_approvals": True,
     }
 
 
@@ -401,6 +403,7 @@ async def test_attach_session_initialize_sets_plan_rendering(
         assert client_capabilities.field_meta == {
             "inspect.plan_rendering": True,
             "inspect.raw_events": _EXPECTED_RAW_EVENTS,
+            "inspect.shared_approvals": True,
         }
 
 
@@ -485,6 +488,83 @@ async def test_permission_handler_returns_denied_outcome_for_cancelled() -> None
     assert response["outcome"]["outcome"] == "cancelled"
     # AllowedOutcome's optionId field is absent in DeniedOutcome.
     assert "optionId" not in response["outcome"]
+
+
+@skip_if_trio
+@pytest.mark.parametrize("option_id", ["approve", "reject", None])
+async def test_shared_resolution_releases_handler_without_a_local_vote(
+    option_id: str | None,
+) -> None:
+    import anyio
+
+    from inspect_ai.agent._acp.tui.client import (
+        AttachedSession,
+        _build_session_router,
+    )
+    from inspect_ai.agent._acp.tui.state import PendingApproval
+
+    state = SessionState()
+    session = AttachedSession(
+        connection=MagicMock(),
+        writer=MagicMock(),
+        session_id="sid",
+        row=MagicMock(),
+        state=state,
+    )
+    ready = anyio.Event()
+    captured: list[PendingApproval] = []
+    responses: list[dict[str, Any]] = []
+
+    def _callback(pending: PendingApproval) -> None:
+        captured.append(pending)
+        state.consume_approval_request(pending)
+        ready.set()
+
+    router = _build_session_router(
+        session_ref=session,
+        on_session_update=None,
+        on_request_permission=_callback,
+        on_request_elicitation=None,
+        on_inspect_event=None,
+    )
+
+    async def _request() -> None:
+        params = _permission_request_dict()
+        params["_meta"] = {"inspect.approval_id": "approval-1"}
+        responses.append(await router("session/request_permission", params, False))
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(_request)
+        await ready.wait()
+        for session_id, approval_id in [("other", "approval-1"), ("sid", "old")]:
+            await router(
+                "inspect/approval_resolved",
+                {"sessionId": session_id, "approvalId": approval_id, "winner": False},
+                True,
+            )
+            assert not captured[0].event.is_set()
+        await router(
+            "inspect/approval_resolved",
+            {
+                "sessionId": "sid",
+                "approvalId": "approval-1",
+                "winner": False,
+                **({"optionId": option_id} if option_id is not None else {}),
+            },
+            True,
+        )
+        assert captured[0].event.is_set()
+        assert captured[0].chosen_option_id is None
+        assert state.current_pending_approval() is None
+
+    assert responses == [{"outcome": {"outcome": "cancelled"}}]
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == (
+        "cancelled"
+        if option_id is None
+        else "approved"
+        if option_id == "approve"
+        else "denied"
+    )
 
 
 @skip_if_trio
