@@ -21,6 +21,7 @@ from acp.schema import (
 
 from inspect_ai.agent._acp.tui.state import (
     MessageGroup,
+    PendingApproval,
     Segment,
     SessionState,
     StatusState,
@@ -1792,6 +1793,43 @@ def test_resolve_approval_is_idempotent() -> None:
 
     tc = state._tool_calls_by_id["tc-1"]
     assert tc.last_approval_decision == "approved"
+
+
+def test_shared_resolution_matches_instance_when_tool_call_id_is_reused() -> None:
+    state = SessionState()
+    request = _permission_request("tc-1")
+    request.field_meta = {"inspect.approval_id": "old"}
+    old = _pending(request)
+    state.consume_approval_request(old)
+    state.resolve_approval("tc-1", option_id="approve")
+
+    replacement = _permission_request("tc-1")
+    replacement.field_meta = {"inspect.approval_id": "new"}
+    current: PendingApproval = _pending(replacement)
+    state.consume_approval_request(current)
+    state.resolve_shared_approval("old", option_id="reject")
+    assert state.current_pending_approval() is current
+    assert not current.event.is_set()
+
+    state.resolve_shared_approval("new", option_id="reject")
+    assert state.current_pending_approval() is None
+    assert current.event.is_set()
+    assert current.chosen_option_id is None
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == "denied"
+
+
+def test_shared_resolution_corrects_a_losing_local_click() -> None:
+    state = SessionState()
+    request = _permission_request("tc-1")
+    request.field_meta = {"inspect.approval_id": "approval-1"}
+    pending = _pending(request)
+    state.consume_approval_request(pending)
+    state.resolve_approval("tc-1", option_id="approve")
+    state.resolve_shared_approval("approval-1", option_id="reject")
+
+    assert pending.chosen_option_id == "approve"
+    assert state.current_pending_approval() is None
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == "denied"
 
 
 def test_resolve_approval_unknown_tool_call_id_is_noop() -> None:

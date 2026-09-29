@@ -161,6 +161,27 @@ class ApproverClient(Protocol):
 
 
 @runtime_checkable
+class SharedApproverClient(ApproverClient, Protocol):
+    """An approver that can clear a request resolved by another client."""
+
+    @property
+    def supports_shared_approvals(self) -> bool:
+        """Whether the client opted into shared approval resolution."""
+        ...
+
+    async def approval_resolved(
+        self,
+        session_id: str,
+        approval_id: str,
+        option_id: str | None,
+        *,
+        winner: bool,
+    ) -> None:
+        """Clear a shared request, identifying the winning connection."""
+        ...
+
+
+@runtime_checkable
 class ElicitationClient(Protocol):
     """A client capable of handling ``elicitation/create``.
 
@@ -445,12 +466,11 @@ class AcpTransport(Protocol):
 
         When the configured ``human_approver`` is reached and at least
         one client is attached, the approval prompt is routed via ACP
-        ``session/request_permission`` to a single driver (the client
-        whose ``session/prompt`` most recently landed, or
-        first-attached when no prompt has been sent on this session).
-        Other attached clients observe via the normal event stream
-        and don't receive the request. When no clients are attached,
-        the existing in-proc panel / console flow runs unchanged.
+        ``session/request_permission`` to the driver. If the driver
+        opts into shared approvals, compatible attached clients also
+        receive the request and the first valid decision wins. Legacy
+        drivers remain exclusive. With an ACP server enabled, a request
+        waits for an attachment when no clients are available.
 
         Returns an idempotent unsubscribe callable. No-op session
         returns a no-op unsubscribe (no clients can attach).

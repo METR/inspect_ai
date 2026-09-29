@@ -21,12 +21,15 @@ import json
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import MagicMock
+from uuid import UUID
 
+import anyio
 import pytest
 from acp.schema import (
     AllowedOutcome,
+    ClientCapabilities,
     DeniedOutcome,
     RequestPermissionRequest,
     RequestPermissionResponse,
@@ -36,7 +39,7 @@ from test_helpers.utils import skip_if_trio
 
 from inspect_ai.agent._acp.server import acp_server
 from inspect_ai.agent._acp.transport_live import LiveAcpTransport
-from inspect_ai.approval._approval import ApprovalDecision
+from inspect_ai.approval._approval import Approval, ApprovalDecision
 from inspect_ai.approval._human.acp import (
     _approval_from_response,
     _build_request,
@@ -47,6 +50,7 @@ from inspect_ai.approval._human.acp import (
     request_human_approval_via_acp,
 )
 from inspect_ai.approval._human.approver import human_approver
+from inspect_ai.event._approval import ApprovalEvent
 from inspect_ai.log._samples import ActiveSample, PendingInteraction
 from inspect_ai.tool._tool_call import ToolCall, ToolCallContent, ToolCallView
 
@@ -168,6 +172,89 @@ class _StubClient:
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
+
+class _ApprovalResolution(NamedTuple):
+    session_id: str
+    approval_id: str
+    option_id: str | None
+    winner: bool
+
+
+class _ControlledApprovalClient(_StubClient):
+    """An anyio client whose response is released explicitly by the test."""
+
+    def __init__(
+        self,
+        response: RequestPermissionResponse | None = None,
+        exc: Exception | None = None,
+        *,
+        shared: bool = True,
+    ) -> None:
+        super().__init__(response=response, exc=exc)
+        self._shared = shared
+        self.request_seen = anyio.Event()
+        self.request_finished = anyio.Event()
+        self.release_response = anyio.Event()
+        self.resolutions: list[_ApprovalResolution] = []
+
+    @property
+    def supports_shared_approvals(self) -> bool:
+        return self._shared
+
+    async def request_permission(
+        self, request: RequestPermissionRequest
+    ) -> RequestPermissionResponse:
+        self.received.append(request)
+        self.calls.append("request")
+        self.request_seen.set()
+        try:
+            await self.release_response.wait()
+            if self.exc is not None:
+                raise self.exc
+            assert self.response is not None
+            return self.response
+        except anyio.get_cancelled_exc_class():
+            self.cancelled = True
+            raise
+        finally:
+            self.request_finished.set()
+
+    async def approval_resolved(
+        self,
+        session_id: str,
+        approval_id: str,
+        option_id: str | None,
+        *,
+        winner: bool,
+    ) -> None:
+        self.resolutions.append(
+            _ApprovalResolution(
+                session_id=session_id,
+                approval_id=approval_id,
+                option_id=option_id,
+                winner=winner,
+            )
+        )
+
+
+def _shared_approval_id(client: _ControlledApprovalClient) -> str:
+    metadata = client.received[0].field_meta
+    assert metadata is not None
+    approval_id = metadata["inspect.approval_id"]
+    assert isinstance(approval_id, str)
+    assert UUID(approval_id).version == 4
+    return approval_id
+
+
+async def _capture_shared_approval(
+    session: _StubSession, results: list[Approval]
+) -> None:
+    results.append(
+        await _request_from_driver_with_fallback(
+            session, _trivial_request(), ["approve", "reject"]
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +657,271 @@ async def test_cancellation_unwinds_park() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared approvals — first valid choice and explicit resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first_choice", ["approve", "reject"])
+@pytest.mark.parametrize("second_choice", ["approve", "reject"])
+async def test_shared_simultaneous_choices_have_exactly_one_winner(
+    first_choice: str, second_choice: str
+) -> None:
+    clients = [
+        _ControlledApprovalClient(_selected(first_choice)),
+        _ControlledApprovalClient(_selected(second_choice)),
+    ]
+    results: list[Approval] = []
+    session = _StubSession(clients)
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(_capture_shared_approval, session, results)
+            for client in clients:
+                await client.request_seen.wait()
+            assert not results
+            for client in clients:
+                client.release_response.set()
+
+    assert len(results) == 1
+    approval_id = _shared_approval_id(clients[0])
+    assert _shared_approval_id(clients[1]) == approval_id
+    assert results[0].metadata == {"inspect.approval_id": approval_id}
+    event = ApprovalEvent(
+        message="Please confirm",
+        call=_make_call(),
+        approver="human",
+        decision=results[0].decision,
+        metadata=results[0].metadata,
+    )
+    restored = ApprovalEvent.model_validate_json(event.model_dump_json())
+    assert restored.metadata == {"inspect.approval_id": approval_id}
+    assert restored.decision == results[0].decision
+    winners = [client for client in clients if client.resolutions[0].winner]
+    assert len(winners) == 1
+    assert winners[0].response is not None
+    assert winners[0].response.outcome.outcome == "selected"
+    assert results[0].decision == winners[0].response.outcome.option_id
+    for client in clients:
+        assert client.calls == ["drain", "request"]
+        assert client.resolutions == [
+            _ApprovalResolution(
+                session_id="sess-1",
+                approval_id=approval_id,
+                option_id=results[0].decision,
+                winner=client is winners[0],
+            )
+        ]
+    assert session._attach_subscribers == []
+
+
+async def test_shared_late_attachment_receives_same_id_and_can_win() -> None:
+    original = _ControlledApprovalClient(_selected("reject"))
+    late = _ControlledApprovalClient(_selected("approve"))
+    session = _StubSession([original])
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(_capture_shared_approval, session, results)
+            await original.request_seen.wait()
+            session.clients.insert(0, late)
+            session.trigger_attach()
+            await late.request_seen.wait()
+            assert _shared_approval_id(late) == _shared_approval_id(original)
+            late.release_response.set()
+
+    assert len(results) == 1
+    assert results[0].decision == "approve"
+    assert original.cancelled
+    assert not late.cancelled
+    assert original.resolutions[0].winner is False
+    assert late.resolutions[0].winner is True
+    assert original.resolutions[0].option_id == "approve"
+    assert len(original.received) == len(late.received) == 1
+
+
+@pytest.mark.parametrize("response", ["cancelled", "unknown", "disconnected"])
+async def test_shared_cancelled_unknown_or_disconnected_client_abstains(
+    response: str,
+) -> None:
+    abstainer = _ControlledApprovalClient(
+        response=_cancelled() if response == "cancelled" else _selected("unknown"),
+        exc=ConnectionError("disconnected") if response == "disconnected" else None,
+    )
+    survivor = _ControlledApprovalClient(_selected("approve"))
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(
+                _capture_shared_approval, _StubSession([abstainer, survivor]), results
+            )
+            await abstainer.request_seen.wait()
+            await survivor.request_seen.wait()
+            abstainer.release_response.set()
+            await abstainer.request_finished.wait()
+            assert not results
+            survivor.release_response.set()
+
+    assert len(results) == 1
+    assert results[0].decision == "approve"
+    assert abstainer.resolutions[0].winner is False
+    assert survivor.resolutions[0].winner is True
+    assert abstainer.resolutions[0].option_id == "approve"
+
+
+async def test_shared_driver_does_not_send_a_stale_card_to_legacy_clients() -> None:
+    shared = _ControlledApprovalClient(_selected("approve"))
+    legacy = _ControlledApprovalClient(_selected("reject"), shared=False)
+    other_shared = _ControlledApprovalClient(_selected("reject"))
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(
+                _capture_shared_approval,
+                _StubSession([shared, legacy, other_shared]),
+                results,
+            )
+            await shared.request_seen.wait()
+            await other_shared.request_seen.wait()
+            shared.release_response.set()
+
+    assert results[0].decision == "approve"
+    assert legacy.calls == []
+    assert legacy.received == []
+    assert legacy.resolutions == []
+    assert other_shared.cancelled
+    assert other_shared.resolutions[0].option_id == "approve"
+    assert other_shared.resolutions[0].winner is False
+
+
+async def test_shared_client_attaching_does_not_preempt_legacy_driver() -> None:
+    legacy = _ControlledApprovalClient(_selected("reject"), shared=False)
+    shared = _ControlledApprovalClient(_selected("approve"))
+    session = _StubSession([legacy])
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(_capture_shared_approval, session, results)
+            await legacy.request_seen.wait()
+            session.clients.insert(0, shared)
+            session.trigger_attach()
+            await anyio.lowlevel.checkpoint()
+            assert not results
+            assert shared.received == []
+            legacy.release_response.set()
+
+    assert results[0].decision == "reject"
+    assert not results[0].metadata
+    assert not legacy.received[0].field_meta
+    assert shared.received == []
+    assert shared.resolutions == legacy.resolutions == []
+
+
+async def test_shared_abstention_falls_back_to_legacy_and_clears_shared_card() -> None:
+    shared = _ControlledApprovalClient(_cancelled())
+    legacy = _ControlledApprovalClient(_selected("reject"), shared=False)
+    shared.release_response.set()
+    legacy.release_response.set()
+    with anyio.fail_after(2):
+        result = await _request_from_driver_with_fallback(
+            _StubSession([shared, legacy]), _trivial_request(), ["approve", "reject"]
+        )
+    approval_id = _shared_approval_id(shared)
+    assert result.decision == "reject"
+    assert result.metadata == {"inspect.approval_id": approval_id}
+    assert shared.resolutions == [
+        _ApprovalResolution(
+            session_id="sess-1",
+            approval_id=approval_id,
+            option_id="reject",
+            winner=False,
+        )
+    ]
+    assert not legacy.received[0].field_meta
+    assert legacy.resolutions == []
+
+
+async def test_shared_cancellation_clears_both_cards_and_cancels_rpcs() -> None:
+    clients = [
+        _ControlledApprovalClient(_selected("approve")),
+        _ControlledApprovalClient(_selected("reject")),
+    ]
+    session = _StubSession(clients)
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(_capture_shared_approval, session, results)
+            for client in clients:
+                await client.request_seen.wait()
+            group.cancel_scope.cancel()
+
+    assert results == []
+    for client in clients:
+        assert client.cancelled
+        assert client.resolutions == [
+            _ApprovalResolution(
+                session_id="sess-1",
+                approval_id=_shared_approval_id(client),
+                option_id=None,
+                winner=False,
+            )
+        ]
+    assert session._attach_subscribers == []
+
+
+async def test_shared_cancellation_during_resolution_clears_provisional_winner() -> (
+    None
+):
+    class DelayedResolutionClient(_ControlledApprovalClient):
+        def __init__(self) -> None:
+            super().__init__(_selected("approve"))
+            self.resolution_started = anyio.Event()
+            self.resolution_cancelled = False
+
+        async def approval_resolved(
+            self,
+            session_id: str,
+            approval_id: str,
+            option_id: str | None,
+            *,
+            winner: bool,
+        ) -> None:
+            if option_id is not None:
+                self.resolution_started.set()
+                try:
+                    await anyio.sleep_forever()
+                except anyio.get_cancelled_exc_class():
+                    self.resolution_cancelled = True
+                    raise
+            await super().approval_resolved(
+                session_id, approval_id, option_id, winner=winner
+            )
+
+    winner = DelayedResolutionClient()
+    other = _ControlledApprovalClient(_selected("reject"))
+    results: list[Approval] = []
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as group:
+            group.start_soon(
+                _capture_shared_approval, _StubSession([winner, other]), results
+            )
+            await winner.request_seen.wait()
+            await other.request_seen.wait()
+            winner.release_response.set()
+            await winner.resolution_started.wait()
+            group.cancel_scope.cancel()
+
+    assert results == []
+    assert winner.resolution_cancelled
+    assert other.cancelled
+    for client in (winner, other):
+        assert client.resolutions[-1] == _ApprovalResolution(
+            session_id="sess-1",
+            approval_id=_shared_approval_id(client),
+            option_id=None,
+            winner=False,
+        )
+
+
+# ---------------------------------------------------------------------------
 # ConnectionHandler.request_permission — binding check + sessionId rewrite
 # ---------------------------------------------------------------------------
 #
@@ -736,6 +1088,96 @@ async def test_driver_chain_falls_through_stale_handler_after_rebind() -> None:
     stale.connection.send_request.assert_not_called()
     # Good fallback DID send.
     good.connection.send_request.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Shared approval capability and wire-session mapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (None, False),
+        ({}, False),
+        ({"inspect.shared_approvals": True}, True),
+        ({"inspect.shared_approvals": False}, False),
+        ({"inspect.shared_approvals": 1}, False),
+        ({"inspect.shared_approvals": "true"}, False),
+        ({"inspect.shared_approvals": None}, False),
+    ],
+)
+async def test_shared_capability_requires_literal_true(
+    metadata: dict[str, Any] | None, expected: bool
+) -> None:
+    from inspect_ai.agent._acp.connection import ConnectionHandler
+
+    handler = ConnectionHandler()
+    capabilities = (
+        ClientCapabilities.model_validate({"_meta": metadata})
+        if metadata is not None
+        else None
+    )
+    await handler.initialize(protocol_version=1, client_capabilities=capabilities)
+    assert handler.supports_shared_approvals is expected
+
+
+@pytest.mark.parametrize(
+    ("option_id", "winner"), [("approve", True), ("reject", False), (None, False)]
+)
+async def test_shared_request_and_resolution_use_client_wire_session_id(
+    option_id: str | None, winner: bool
+) -> None:
+    handler = _bound_handler(wire="picker-control", target="real-target")
+    handler.state.client_supports_shared_approvals = True
+    approval_id = "a3ad8a2d-87a0-4a82-87e6-415d6bd4816a"
+    metadata = {"inspect.approval_id": approval_id, "request-origin": "test"}
+    request = _permission_request_for("real-target").model_copy(
+        update={"field_meta": metadata}
+    )
+    await handler.request_permission(request)
+    request_method, request_payload = handler.connection.send_request.call_args.args
+    assert request_method == "session/request_permission"
+    assert request_payload["sessionId"] == "picker-control"
+    assert request_payload["_meta"] == metadata
+    assert request.session_id == "real-target"
+
+    await handler.approval_resolved(
+        "real-target", approval_id, option_id, winner=winner
+    )
+    expected: dict[str, Any] = {
+        "sessionId": "picker-control",
+        "approvalId": approval_id,
+        "winner": winner,
+    }
+    if option_id is not None:
+        expected["optionId"] = option_id
+    handler.connection.send_notification.assert_awaited_once_with(
+        "inspect/approval_resolved", expected
+    )
+
+
+@pytest.mark.parametrize("state", ["legacy", "unbound", "rebound", "disconnected"])
+async def test_shared_resolution_skips_ineligible_or_detached_connection(
+    state: str,
+) -> None:
+    from inspect_ai.agent._acp.connection import Bound, Unbound
+
+    handler = _bound_handler(wire="picker-control", target="real-target")
+    connection = handler.connection
+    handler.state.client_supports_shared_approvals = state != "legacy"
+    if state == "unbound":
+        handler.state.binding = Unbound()
+    elif state == "rebound":
+        handler.state.binding = Bound(
+            wire_session_id="other-wire", target_session_id="other-target"
+        )
+    elif state == "disconnected":
+        handler.connection = None
+    await handler.approval_resolved(
+        "real-target", "approval-id", "approve", winner=False
+    )
+    connection.send_notification.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

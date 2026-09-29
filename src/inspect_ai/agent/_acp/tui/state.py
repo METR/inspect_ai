@@ -50,6 +50,7 @@ from acp.schema import (
 )
 
 from inspect_ai.agent._acp.inspect_ext import (
+    APPROVAL_ID_META_KEY,
     MESSAGE_ROLE_META_KEY,
     MODEL_EVENT_COMPLETE_META_KEY,
     MODEL_EVENT_PENDING_META_KEY,
@@ -399,6 +400,8 @@ class ToolCallState:
     None`` — kept orthogonal to ``status`` so the existing
     pending/in_progress/completed/failed semantics don't change.
     """
+    approval_id: str | None = None
+    """Latest approval instance, retained after a local click for server resolution."""
     last_approval_decision: ApprovalDecisionLabel | None = None
     """The most recent decision, for the post-resolution summary line.
 
@@ -2140,6 +2143,8 @@ class SessionState:
             self._tool_calls_by_id[tool_call_id] = tc
             self.items.append(tc)
         tc.pending_approval = pending
+        approval_id = (pending.request.field_meta or {}).get(APPROVAL_ID_META_KEY)
+        tc.approval_id = approval_id if isinstance(approval_id, str) else None
         self._notify()
 
     def resolve_approval(
@@ -2166,6 +2171,23 @@ class SessionState:
             tool_call_id, option_id=option_id, cancelled=cancelled
         ):
             self._notify()
+
+    def resolve_shared_approval(
+        self, approval_id: str, *, option_id: str | None = None
+    ) -> None:
+        """Clear a shared request and display its authoritative server outcome.
+
+        Releasing a parked handler returns cancellation, not a synthetic vote.
+        Retaining the instance ID also corrects a local click that lost the race.
+        """
+        for tc in self._tool_calls_by_id.values():
+            if tc.approval_id == approval_id:
+                self._resolve_approval_inner(tc.tool_call_id, cancelled=True)
+                tc.last_approval_decision = _decision_label(
+                    option_id=option_id, cancelled=option_id is None
+                )
+                self._notify()
+                return
 
     def _resolve_approval_inner(
         self,

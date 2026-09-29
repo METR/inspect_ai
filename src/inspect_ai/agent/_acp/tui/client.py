@@ -41,12 +41,14 @@ from inspect_ai._util._async import tg_collect
 from inspect_ai.agent._acp._config import ACP_STREAM_BUFFER_LIMIT
 from inspect_ai.agent._acp.discovery import TargetAddress
 from inspect_ai.agent._acp.inspect_ext import (
+    APPROVAL_RESOLVED_METHOD,
     INSPECT_EVENT_METHOD,
     INSPECT_LIST_SAMPLES_METHOD,
     INTERACTIVE_META_KEY,
     PICKER_META_KEY,
     PLAN_RENDERING_META_KEY,
     RAW_EVENTS_META_KEY,
+    SHARED_APPROVALS_META_KEY,
 )
 from inspect_ai.agent._acp.tui.state import (
     PendingApproval,
@@ -90,6 +92,7 @@ CLIENT_CAPABILITIES = {
     # the in-proc panel / console handlers.
     "elicitation": {"form": {}},
     "_meta": {
+        SHARED_APPROVALS_META_KEY: True,
         PLAN_RENDERING_META_KEY: True,
         RAW_EVENTS_META_KEY: [
             "score",
@@ -905,6 +908,28 @@ def _build_session_router(
                 kind="notification",
             )
         )
+
+    async def _on_approval_resolved(params: Any) -> None:
+        if (
+            not isinstance(params, dict)
+            or params.get("sessionId") != session_ref.session_id
+        ):
+            return
+        approval_id = params.get("approvalId")
+        option_id = params.get("optionId")
+        if not isinstance(approval_id, str) or not approval_id:
+            return
+        if option_id is not None and not isinstance(option_id, str):
+            return
+        session_ref._state.resolve_shared_approval(approval_id, option_id=option_id)
+
+    router.add_route(
+        Route(
+            method=APPROVAL_RESOLVED_METHOD,
+            func=_on_approval_resolved,
+            kind="notification",
+        )
+    )
 
     async def _on_session_ended(params: Any) -> None:
         await _handle_session_ended(session_ref, params)
