@@ -296,9 +296,8 @@ Responsibilities:
 - On attach, **replays** the last N messages of prior session as
   `session/update` notifications so the editor's view is coherent (N is
   configurable; tool call payloads beyond a size threshold are elided).
-- Supports multiple concurrent observers attaching to the same session
-  (one driver — the prompt source — plus passive read-only viewers); see
-  "Multi-attach" below.
+- Supports multiple clients attaching to the same session; approval routing
+  depends on their capabilities, as described in "Deep dive: approval UI".
 
 #### Filtering top-level events (critical correctness requirement)
 
@@ -669,57 +668,77 @@ wants to be notified with the rich detail, separate from the normal
 
 ## Deep dive: approval UI
 
-When ACP clients are attached and Inspect's `approval` framework would
-otherwise prompt a human (`human_approver` etc.), the prompt is routed
-to **a single attached client** rather than the local input panel.
-Both the in-process TUI client and external editor clients are normal
-ACP attachments, so the same mechanism serves both.
+With an ACP server enabled, `human_approver` sends
+`session/request_permission` through ACP and waits for a client to attach
+if none is ready. Without an ACP server, the existing panel or console
+handles the prompt. The configured approval chain still decides which
+calls need a person and which choices are available.
 
-**Flow.**
-1. Approver decides "I need a human decision" for a pending tool call.
-2. Adapter sends an ACP `session/request_permission` to the **driver**
-   client — the one whose `session/prompt` most recently landed on
-   this session, with first-attached as the fallback when no prompt
-   has been sent yet.
-3. Driver responds; adapter resolves the approval future with the
-   decision; tool execution proceeds (or is denied).
-4. If the driver's request raises (typically `ConnectionError` on
-   mid-prompt disconnect), adapter falls through to the next
-   attached client in attach order, and so on.
-5. Non-driver clients observe the tool's eventual `ToolCallProgress`
-   via the normal event stream — they're not asked to decide.
+The driver is the client most recently bound or promoted by a successful
+`session/prompt`, with attachment order as the fallback. Routing depends
+on whether that driver advertises shared-approval support:
 
-**Why single-driver and not broadcast.** ACP has no protocol-level
-cancel for outbound requests (no `$/cancelRequest`-equivalent on
-`session/request_permission`). A broadcast model would leave losing
-editors with a stale permission card forever — whatever they
-eventually click is silently discarded server-side. Picking one
-driver means the operator only sees the prompt on the client they're
-actually using; the others stay clean. Aligns with the doc's
-"one driver + read-only observers" decision below.
+| Driver capability | Recipients | Resolution |
+|---|---|---|
+| Legacy/default: no `inspect.shared_approvals` | One driver at a time | Response resolves the request; connection failure tries the next client. |
+| `_meta["inspect.shared_approvals"]: true` | Ready opted-in clients, including late attachments | First valid selected choice wins; every participant receives an explicit resolution. |
 
-**Driver selection: last-prompt wins.** The strongest signal of
-operator attention is "I just typed something here." The connection
-handler calls `mark_active_approver_client(self)` after every
-successful `session/prompt` forward (`connection.py`), promoting
-itself to the head of the driver chain. Attach order is the
-fallback when no prompt has been sent — typical for dataset-driven
-first turns. Disconnecting clients drop out of the chain
-automatically.
+The Inspect TUI advertises this capability automatically; there is no
+separate user setting. Legacy clients are excluded from shared dispatch
+because they cannot dismiss a request resolved elsewhere. A legacy driver
+already holding a request stays exclusive. Shared cancelled or unknown
+responses abstain; when all shared clients fail or abstain, routing can
+fall back to a legacy client. When no clients remain, routing waits for
+another attachment. The routing layer has no decision timeout; enclosing
+sample limits can still cancel it.
 
-**Fallback.** If no clients are attached at the moment a prompt is
-needed, fall back to the existing approver behavior (input panel,
-defaults, etc.) — ACP doesn't *replace* the approval system, it just
-proxies for it when a human is reachable.
+**Shared wire contract.** The capability is carried in
+`initialize.clientCapabilities._meta`. Each shared request carries one
+stable UUID in `_meta["inspect.approval_id"]`. The server sends
+`inspect/approval_resolved` with `{sessionId, approvalId, optionId, winner}`
+to each participant, using its client-facing session ID. Exactly one
+connection has `winner: true`. Cancellation omits `optionId` and sets
+`winner: false`; this can supersede a provisional winner notification if
+cancellation interrupts delivery. The resulting `ApprovalEvent`, carrying
+the same ID in `metadata`, confirms that the decision was recorded.
+Clients must match the approval ID, not just a reusable tool-call ID.
 
-**Timeout.** No timeout. Matches the in-proc human approver's
-wait-forever behavior; default-deny on timeout would be surprising
-and risk silently rejecting tools the operator intended to approve.
+**Optional principal attribution.** A client can include this object in
+its permission response (under JSON-RPC `result`):
 
-Worth designing carefully because approval is the one place where ACP
-clients can *block agent progress* outside of the cancel/turn-scope
-mechanism. The driver-fallback chain must be robust to client
-disconnect mid-prompt.
+```json
+{
+  "outcome": {"outcome": "selected", "optionId": "approve"},
+  "_meta": {
+    "inspect.approval_actor": {
+      "subject": "principal-123",
+      "issuer": "https://identity.example",
+      "email": "reviewer@example.com"
+    }
+  }
+}
+```
+
+Only a recognized selected choice retains actor metadata. `subject` is a
+required nonempty string of at most 256 characters; optional `issuer` and
+`email` strings are limited to 2048 and 320 characters. Invalid optional
+fields and unknown fields are dropped; an invalid subject drops the
+actor without changing the decision. Inspect adds `source: "acp_client"`
+itself and never copies a client-supplied provenance or approval ID.
+
+The winning response's actor is stored in `Approval.metadata` and forwarded
+by `record_approval` into `ApprovalEvent.metadata`. Existing transcript,
+log, hook and replay consumers retain it through the metadata field;
+`ApprovalEvent.approver` remains the configured approver's registry name.
+Old clients omit the actor; old runners ignore the extra response `_meta`.
+
+This is client-reported principal identity, not proof of a human or an
+authentication mechanism. A web backend such as Hawk should construct it
+from validated server authentication state, never browser-supplied IDs.
+Inspect cannot verify that assertion from an arbitrary ACP peer; the web
+backend's authenticated audit remains authoritative. `clientInfo` and
+`source="operator"` do not establish a person's identity. The TUI does not
+infer a subject from the local account or its client name.
 
 ## Deep dive: enumeration & routing
 
@@ -774,14 +793,10 @@ strings only matter at the picker step.
   `session/load(<known>)` binds directly; `session/load(<unknown>)`
   returns `invalid_params` rather than falling back to picker — silent
   rebind of an explicit `session/load` call would surprise the client.
-- **Multiple concurrent connections to different sessions** are supported
-  by default. Within one session: **one driver + read-only observers**.
-  The driver is the client whose `session/prompt` most recently landed
-  (implicit claim — no explicit `inspect/claimDriver` extension); first-
-  attached is the fallback when no prompt has been sent yet.
-  `session/request_permission` routes to the driver only; the registry
-  exposes a `driver_chain()` accessor so the approval shim can fall
-  through to the next attached client on driver disconnect.
+- **Multiple concurrent connections** are supported within and across
+  sessions. Binding or a successful `session/prompt` promotes the driver.
+  Legacy approval requests use its fallback chain; an opted-in driver
+  shares requests with compatible clients. See "Deep dive: approval UI".
 - A **`InterruptEvent`** in the transcript records every cancellation
   (user, limit, system) for a uniform record of "agent was interrupted".
 - User messages injected via ACP are marked
@@ -1371,6 +1386,10 @@ Shipped the `inspect acp` subcommand in its minimum-viable form: a stdio↔socke
 
 ### Phase 14: Approval UI via `session/request_permission` ✅
 
+Historical implementation notes below describe the initial exclusive routing.
+For current shared routing, attach waiting and optional actor metadata, see
+[Deep dive: approval UI](#deep-dive-approval-ui).
+
 Routes the **human leaf** of the configured approval chain through ACP `session/request_permission` when one or more ACP clients are attached to the running sample. The rest of the chain (auto-approvers, model-judgment approvers, ApprovalPolicy matching, the global `apply_tool_approval` dispatch) is untouched — only `human_approver`'s "ask the person at the keyboard" step changes behavior. When no clients are attached, the existing in-proc Textual panel / console prompt flow runs unchanged.
 
 **Why scoped to the human leaf and not the whole approval pipeline.** Original sketch spoke of intercepting at the framework level with timeout + default-deny. Real-world configs commonly mix auto-approve for safe tools (`grep`, `read_file`) with human approval for destructive ones (`bash`, `text_editor`); a global intercept would have skipped the auto rules and prompted the editor for every tool. Scoping to the human leaf keeps the configured policy in charge of *what* needs approval; ACP only changes *who renders the prompt* when there's a better surface available.
@@ -1398,7 +1417,7 @@ Routes the **human leaf** of the configured approval chain through ACP `session/
 - **`modify` decision over ACP.** ACP's `PermissionOption` doesn't have a "modify the call before approving" affordance; `Approval.modified` (a new `ToolCall`) would need a custom UI surface. If a configured `human_approver` includes `modify` in its choices, the optionId round-trips but downstream `apply_tool_approval` degenerates to using the original call (no modification). Could add a richer flow later via an `_meta`-flagged option for Inspect-aware clients.
 - **`escalate` decision over ACP.** Same shape problem — sends and round-trips, but ACP options are binary allow/deny variants and most editors render it as a generic button without the escalation-chain semantics.
 - **Timeout / approval expiry.** Wait-forever per the decision above. If a future deployment needs unattended fallback, an opt-in `timeout=` parameter on `human_approver` could bound how long the shim waits on the driver before falling through or defaulting.
-- **Telemetry / audit for "approval came from ACP client X vs in-proc".** `Approval.metadata` could carry it; not in v1.
+- **Verified actor identity.** Optional client-reported actor metadata is now supported; independently authenticating an ACP peer's principal remains out of scope.
 - **Live approval card with diff preview for `edit` tools.** Currently the prompt content is the same markdown the live tool-call notification carries; richer per-kind formatting (e.g. `FileEditToolCallContent` for diff previews) is a follow-up.
 
 **Verification.** `pytest tests/agent/test_acp/ tests/_cli/test_acp_server_flag.py tests/_cli/test_acp_cli.py tests/approval/` — 382 passed. `ruff format` + `ruff check` clean across all modified source and test files. `mypy --exclude tests/test_package src tests` clean (1026 source files). Manual smoke against Zed via `inspect eval <task> --acp-server --approval=human` confirms the permission card renders with the bash command and the user's response advances the eval.
@@ -1569,7 +1588,10 @@ Every call site that crosses into `acp.Connection` is therefore asyncio-anchored
 
 1. **Bridge two-way race** (`stdio.py`): `asyncio.create_task` × 2 → `asyncio.wait(FIRST_COMPLETED)` → cancel-loser. The CLI bridge is a leaf that doesn't compose with anyio code elsewhere; the asyncio idiom is clean for the symmetric stdin↔socket forwarder topology.
 
-(The approval shim previously also carried an asyncio race + drain-losers idiom for broadcasting `session/request_permission` to all attached clients. That broadcast was replaced with single-driver semantics — sequential send-with-fallback over the driver chain — which removed both the race AND the drain-losers complexity. The shim is now a plain async for-loop over the driver chain; no `create_task`, no `wait`, no background drain.)
+The approval shim uses an anyio task group for opted-in shared clients,
+with cancellation of losing requests and explicit client resolution.
+Legacy dispatch stays sequential. Actual ACP requests still cross the
+asyncio transport boundary.
 
 **Backend-agnostic cancellation catches.** All `except asyncio.CancelledError` / `isinstance(exc, asyncio.CancelledError)` sites use `anyio.get_cancelled_exc_class()` instead (which resolves to `asyncio.CancelledError` on asyncio, `trio.Cancelled` on trio). Zero semantic change at runtime; strict superset for future portability if the `acp` library ever ships an anyio API.
 

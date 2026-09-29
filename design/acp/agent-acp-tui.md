@@ -90,6 +90,14 @@ Exactly one pill always visible in the status row. The chosen colour propagates 
 
 Shown when an attached agent invokes a tool requiring human approval.
 
+The TUI automatically advertises `inspect.shared_approvals`; no user setting
+is needed. With a compatible server, another opted-in client can answer the
+same request. `inspect/approval_resolved` clears the matching approval ID
+and updates the displayed choice even after a losing local click. Legacy
+servers keep their existing exclusive routing. The TUI sends no actor
+identity and does not treat its client name or local account as a verified
+person; see the [approval protocol](agent-acp.md#deep-dive-approval-ui).
+
 ![approval modal](images/05a-modal-request-permission.png)
 
 - Header: tool name + one-line description
@@ -189,13 +197,15 @@ Pivot from the original modal design: keeping the approval anchored to the tool-
 - **`approval` lifecycle pill** — new `Lifecycle` literal value with `"⚠ awaiting approval"` text and `$warning` colour. Priority order: `complete > approval > running > interrupted > idle`. Composer `Input` is hidden (`display: none`) while the lifecycle is `approval`; the bar shows in its place.
 - **Producer-side markdown structure** — `approval/_human/acp.py:_build_request` bakes the in-proc `render_tool_approval` visual structure (bold per-half titles, horizontal-rule separator between `view.context` and `view.call`, fenced code for non-markdown format) directly into the markdown text it sends. **No protocol extension** — every ACP client (Zed, future ones) renders the structure natively from stock markdown. The TUI's existing `_compose_item` → `StyledMarkdown` pipeline picks up the headings and rules for free.
 
-**Protocol extensions landed**: none. The whole feature lands on existing ACP `session/request_permission` semantics; the visual structure improvement is plain markdown in the request body. Strict superset for non-Inspect clients.
+The initial permission UI uses standard ACP request content. Shared
+resolution additionally uses the opt-in protocol described above;
+legacy clients retain exclusive routing.
 
 **Acceptance**
 
 - Manual: eval with a human-approver tool (`inspect eval <task> --acp-server --approval=human`); attach via `inspect acp` in another terminal. When a `bash` tool fires, watch the card appear with the inline content preview AND the composer-area approval bar with `[ a ] approve [ r ] reject …`. Press `a`; observe the card transition to decision summary + running tool, the bar disappear, and the composer Input return. Repeat with Tab+Enter; repeat with a mouse click on Reject. Header pill cycles `running → ⚠ awaiting approval → running` cleanly.
 - Manual: trigger an approval for a tool whose viewer produces a `FileEditToolCallContent` diff variant; confirm the inline content section renders the actual diff (not a stringified blob).
-- Manual (multi-client): attach Zed alongside `inspect acp`. The driver chain (last-prompt-wins, per `agent-acp.md`'s single-driver section) routes the approval to whichever client most recently typed; the other observes via the normal event stream and never sees a competing prompt — no stale-card scenario to test.
+- Manual (multi-client): attach two TUI clients and verify either can answer, clearing both cards. With a legacy editor as driver, verify its request remains exclusive; a later shared attachment must not preempt it.
 - Automated: pure-function tests for the state handshake (`consume_approval_request` / `resolve_approval` / `current_pending_approval` accessor / auto-dismiss heuristic / lifecycle priority / decision-label mapping); pilot tests for the inline content section render + the composer bar (mount, hide-when-no-pending, first-button focus, button-press round-trip, action_approval_decide gate); producer-side tests for the embedded title/separator/fence markdown shape; wire-level tests for the handler's response shape (`AllowedOutcome` + `DeniedOutcome` + cancellation propagation).
 
 **Known v1 gaps (intentional)**

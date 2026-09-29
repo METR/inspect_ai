@@ -138,6 +138,9 @@ def _approval_from_response(
     ``outcome.selected`` with an unrecognized ``optionId`` → reject
     with an explanation noting the unknown id; defensive against a
     misbehaving client (or a client that synthesized its own option).
+
+    A valid selection may carry bounded, client-reported actor metadata.
+    It is attribution only, not authenticated identity or authorization.
     """
     outcome = response.outcome
     # The discriminator is ``outcome.outcome`` ("selected" | "cancelled").
@@ -148,9 +151,21 @@ def _approval_from_response(
         )
     option_id = outcome.option_id  # AllowedOutcome
     if option_id in choices:
+        from inspect_ai.agent._acp.inspect_ext import APPROVAL_ACTOR_META_KEY
+
         # Safe cast: option_id is one of the literal-string members.
         decision: ApprovalDecision = option_id  # type: ignore[assignment]
-        return Approval(decision=decision)
+        metadata = None
+        raw_actor = (response.field_meta or {}).get(APPROVAL_ACTOR_META_KEY)
+        if isinstance(raw_actor, dict):
+            actor = {"source": "acp_client"}
+            for key, limit in (("subject", 256), ("issuer", 2048), ("email", 320)):
+                value = raw_actor.get(key)
+                if isinstance(value, str) and 0 < len(value) <= limit:
+                    actor[key] = value
+            if "subject" in actor:
+                metadata = {APPROVAL_ACTOR_META_KEY: actor}
+        return Approval(decision=decision, metadata=metadata)
     return Approval(
         decision="reject",
         explanation=(

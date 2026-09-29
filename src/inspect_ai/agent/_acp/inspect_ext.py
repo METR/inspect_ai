@@ -75,6 +75,9 @@ SHARED_APPROVALS_META_KEY = "inspect.shared_approvals"
 # Stable logical request ID on shared permission requests and Approval metadata.
 APPROVAL_ID_META_KEY = "inspect.approval_id"
 
+# Optional client-reported principal on permission responses and Approval metadata.
+APPROVAL_ACTOR_META_KEY = "inspect.approval_actor"
+
 # Sentinel value inside a ``RAW_EVENTS_META_KEY`` subscription list
 # meaning "forward every event type" (the all-events glob). Kept as a
 # uniform list-of-strings shape so the forwarder's membership check

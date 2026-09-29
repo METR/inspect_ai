@@ -333,6 +333,116 @@ def test_approval_from_response_unknown_option_becomes_reject() -> None:
     assert "definitely-not-real" in approval.explanation
 
 
+@pytest.mark.parametrize(
+    "metadata", [None, {}, {"unrelated": "ignored", "inspect.approval_id": "forged"}]
+)
+def test_approval_actor_legacy_response_stays_unattributed(
+    metadata: dict[str, Any] | None,
+) -> None:
+    response = _selected("approve")
+    response.field_meta = metadata
+    approval = _approval_from_response(response, ["approve", "reject"])
+    assert approval.decision == "approve"
+    assert not approval.metadata
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("someone", id="string"),
+        pytest.param([], id="list"),
+        pytest.param({}, id="missing-subject"),
+        pytest.param({"subject": None}, id="null-subject"),
+        pytest.param({"subject": ""}, id="empty-subject"),
+        pytest.param({"subject": True}, id="boolean-subject"),
+        pytest.param({"subject": 123}, id="numeric-subject"),
+        pytest.param(
+            {
+                "subject": "s" * 257,
+                "issuer": "https://issuer",
+                "email": "a@example.com",
+            },
+            id="oversize-subject",
+        ),
+    ],
+)
+def test_approval_actor_drops_invalid_subject_without_changing_decision(
+    actor: Any,
+) -> None:
+    response = _selected("approve")
+    response.field_meta = {"inspect.approval_actor": actor}
+    approval = _approval_from_response(response, ["approve", "reject"])
+    assert approval.decision == "approve"
+    assert not approval.metadata
+
+
+@pytest.mark.parametrize(
+    ("optional", "expected"),
+    [
+        pytest.param({}, {}, id="absent"),
+        pytest.param({"issuer": "", "email": ""}, {}, id="empty"),
+        pytest.param({"issuer": None, "email": None}, {}, id="null"),
+        pytest.param(
+            {"issuer": False, "email": ["a@example.com"]}, {}, id="wrong-types"
+        ),
+        pytest.param({"issuer": "i" * 2049, "email": "e" * 321}, {}, id="oversize"),
+        pytest.param(
+            {"issuer": "i" * 2048, "email": "e" * 320},
+            {"issuer": "i" * 2048, "email": "e" * 320},
+            id="maximum-lengths",
+        ),
+        pytest.param(
+            {"issuer": "https://issuer", "email": ""},
+            {"issuer": "https://issuer"},
+            id="valid-issuer-invalid-email",
+        ),
+        pytest.param(
+            {"issuer": "", "email": "a@example.com"},
+            {"email": "a@example.com"},
+            id="invalid-issuer-valid-email",
+        ),
+    ],
+)
+def test_approval_actor_keeps_only_bounded_fields_and_fixed_provenance(
+    optional: dict[str, Any], expected: dict[str, str]
+) -> None:
+    subject = "s" * 256
+    response = _selected("reject")
+    response.field_meta = {
+        "inspect.approval_actor": {
+            "subject": subject,
+            **optional,
+            "source": "authenticated_hawk_user",
+            "kind": "human",
+            "unknown": "discard",
+        },
+        "inspect.approval_id": "forged",
+        "unrelated": "discard",
+    }
+    approval = _approval_from_response(response, ["approve", "reject"])
+    assert approval.decision == "reject"
+    assert approval.metadata == {
+        "inspect.approval_actor": {
+            "subject": subject,
+            **expected,
+            "source": "acp_client",
+        }
+    }
+
+
+@pytest.mark.parametrize("outcome", ["cancelled", "unknown-choice"])
+def test_approval_actor_is_not_attached_to_synthetic_rejection(outcome: str) -> None:
+    response = _cancelled() if outcome == "cancelled" else _selected("unknown-choice")
+    response.field_meta = {
+        "inspect.approval_actor": {"subject": "someone", "email": "a@example.com"}
+    }
+    approval = _approval_from_response(response, ["approve", "reject"])
+    assert approval.decision == "reject"
+    assert approval.explanation is not None
+    assert not approval.metadata
+
+
 # ---------------------------------------------------------------------------
 # _request_from_driver_with_fallback — single-driver semantics
 # ---------------------------------------------------------------------------
@@ -670,6 +780,24 @@ async def test_shared_simultaneous_choices_have_exactly_one_winner(
         _ControlledApprovalClient(_selected(first_choice)),
         _ControlledApprovalClient(_selected(second_choice)),
     ]
+    actors = [
+        {
+            "subject": "first-user",
+            "issuer": "https://issuer",
+            "email": "first@example.com",
+        },
+        {
+            "subject": "second-user",
+            "issuer": "https://issuer",
+            "email": "second@example.com",
+        },
+    ]
+    for client, actor in zip(clients, actors):
+        assert client.response is not None
+        client.response.field_meta = {
+            "inspect.approval_actor": {**actor, "source": "authenticated_hawk_user"},
+            "inspect.approval_id": "forged",
+        }
     results: list[Approval] = []
     session = _StubSession(clients)
     with anyio.fail_after(2):
@@ -684,7 +812,19 @@ async def test_shared_simultaneous_choices_have_exactly_one_winner(
     assert len(results) == 1
     approval_id = _shared_approval_id(clients[0])
     assert _shared_approval_id(clients[1]) == approval_id
-    assert results[0].metadata == {"inspect.approval_id": approval_id}
+    winners = [client for client in clients if client.resolutions[0].winner]
+    assert len(winners) == 1
+    assert winners[0].response is not None
+    assert winners[0].response.outcome.outcome == "selected"
+    assert results[0].decision == winners[0].response.outcome.option_id
+    expected_metadata = {
+        "inspect.approval_id": approval_id,
+        "inspect.approval_actor": {
+            **actors[clients.index(winners[0])],
+            "source": "acp_client",
+        },
+    }
+    assert results[0].metadata == expected_metadata
     event = ApprovalEvent(
         message="Please confirm",
         call=_make_call(),
@@ -693,13 +833,8 @@ async def test_shared_simultaneous_choices_have_exactly_one_winner(
         metadata=results[0].metadata,
     )
     restored = ApprovalEvent.model_validate_json(event.model_dump_json())
-    assert restored.metadata == {"inspect.approval_id": approval_id}
+    assert restored.metadata == expected_metadata
     assert restored.decision == results[0].decision
-    winners = [client for client in clients if client.resolutions[0].winner]
-    assert len(winners) == 1
-    assert winners[0].response is not None
-    assert winners[0].response.outcome.outcome == "selected"
-    assert results[0].decision == winners[0].response.outcome.option_id
     for client in clients:
         assert client.calls == ["drain", "request"]
         assert client.resolutions == [
