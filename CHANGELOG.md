@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Fixed model calls and token counting in multi-process Scout scans when adaptive concurrency is enabled.
 - Eval Log: Reading zstd-compressed `.eval` files no longer fails with `AttributeError: ... '_needs_input'` on Python builds that include CPython's gh-156002 zipfile change.
 - Scoring: `math()` now records `reason="invalid_response_format"` when no answer can be extracted, so format failures are distinguishable from wrong answers.
 - Checkpoints: Invalidating a sample now re-runs it from scratch on retry (its checkpoints are discarded) instead of resuming from its last checkpoint.
