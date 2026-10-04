@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Scout scans with multiple processes now preserve model role labels in model events and per-role usage.
 - Fixed eval-set logging with S3 credentials restricted to the log directory's prefix.
 
 ## 0.3.275 (01 October 2026)
