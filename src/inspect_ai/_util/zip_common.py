@@ -23,3 +23,4 @@ class ZipEntry:
     compressed_size: int
     uncompressed_size: int
     local_header_offset: int
+    crc32: int | None = None

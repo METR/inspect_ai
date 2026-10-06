@@ -187,7 +187,7 @@ async def _parse_central_directory(
             method,
             _time,
             _date,
-            _crc,
+            crc,
             compressed_size,
             uncompressed_size,
             name_len,
@@ -241,6 +241,7 @@ async def _parse_central_directory(
                 compressed_size,
                 uncompressed_size,
                 local_header_off,
+                crc32=crc,
             )
         )
         pos += 46 + name_len + extra_len + comment_len

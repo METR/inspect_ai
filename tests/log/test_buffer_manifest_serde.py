@@ -3,6 +3,10 @@
 import json
 import os
 import tempfile
+from pathlib import Path
+from zipfile import BadZipFile
+
+import pytest
 
 from inspect_ai.log._log import EvalSampleSummary
 from inspect_ai.log._recorders.buffer.filestore import (
@@ -11,7 +15,9 @@ from inspect_ai.log._recorders.buffer.filestore import (
     SampleManifest,
     SampleSegment,
     Segment,
+    SegmentFile,
 )
+from inspect_ai.log._recorders.buffer.types import SampleData
 
 POOL_KEYS = {"last_message_pool_id", "last_call_pool_id"}
 
@@ -80,3 +86,33 @@ def test_legacy_manifest_regains_pool_ids_on_rewrite() -> None:
     raw, _ = _round_trip(parsed)
 
     assert POOL_KEYS <= json.loads(raw)["segments"][0].keys()
+
+
+@pytest.mark.parametrize("file_uri", [False, True])
+async def test_async_buffer_reads_preserve_missing_etag_and_zip_integrity(
+    tmp_path: Path, file_uri: bool
+) -> None:
+    path = tmp_path / "live log.eval"
+    store = SampleBufferFilestore(path.as_uri() if file_uri else str(path))
+    assert await store.get_samples_async() is None
+    assert await store.get_sample_data_async("s1", 1) is None
+    store.write_manifest(_manifest())
+    store.write_segment(
+        1, [SegmentFile(id="s1", epoch=1, data=SampleData(events=[], attachments=[]))]
+    )
+    samples = store.get_samples()
+    assert samples is not None and samples != "NotModified"
+    assert await store.get_samples_async() == samples
+    assert await store.get_samples_async(samples.etag) == "NotModified"
+    assert await store.get_sample_data_async("s1", 1) == store.get_sample_data("s1", 1)
+
+    segment = next((tmp_path / ".buffer").glob("*/segment.1.zip"))
+    archive = bytearray(segment.read_bytes())
+    archive[archive.index(b"PK\x01\x02") + 16] ^= 1  # Central-directory CRC.
+    segment.write_bytes(archive)
+    with pytest.raises(BadZipFile, match="CRC"):
+        store.get_sample_data("s1", 1)
+    with pytest.raises(BadZipFile, match="CRC"):
+        await store.get_sample_data_async("s1", 1)
+    segment.unlink()
+    assert await store.get_sample_data_async("s1", 1) is None

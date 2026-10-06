@@ -362,7 +362,7 @@ async def build_pending_sample_urls(
     if not isinstance(buffer, SampleBufferFilestore):
         return None
 
-    pending = buffer.get_pending_segments(
+    pending = await buffer.get_pending_segments_async(
         id,
         epoch,
         after_event_id=after_event_id,

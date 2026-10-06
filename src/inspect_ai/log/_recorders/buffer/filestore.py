@@ -1,6 +1,7 @@
 import hashlib
 import os
 import tempfile
+import zlib
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -8,12 +9,14 @@ from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 from urllib.parse import urlparse
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import NotRequired, TypedDict, override
 
 from inspect_ai._display.core.display import TaskDisplayMetric
+from inspect_ai._util.async_zip import AsyncZipReader
+from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.constants import DEFAULT_LOG_SHARED, EVAL_LOG_FORMAT
 from inspect_ai._util.file import FileSystem, basename, dirname, filesystem, open_file
 from inspect_ai._util.json import to_json_safe, to_json_str_safe
@@ -297,6 +300,21 @@ class SampleBufferFilestore(SampleBuffer):
         except FileNotFoundError:
             return None
 
+    async def read_manifest_async(self) -> Manifest | None:
+        """Read the manifest without blocking on S3 requests."""
+        try:
+            async with AsyncFilesystem() as fs:
+                contents = await fs.read_file_bytes_fully(
+                    self._async_read_path(self._manifest_file()), 0, None
+                )
+            return Manifest.model_validate_json(contents)
+        except FileNotFoundError:
+            return None
+
+    def _async_read_path(self, path: str) -> str:
+        # Preserve the sync writer's literal percent escapes in local file URIs.
+        return str(self._fs.fs._strip_protocol(path)) if self._fs.is_local() else path
+
     def read_segment_data(
         self, id: int, sample_id: str | int, epoch_id: int
     ) -> SampleData:
@@ -420,6 +438,28 @@ class SampleBufferFilestore(SampleBuffer):
             etag=fs_etag,
         )
 
+    async def get_samples_async(
+        self, etag: str | None = None
+    ) -> Samples | Literal["NotModified"] | None:
+        """Read pending sample summaries without blocking on S3 requests."""
+        async with AsyncFilesystem() as fs:
+            try:
+                info = await fs.info(self._async_read_path(self._manifest_file()))
+            except FileNotFoundError:
+                return None
+            fs_etag = info.etag or f"{info.mtime}{info.size}"
+            if etag == fs_etag:
+                return "NotModified"
+            manifest = await self.read_manifest_async()
+        if manifest is None:
+            return None
+        return Samples(
+            samples=[sm.summary for sm in manifest.samples],
+            metrics=manifest.metrics,
+            refresh=self.update_interval,
+            etag=fs_etag,
+        )
+
     @override
     def get_sample_data(
         self,
@@ -430,68 +470,83 @@ class SampleBufferFilestore(SampleBuffer):
         after_message_pool_id: int | None = None,
         after_call_pool_id: int | None = None,
     ) -> SampleData | None:
-        # read the manifest
-        manifest = self.read_manifest()
-        if manifest is None:
-            return None
-
-        # find this sample in the manifest
-        sample = _find_sample(manifest, id, epoch)
-        if sample is None:
-            return None
-
-        segments = segments_for_sample_cursor(
-            manifest,
-            sample,
+        pending = self.get_pending_segments(
+            id,
+            epoch,
             after_event_id=after_event_id,
             after_attachment_id=after_attachment_id,
             after_message_pool_id=after_message_pool_id,
             after_call_pool_id=after_call_pool_id,
         )
-
-        # defaults for the per-item post-filter below
-        after_event_id = after_event_id if after_event_id is not None else -1
-        after_attachment_id = (
-            after_attachment_id if after_attachment_id is not None else -1
-        )
-        after_message_pool_id = (
-            after_message_pool_id if after_message_pool_id is not None else -1
-        )
-        after_call_pool_id = (
-            after_call_pool_id if after_call_pool_id is not None else -1
-        )
-
-        # collect data from the segments
+        if pending is None:
+            return None
         try:
             sample_data = SampleData(
                 events=[], attachments=[], message_pool=[], call_pool=[]
             )
-            for segment in segments:
-                data = self.read_segment_data(segment["id"], id, epoch)
+            for segment in pending.segments:
+                data = self.read_segment_data(segment.id, id, epoch)
                 sample_data.events.extend(data.events)
                 sample_data.attachments.extend(data.attachments)
                 sample_data.message_pool.extend(data.message_pool)
                 sample_data.call_pool.extend(data.call_pool)
         except FileNotFoundError:
-            # the sample might complete while this is running, in which case
-            # we'll just return None
             return None
+        return _filter_sample_data(
+            sample_data,
+            after_event_id,
+            after_attachment_id,
+            after_message_pool_id,
+            after_call_pool_id,
+        )
 
-        # The segment-level OR-filter above includes entire segments when any
-        # cursor type has new data, so individual items already seen by the
-        # client may be included. Post-filter to exclude them.
-        sample_data.events = [e for e in sample_data.events if e.id > after_event_id]
-        sample_data.attachments = [
-            a for a in sample_data.attachments if a.id > after_attachment_id
-        ]
-        sample_data.message_pool = [
-            m for m in sample_data.message_pool if m.id > after_message_pool_id
-        ]
-        sample_data.call_pool = [
-            c for c in sample_data.call_pool if c.id > after_call_pool_id
-        ]
-
-        return sample_data
+    async def get_sample_data_async(
+        self,
+        id: str | int,
+        epoch: int,
+        after_event_id: int | None = None,
+        after_attachment_id: int | None = None,
+        after_message_pool_id: int | None = None,
+        after_call_pool_id: int | None = None,
+    ) -> SampleData | None:
+        """Read pending sample data using asynchronous S3 range requests."""
+        async with AsyncFilesystem() as fs:
+            pending = await self.get_pending_segments_async(
+                id,
+                epoch,
+                after_event_id=after_event_id,
+                after_attachment_id=after_attachment_id,
+                after_message_pool_id=after_message_pool_id,
+                after_call_pool_id=after_call_pool_id,
+            )
+            if pending is None:
+                return None
+            sample_data = SampleData(
+                events=[], attachments=[], message_pool=[], call_pool=[]
+            )
+            try:
+                for segment in pending.segments:
+                    reader = AsyncZipReader(fs, self._async_read_path(segment.path))
+                    entry = await reader.get_member_entry(segment.member_name)
+                    contents = await reader.read_member_fully(entry)
+                    # Preserve ZipFile's integrity check when switching readers.
+                    if entry.crc32 is not None and zlib.crc32(contents) != entry.crc32:
+                        raise BadZipFile(f"Bad CRC-32 for file {segment.member_name!r}")
+                    data = SampleData.model_validate_json(contents)
+                    sample_data.events.extend(data.events)
+                    sample_data.attachments.extend(data.attachments)
+                    sample_data.message_pool.extend(data.message_pool)
+                    sample_data.call_pool.extend(data.call_pool)
+            except FileNotFoundError:
+                # Completion may remove segments while this request is reading.
+                return None
+        return _filter_sample_data(
+            sample_data,
+            after_event_id,
+            after_attachment_id,
+            after_message_pool_id,
+            after_call_pool_id,
+        )
 
     @override
     def get_sample_metadata(self, id: str | int, epoch: int) -> dict[str, Any] | None:
@@ -561,7 +616,56 @@ class SampleBufferFilestore(SampleBuffer):
         instead of the first; `has_more` is always False so a "show recent then
         follow" caller can drop in mid-stream without cursor management.
         """
-        manifest = self.read_manifest()
+        return self._pending_segments(
+            self.read_manifest(),
+            id,
+            epoch,
+            after_event_id=after_event_id,
+            after_attachment_id=after_attachment_id,
+            after_message_pool_id=after_message_pool_id,
+            after_call_pool_id=after_call_pool_id,
+            max_segments=max_segments,
+            tail=tail,
+        )
+
+    async def get_pending_segments_async(
+        self,
+        id: str | int,
+        epoch: int,
+        *,
+        after_event_id: int | None = None,
+        after_attachment_id: int | None = None,
+        after_message_pool_id: int | None = None,
+        after_call_pool_id: int | None = None,
+        max_segments: int | None = None,
+        tail: bool = False,
+    ) -> PendingSampleSegments | None:
+        """Read pending segment locations without blocking on S3 requests."""
+        return self._pending_segments(
+            await self.read_manifest_async(),
+            id,
+            epoch,
+            after_event_id=after_event_id,
+            after_attachment_id=after_attachment_id,
+            after_message_pool_id=after_message_pool_id,
+            after_call_pool_id=after_call_pool_id,
+            max_segments=max_segments,
+            tail=tail,
+        )
+
+    def _pending_segments(
+        self,
+        manifest: Manifest | None,
+        id: str | int,
+        epoch: int,
+        *,
+        after_event_id: int | None,
+        after_attachment_id: int | None,
+        after_message_pool_id: int | None,
+        after_call_pool_id: int | None,
+        max_segments: int | None,
+        tail: bool,
+    ) -> PendingSampleSegments | None:
         if manifest is None:
             return None
 
@@ -663,3 +767,35 @@ def sample_buffer_dir(log_dir: str, fs: FileSystem | None = None) -> str:
     log_dir = log_dir.rstrip("/\\")
     fs = fs or filesystem(log_dir)
     return f"{log_dir}{fs.sep}.buffer"
+
+
+def _filter_sample_data(
+    sample_data: SampleData,
+    after_event_id: int | None,
+    after_attachment_id: int | None,
+    after_message_pool_id: int | None,
+    after_call_pool_id: int | None,
+) -> SampleData:
+    # defaults for the per-item post-filter below
+    after_event_id = after_event_id if after_event_id is not None else -1
+    after_attachment_id = after_attachment_id if after_attachment_id is not None else -1
+    after_message_pool_id = (
+        after_message_pool_id if after_message_pool_id is not None else -1
+    )
+    after_call_pool_id = after_call_pool_id if after_call_pool_id is not None else -1
+
+    # The segment-level OR-filter includes entire segments when any
+    # cursor type has new data, so individual items already seen by the
+    # client may be included. Post-filter to exclude them.
+    sample_data.events = [e for e in sample_data.events if e.id > after_event_id]
+    sample_data.attachments = [
+        a for a in sample_data.attachments if a.id > after_attachment_id
+    ]
+    sample_data.message_pool = [
+        m for m in sample_data.message_pool if m.id > after_message_pool_id
+    ]
+    sample_data.call_pool = [
+        c for c in sample_data.call_pool if c.id > after_call_pool_id
+    ]
+
+    return sample_data
