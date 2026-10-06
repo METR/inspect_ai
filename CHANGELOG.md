@@ -1,5 +1,6 @@
 ## Unreleased
 
+- Scout scans with multiple processes now preserve model role labels in model events and per-role usage.
 - Fixed model calls and token counting in multi-process Scout scans when adaptive concurrency is enabled.
 - Eval Log: Reading zstd-compressed `.eval` files no longer fails with `AttributeError: ... '_needs_input'` on Python builds that include CPython's gh-156002 zipfile change.
 - Scoring: `math()` now records `reason="invalid_response_format"` when no answer can be extracted, so format failures are distinguishable from wrong answers.
