@@ -181,6 +181,35 @@ class SampleBuffer(abc.ABC):
         """
         ...
 
+    async def get_samples_async(
+        self, etag: str | None = None
+    ) -> Samples | Literal["NotModified"] | None:
+        """`get_samples` for a caller on the event loop.
+
+        Runs `get_samples` in place; a buffer whose reads wait on remote
+        storage overrides it with reads that don't block the loop.
+        """
+        return self.get_samples(etag)
+
+    async def get_sample_data_async(
+        self,
+        id: str | int,
+        epoch: int,
+        after_event_id: int | None = None,
+        after_attachment_id: int | None = None,
+        after_message_pool_id: int | None = None,
+        after_call_pool_id: int | None = None,
+    ) -> SampleData | None:
+        """`get_sample_data` for a caller on the event loop (see `get_samples_async`)."""
+        return self.get_sample_data(
+            id,
+            epoch,
+            after_event_id=after_event_id,
+            after_attachment_id=after_attachment_id,
+            after_message_pool_id=after_message_pool_id,
+            after_call_pool_id=after_call_pool_id,
+        )
+
     @abc.abstractmethod
     def get_sample_metadata(self, id: str | int, epoch: int) -> dict[str, Any] | None:
         """Get the full metadata persisted for a sample, if available."""

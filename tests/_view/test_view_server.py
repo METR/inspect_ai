@@ -7,8 +7,10 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 import urllib.parse
+import uuid
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +20,7 @@ import anyio
 import fastapi.testclient
 import fsspec  # type: ignore
 import pytest
+from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 from starlette.testclient import TestClient
 from test_helpers.utils import skip_if_trio
@@ -48,6 +51,7 @@ from inspect_ai._view.fastapi_server import AccessPolicy, FileMappingPolicy
 from inspect_ai.event import ScoreEvent
 from inspect_ai.log import list_eval_logs_async
 from inspect_ai.log._file import async_filesystem
+from inspect_ai.log._recorders.buffer.filestore import SampleBufferFilestore
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.scorer import Score
 
@@ -1994,6 +1998,162 @@ def test_fastapi_sample_events(test_client: TestClient, mock_s3_eval_file: str) 
     )
     response.raise_for_status()
     assert len(response.json()["events"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "delayed_file"),
+    [
+        ("pending-samples", "manifest.json"),
+        ("pending-sample-data", "segment.0.zip"),
+        ("pending-sample-data-urls", "manifest.json"),
+    ],
+)
+async def test_pending_reads_leave_the_event_loop_free(
+    mock_s3: None,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    delayed_file: str,
+) -> None:
+    """While a pending read waits on S3, the server answers other requests.
+
+    The read is held inside the S3 client, below the filestore,
+    `AsyncZipReader` and `AsyncFilesystem` code that the request runs.
+    """
+    log = f"s3://test-bucket/{uuid.uuid4().hex}/task.eval"
+    _create_sample_buffer(log)
+    started, release = anyio.Event(), anyio.Event()
+    release_thread = threading.Event()
+
+    def held(kwargs: dict[str, Any]) -> bool:
+        return str(kwargs["Key"]).endswith(f"/{delayed_file}")
+
+    # asyncio reads S3 through the async client; trio through the sync
+    # client, in a worker thread
+    class AsyncClientHolding:
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._client, name)
+
+        async def get_object(self, **kwargs: Any) -> Any:
+            if held(kwargs):
+                started.set()
+                await release.wait()
+            return await self._client.get_object(**kwargs)
+
+    class SyncClientHolding:
+        def __init__(self, client: Any) -> None:
+            self._client = client
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._client, name)
+
+        def get_object(self, **kwargs: Any) -> Any:
+            if held(kwargs):
+                anyio.from_thread.run_sync(started.set)
+                assert release_thread.wait(timeout=10)
+            return self._client.get_object(**kwargs)
+
+    s3_client_async = AsyncFilesystem.s3_client_async
+    s3_client = AsyncFilesystem.s3_client
+
+    async def holding_client_async(self: AsyncFilesystem) -> Any:
+        return AsyncClientHolding(await s3_client_async(self))
+
+    def holding_client(self: AsyncFilesystem) -> Any:
+        return SyncClientHolding(s3_client(self))
+
+    def sync_read(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("pending endpoint used a synchronous filestore read")
+
+    async def no_direct_url(path: str) -> None:
+        return None
+
+    for method in (
+        "read_manifest",
+        "read_segment_data",
+        "get_samples",
+        "get_sample_data",
+        "get_pending_segments",
+    ):
+        monkeypatch.setattr(SampleBufferFilestore, method, sync_read)
+    monkeypatch.setattr(AsyncFilesystem, "s3_client_async", holding_client_async)
+    monkeypatch.setattr(AsyncFilesystem, "s3_client", holding_client)
+    monkeypatch.setattr(inspect_ai._view.common, "get_direct_url", no_direct_url)
+
+    app = fastapi_server.view_server_app()
+    results: list[dict[str, Any]] = []
+    async with AsyncClient(
+        transport=ASGITransport(app), base_url="http://test"
+    ) as client:
+
+        async def pending_request() -> None:
+            response = await client.get(
+                f"/{endpoint}", params={"log": log, "id": "sample1", "epoch": 0}
+            )
+            response.raise_for_status()
+            results.append(response.json())
+
+        try:
+            with anyio.fail_after(10):
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(pending_request)
+                    await started.wait()
+                    response = await client.get("/events")
+                    assert response.status_code == 200
+                    assert not results
+                    release.set()
+                    release_thread.set()
+        finally:
+            release.set()
+            release_thread.set()
+
+    body = results[0]
+    if endpoint == "pending-samples":
+        assert body["samples"][0]["id"] == "sample1"
+        assert body["etag"]
+    elif endpoint == "pending-sample-data":
+        assert body["events"][0]["event"] == {"message": "hello"}
+    else:
+        assert body["segments"][0]["member_name"] == "sample1_0.json"
+
+
+@skip_if_trio
+async def test_cancelled_pending_manifest_closes_s3_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during the native S3 body read releases its connection."""
+    started = anyio.Event()
+
+    class Body:
+        closed = False
+
+        async def read(self, size: int = -1) -> bytes:
+            started.set()
+            await anyio.sleep_forever()
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = Body()
+
+    class Client:
+        async def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            return {"Body": body}
+
+    async def s3_client(self: AsyncFilesystem) -> Client:
+        return Client()
+
+    monkeypatch.setattr(AsyncFilesystem, "s3_client_async", s3_client)
+    buffer = SampleBufferFilestore("s3://test-bucket/task.eval", create=False)
+    with anyio.fail_after(2):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(buffer.read_manifest_async)
+            await started.wait()
+            tg.cancel_scope.cancel()
+    assert body.closed
 
 
 def test_fastapi_eval_set(test_client: TestClient) -> None:

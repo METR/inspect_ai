@@ -588,9 +588,15 @@ class AsyncZipReader:
         )
 
         # Parse local header to find exact data offset
-        _, _, _, _, _, _, _, _, _, name_len, extra_len = struct.unpack_from(
+        sig, _, _, _, _, _, _, _, _, name_len, extra_len = struct.unpack_from(
             "<4sHHHHHIIIHH", buf
         )
+        # as zipfile does: check the signature and that it names this member
+        if sig != b"PK\x03\x04" or buf[30 : 30 + name_len] != entry.filename.encode():
+            raise ValueError(
+                f"Local header of member {entry.filename} of {self._filename} "
+                "does not match the central directory"
+            )
         data_start = 30 + name_len + extra_len
 
         if data_start + entry.compressed_size <= len(buf):

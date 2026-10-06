@@ -180,11 +180,11 @@ inventory" below.
   - `manifest.json`, rewritten on every sync: the display metrics, one
     `SampleManifest` per sample still in the database (its
     `EvalSampleSummary` and its segment list), and a global segment list
-    that only grows (`filestore.py:39-78`; rebuild in `sync_to_filestore`,
+    that only grows (`filestore.py:44-83`; rebuild in `sync_to_filestore`,
     `database.py:1894-1930`).
   - `segment.<n>.zip`, one per sync, holding for each sample with new data a
     `<id>_<epoch>.json` member with the event, attachment and pool rows
-    added since its previous segment (`filestore.py:266-283,654-659`).
+    added since its previous segment (`filestore.py:274-291,846-847`).
   - `metadata.<digest>.<hash>.json` sidecars and an empty `.keep`.
 
   A sample enters the database at start with its start-time summary
@@ -197,11 +197,11 @@ inventory" below.
   drops out of the manifest is already in the `.eval`.
 - **Cleanup.** A normal finish deletes both the local database and
   `.buffer/<stem>/` for every final status (`database.py:626-628`,
-  `filestore.py:378-380`). A hard-killed worker leaves its log `started`
+  `filestore.py:428-430`). A hard-killed worker leaves its log `started`
   and its `.buffer/<stem>/` in place indefinitely: the sweep a later
   `eval()` runs in that directory removes a buffer only when its log is
   absent or no longer `started` (`cleanup_sample_buffer_filestores`,
-  `filestore.py:614-642`, test at `:625-632`). A crashed shard is therefore
+  `filestore.py:745-773`, test at `:758-766`). A crashed shard is therefore
   indistinguishable from a running one by status alone, and its stale
   manifest stays readable.
 - **Recorded selection is a seed, not an index.** `TaskLogger.__init__`
@@ -267,14 +267,16 @@ inventory" below.
   (`asyncfiles.py:952-977`) yields only `CommonPrefixes`. Listing entries
   carry size, mtime and ETag (`_s3_obj_to_file_info`, `asyncfiles.py:1166`).
 - **The viewer's pending-sample reads** go through `sample_buffer()`
-  (`buffer.py:10-14`), which opens the local database when present and
-  otherwise the filestore, calling its synchronous fsspec readers on the
-  event loop (`src/inspect_ai/_view/fastapi_server.py:507-580`). The
-  filestore readers open each object through `open_file`: a size lookup plus
-  a read, one read for objects under s3fs's 50 MiB default block
-  (`s3fs.S3FileSystem.default_block_size`, s3fs 2026.6.0).
+  (`buffer.py:22-26`), which opens the local database when present and
+  otherwise the filestore. The handlers await the buffer's async readers
+  (`get_samples_async`, `get_sample_data_async`; `get_pending_segments_async`
+  for segment URLs), which the database answers with its synchronous reads,
+  in place. The filestore reads through `AsyncFilesystem`: a HEAD for the
+  manifest's ETag and a GET of the manifest, then, for each segment the
+  request needs, a 64 KiB suffix GET and a ranged GET of the sample's member
+  (`AsyncZipReader`), up to 32 segments at once.
   `SampleBufferFilestore.running_tasks` uses `pathlib` and so works only on
-  local directories (`filestore.py:382-393`).
+  local directories (`filestore.py:432-443`).
 - **Measured sizes** (mock model, this tree): a finished one-sample log is
   4.4 KB with a 383-byte central directory, `header.json` 0.7 KB compressed
   and `summaries.json` 0.3 KB; a 50-sample log has a 3.8 KB central
@@ -1408,8 +1410,10 @@ with a different transport:
   (`cleanup_sample_buffers` is not called), no recovery output, no merge.
   Filestore paths are read through `AsyncFilesystem`, never written. The
   reader does not go through `SampleBufferFilestore` (whose `.keep` write
-  `create=False` would skip) because its readers use synchronous fsspec I/O,
-  which cannot run in a worker thread on a remote filesystem; it shares the
+  `create=False` would skip): its synchronous readers block the event loop,
+  and AGENTS.md keeps remote fsspec work out of worker threads, while its
+  async readers keep the synchronous readers' semantics (no re-read of a
+  part-written manifest, no manifest mtime). It shares the
   filestore's pure segment parsing and merging (`segment_sample_data`,
   `merge_sample_data`) and recovery's event reconstruction
   (`reconstruct_events`) instead. Local writes go only to the 0700 cache
@@ -1707,12 +1711,13 @@ None open. Ransom resolved all three on 2026-09-23, each as recommended:
   checkpoint object under a log directory (the viewer's `/logs` listing
   pays this for any directory with `--log-shared` runs); a delimited walk
   like the one here would bound it.
-- `SampleBufferFilestore` reads through synchronous fsspec, so the
-  log-dir reader keeps its own async I/O around the shared parsing helpers;
-  an async-capable filestore would give the viewer and this mode one reader
-  (a larger change to code the viewer shares).
+- `SampleBufferFilestore`'s async readers (the viewer's) keep its
+  synchronous readers' semantics, so the log-dir reader keeps its own async
+  I/O around the shared parsing helpers: it re-reads a manifest that does not
+  parse, takes the manifest's mtime from the same response, and downloads
+  whole segments. One reader for both would need those differences settled.
 - `SampleBufferFilestore.running_tasks` works only on local directories
-  (`filestore.py:382-393`), although shared buffers exist mainly for remote
+  (`filestore.py:432-443`), although shared buffers exist mainly for remote
   ones; it has no callers today.
 - A running sample's buffer summary is its start snapshot, so no reader
   (viewer included) sees token or message progress until it completes; a

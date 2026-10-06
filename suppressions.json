@@ -1485,6 +1485,11 @@
       "undescribed": 3
     }
   },
+  "tests/log/test_log_eventdb_sync.py": {
+    "type: ignore[import-untyped]": {
+      "count": 1
+    }
+  },
   "tests/log/test_recover_filestore.py": {
     "type: ignore[arg-type]": {
       "count": 1,

@@ -1,12 +1,19 @@
 import hashlib
 import json
 import math
+import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
+import boto3
+import fsspec.config  # type: ignore[import-untyped]  # fsspec ships no type stubs
 import pytest
 
+from inspect_ai._util.asyncfiles import AsyncFilesystem
+from inspect_ai._util.file import filesystem
 from inspect_ai.event import ScoreEvent
 from inspect_ai.event._info import InfoEvent
 from inspect_ai.event._model import ModelEvent
@@ -25,12 +32,15 @@ from inspect_ai.log._recorders.buffer.filestore import (
     SampleManifest,
     SampleSegment,
     Segment,
+    sample_buffer_filestore_dir,
     sample_segment_id,
+    segment_name,
 )
 from inspect_ai.log._recorders.buffer.types import SampleData, Samples
 from inspect_ai.log._recorders.types import SampleEvent
-from inspect_ai.model._chat_message import ChatMessageUser
+from inspect_ai.model._chat_message import ChatMessage, ChatMessageUser
 from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._model_call import ModelCall
 from inspect_ai.model._model_output import ModelOutput
 from inspect_ai.scorer import Score
 
@@ -762,3 +772,259 @@ def test_sync_preserves_non_finite_score_values(
     event_value = restored_events[0].score.value
     assert isinstance(event_value, list)
     assert math.isnan(cast(float, event_value[0]))
+
+
+_LIVE_LOG = "2025-01-01T00-00-00+00-00_live log.eval"
+
+
+@pytest.fixture(
+    params=[
+        ("path", _LIVE_LOG),
+        ("file_uri", _LIVE_LOG),
+        ("memory", _LIVE_LOG),
+        ("s3", _LIVE_LOG),
+        # characters a URL parser would take as a fragment or a query
+        ("s3", "task#one.eval"),
+        ("s3", "task?one.eval"),
+    ],
+    ids=["path", "file_uri", "memory", "s3", "s3-hash", "s3-question-mark"],
+)
+def live_log(request: pytest.FixtureRequest, tmp_path: Path) -> str:
+    """A log location on each kind of filesystem the async reads support."""
+    kind, name = request.param
+    if kind == "path":
+        return str(tmp_path / name)
+    if kind == "file_uri":
+        return (tmp_path / name).as_uri()
+    if kind == "memory":
+        return f"memory://{uuid.uuid4().hex}/{name}"
+    request.getfixturevalue("mock_s3")
+    return f"s3://test-bucket/{uuid.uuid4().hex}/{name}"
+
+
+def _model_event(messages: list[ChatMessage], output: str) -> ModelEvent:
+    return ModelEvent(
+        model="test-model",
+        input=messages,
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput.from_content("test-model", output),
+        call=ModelCall(
+            request={
+                "messages": [{"role": "user", "content": m.text} for m in messages]
+            },
+            response={},
+        ),
+    )
+
+
+async def _assert_async_reads_match(
+    filestore: SampleBufferFilestore, cursors: list[dict[str, int | None]]
+) -> None:
+    samples = filestore.get_samples()
+    assert await filestore.get_samples_async() == samples
+    if isinstance(samples, Samples):
+        assert await filestore.get_samples_async(samples.etag) == "NotModified"
+    for id in ("a", "b", "missing"):
+        for cursor in cursors:
+            assert await filestore.get_sample_data_async(
+                id, 1, **cursor
+            ) == filestore.get_sample_data(id, 1, **cursor)
+            for max_segments, tail in ((None, False), (1, False), (1, True)):
+                assert await filestore.get_pending_segments_async(
+                    id, 1, **cursor, max_segments=max_segments, tail=tail
+                ) == filestore.get_pending_segments(
+                    id, 1, **cursor, max_segments=max_segments, tail=tail
+                )
+
+
+async def test_async_reads_match_sync_reads(live_log: str, tmp_path: Path) -> None:
+    """The async reads the view server uses return what the sync reads return."""
+    db = SampleBufferDatabase(location=live_log, db_dir=tmp_path, log_shared=None)
+    filestore = SampleBufferFilestore(live_log, create=True)
+    # one filesystem for every read, as the view server binds one (a new S3
+    # client per read is slow)
+    async with AsyncFilesystem():
+        try:
+            # no manifest, an empty manifest, then samples without segments
+            assert await filestore.get_samples_async() is None
+            await _assert_async_reads_match(filestore, [{}])
+            sync_to_filestore(db, filestore)
+            await _assert_async_reads_match(filestore, [{}])
+            for id in ("a", "b"):
+                db.start_sample(
+                    EvalSampleSummary(id=id, epoch=1, input="in", target="out")
+                )
+            sync_to_filestore(db, filestore)
+            assert await filestore.get_sample_data_async("a", 1) == SampleData(
+                events=[], attachments=[], message_pool=[], call_pool=[]
+            )
+            await _assert_async_reads_match(filestore, [{}])
+
+            # "a" in segments 1 and 3, "b" in 2; each adds message and call pool
+            # entries and an attachment (event text over 100 characters)
+            q1, q2, q3 = (ChatMessageUser(content=f"question {i}") for i in range(3))
+            turns: list[tuple[str, list[ChatMessage]]] = [
+                ("a", [q1]),
+                ("b", [q2]),
+                ("a", [q1, q3]),
+            ]
+            for i, (id, messages) in enumerate(turns):
+                event = _model_event(messages, f"answer {i} " + "x" * 100)
+                db.log_events([SampleEvent(id=id, epoch=1, event=event)])
+                sync_to_filestore(db, filestore)
+
+            full = filestore.get_sample_data("a", 1)
+            assert full is not None
+            assert full.events and full.attachments
+            assert full.message_pool and full.call_pool
+            manifest = filestore.read_manifest()
+            assert manifest is not None
+            sample_a = next(s for s in manifest.samples if s.summary.id == "a")
+            cursors: list[dict[str, int | None]] = [
+                {},
+                # the viewer's first request
+                dict.fromkeys(
+                    [
+                        "after_event_id",
+                        "after_attachment_id",
+                        "after_message_pool_id",
+                        "after_call_pool_id",
+                    ],
+                    -1,
+                ),
+                # events seen but no pool entries: whole segments, post-filtered
+                {"after_event_id": max(e.id for e in full.events)},
+            ]
+            # a client that has read through each of "a"'s segments
+            for segment in sample_a.segments:
+                assert isinstance(segment, dict)
+                cursors.append(
+                    {
+                        "after_event_id": segment["last_event_id"],
+                        "after_attachment_id": segment["last_attachment_id"],
+                        "after_message_pool_id": segment.get("last_message_pool_id", 0),
+                        "after_call_pool_id": segment.get("last_call_pool_id", 0),
+                    }
+                )
+            incremental = filestore.get_sample_data("a", 1, **cursors[3])
+            assert incremental is not None
+            assert 0 < len(incremental.events) < len(full.events)
+            await _assert_async_reads_match(filestore, cursors)
+
+            # a segment removed after the manifest listed it
+            fs = filesystem(live_log)
+            last_segment = segment_name(sample_segment_id(sample_a.segments[-1]))
+            fs.rm(f"{sample_buffer_filestore_dir(live_log, fs)}{fs.sep}{last_segment}")
+            assert await filestore.get_sample_data_async("a", 1) is None
+            await _assert_async_reads_match(filestore, [{}])
+        finally:
+            db.cleanup()
+            filestore.cleanup()
+
+
+@pytest.mark.parametrize("option", ["endpoint_url", "anon"])
+async def test_async_reads_follow_fsspec_s3_config(
+    mock_s3: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: str
+) -> None:
+    """Set only in fsspec's configuration, S3 options reach the async reads too."""
+    location = f"s3://test-bucket/{uuid.uuid4().hex}/task.eval"
+    db = SampleBufferDatabase(location=location, db_dir=tmp_path, log_shared=None)
+    writer = SampleBufferFilestore(location, create=True)
+    try:
+        db.start_sample(EvalSampleSummary(id="a", epoch=1, input="in", target="out"))
+        db.log_events([SampleEvent(id="a", epoch=1, event=InfoEvent(data="one"))])
+        sync_to_filestore(db, writer)
+        with monkeypatch.context() as patch:
+            fsspec_conf = fsspec.config.conf
+            if option == "endpoint_url":
+                # the store is named only in fsspec's configuration
+                endpoint = os.environ["AWS_ENDPOINT_URL"]
+                patch.setitem(fsspec_conf, "s3", {"endpoint_url": endpoint})
+                patch.setenv("AWS_ENDPOINT_URL", "http://127.0.0.1:9")
+            else:
+                # a public store, and no credentials anywhere: only unsigned
+                # requests can succeed
+                s3 = boto3.client("s3")
+                prefix = location.removeprefix("s3://test-bucket/").rsplit("/", 1)[0]
+                listing = s3.list_objects_v2(Bucket="test-bucket", Prefix=prefix)
+                for item in listing["Contents"]:
+                    s3.put_object_acl(
+                        Bucket="test-bucket", Key=item["Key"], ACL="public-read"
+                    )
+                patch.setitem(fsspec_conf, "s3", {"anon": True})
+                for name in (
+                    "AWS_ACCESS_KEY_ID",
+                    "AWS_SECRET_ACCESS_KEY",
+                    "AWS_SESSION_TOKEN",
+                    "AWS_PROFILE",
+                    "AWS_DEFAULT_PROFILE",
+                    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                    "AWS_WEB_IDENTITY_TOKEN_FILE",
+                ):
+                    patch.delenv(name, raising=False)
+                patch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+                patch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-creds"))
+                patch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+            filestore = SampleBufferFilestore(location, create=False)
+            async with AsyncFilesystem():
+                data = await filestore.get_sample_data_async("a", 1)
+                assert data is not None and len(data.events) == 1
+                await _assert_async_reads_match(filestore, [{}])
+    finally:
+        db.cleanup()
+        writer.cleanup()
+
+
+async def test_async_segment_reads_run_concurrently(
+    db_and_filestore: tuple[SampleBufferDatabase, SampleBufferFilestore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every segment read starts before any finishes, and segment order holds."""
+    db, filestore = db_and_filestore
+    db.start_sample(EvalSampleSummary(id="a", epoch=1, input="in", target="out"))
+    for text in ("one", "two", "three"):
+        db.log_events([SampleEvent(id="a", epoch=1, event=InfoEvent(data=text))])
+        sync_to_filestore(db, filestore)
+
+    started: list[int] = []
+    all_started = anyio.Event()
+    read = SampleBufferFilestore.read_segment_data_async
+
+    async def read_once_all_started(
+        self: SampleBufferFilestore, id: int, sample_id: str | int, epoch_id: int
+    ) -> SampleData:
+        started.append(id)
+        if len(started) == 3:
+            all_started.set()
+        await all_started.wait()
+        return await read(self, id, sample_id, epoch_id)
+
+    monkeypatch.setattr(
+        SampleBufferFilestore, "read_segment_data_async", read_once_all_started
+    )
+    with anyio.fail_after(10):
+        data = await filestore.get_sample_data_async("a", 1)
+    assert data is not None
+    assert [event.event["data"] for event in data.events] == ["one", "two", "three"]
+
+
+async def test_database_async_reads_are_its_sync_reads(
+    db_and_filestore: tuple[SampleBufferDatabase, SampleBufferFilestore],
+) -> None:
+    """A buffer without async reads of its own answers them with its sync reads."""
+    db, _ = db_and_filestore
+    db.start_sample(EvalSampleSummary(id="a", epoch=1, input="in", target="out"))
+    db.log_events(
+        [SampleEvent(id="a", epoch=1, event=InfoEvent(data=str(i))) for i in range(3)]
+    )
+    samples = db.get_samples()
+    assert isinstance(samples, Samples)
+    assert await db.get_samples_async() == samples
+    assert await db.get_samples_async(samples.etag) == "NotModified"
+    for after_event_id in (None, 1, 3):
+        assert await db.get_sample_data_async(
+            "a", 1, after_event_id=after_event_id
+        ) == db.get_sample_data("a", 1, after_event_id=after_event_id)

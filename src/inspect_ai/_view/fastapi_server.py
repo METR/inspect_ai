@@ -556,11 +556,8 @@ def view_server_app(
 
         client_etag = request.headers.get("If-None-Match")
 
-        # NOTE: sync on the event loop. The sample buffer can be filestore-backed
-        # (fsspec) and must not be wrapped in to_thread — see the fsspec/to_thread
-        # warning in AGENTS.md.
         buffer = sample_buffer(await _map_file(request, file))
-        samples = buffer.get_samples(client_etag)
+        samples = await buffer.get_samples_async(client_etag)
         if samples == "NotModified":
             return Response(status_code=HTTP_304_NOT_MODIFIED)
         elif samples is None:
@@ -602,11 +599,8 @@ def view_server_app(
         file = urllib.parse.unquote(log)
         await _validate_read(request, file)
 
-        # NOTE: sync on the event loop. The sample buffer can be filestore-backed
-        # (fsspec) and must not be wrapped in to_thread — see the fsspec/to_thread
-        # warning in AGENTS.md.
         buffer = sample_buffer(await _map_file(request, file))
-        sample_data = buffer.get_sample_data(
+        sample_data = await buffer.get_sample_data_async(
             id=id,
             epoch=epoch,
             after_event_id=last_event_id,

@@ -6,9 +6,11 @@ still in its buffer database, with the segments holding its data) and one
 ``segment.<n>.zip`` per sync. Everything here reads through
 ``AsyncFilesystem`` and derives every path from the listed log name and the
 manifest's integer segment ids; nothing is written. ``SampleBufferFilestore``
-reads the same objects, but through synchronous fsspec I/O, which cannot be
-moved to a worker thread on a remote filesystem; the segment parsing and
-merging are shared with it, and the event reconstruction with recovery. See
+reads the same objects, and its async readers (the viewer's) keep its
+synchronous readers' semantics; this module re-reads a manifest that does not
+parse and takes the manifest's mtime from the same response, so it keeps its
+own reads. The segment parsing and merging are shared with it, and the event
+reconstruction with recovery. See
 "What the log directory holds while a run is live" and "Per-sample reads" in
 ``design/ctl/log-dir-mode.md``.
 """
