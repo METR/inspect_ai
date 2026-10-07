@@ -28956,7 +28956,7 @@ var EmptyPanel = (t0) => {
 //#region ../../packages/react/src/components/ExtendedFindContext.tsx
 var ExtendedFindContext = /*#__PURE__*/ (0, import_react.createContext)(null);
 var ExtendedFindProvider = (t0) => {
-	const $ = (0, import_compiler_runtime.c)(10);
+	const $ = (0, import_compiler_runtime.c)(17);
 	const { children } = t0;
 	let t1;
 	if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
@@ -28970,10 +28970,24 @@ var ExtendedFindProvider = (t0) => {
 		$[1] = t2;
 	} else t2 = $[1];
 	const matchCounters = (0, import_react.useRef)(t2);
-	const matchCountersVersion = (0, import_react.useRef)(0);
 	let t3;
 	if ($[2] === Symbol.for("react.memo_cache_sentinel")) {
-		t3 = async (term, direction) => {
+		t3 = /* @__PURE__ */ new Map();
+		$[2] = t3;
+	} else t3 = $[2];
+	const matchLocators = (0, import_react.useRef)(t3);
+	let t4;
+	if ($[3] === Symbol.for("react.memo_cache_sentinel")) {
+		t4 = /* @__PURE__ */ new Map();
+		$[3] = t4;
+	} else t4 = $[3];
+	const counterOrder = (0, import_react.useRef)(t4);
+	const nextCounterSeq = (0, import_react.useRef)(0);
+	const findSession = (0, import_react.useRef)(0);
+	const matchCountersVersion = (0, import_react.useRef)(0);
+	let t5;
+	if ($[4] === Symbol.for("react.memo_cache_sentinel")) {
+		t5 = async (term, direction) => {
 			for (const [, searchFn] of virtualLists.current) if (await new Promise((resolve) => {
 				let callbackFired = false;
 				const onContentReady = () => {
@@ -28996,33 +29010,37 @@ var ExtendedFindProvider = (t0) => {
 			})) return true;
 			return false;
 		};
-		$[2] = t3;
-	} else t3 = $[2];
-	const extendedFindTerm = t3;
-	let t4;
-	if ($[3] === Symbol.for("react.memo_cache_sentinel")) {
-		t4 = (id, searchFn_0) => {
+		$[4] = t5;
+	} else t5 = $[4];
+	const extendedFindTerm = t5;
+	let t6;
+	if ($[5] === Symbol.for("react.memo_cache_sentinel")) {
+		t6 = (id, searchFn_0) => {
 			virtualLists.current.set(id, searchFn_0);
 			return () => {
 				virtualLists.current.delete(id);
 			};
 		};
-		$[3] = t4;
-	} else t4 = $[3];
-	const registerVirtualList = t4;
-	let t5;
-	if ($[4] === Symbol.for("react.memo_cache_sentinel")) {
-		t5 = (term_0) => {
+		$[5] = t6;
+	} else t6 = $[5];
+	const registerVirtualList = t6;
+	let t7;
+	if ($[6] === Symbol.for("react.memo_cache_sentinel")) {
+		t7 = (term_0) => {
 			let total = 0;
 			for (const [, countFn] of matchCounters.current) total = total + countFn(term_0);
 			return total;
 		};
-		$[4] = t5;
-	} else t5 = $[4];
-	const countAllMatches = t5;
-	let t6;
-	if ($[5] === Symbol.for("react.memo_cache_sentinel")) {
-		t6 = (id_0, countFn_0) => {
+		$[6] = t7;
+	} else t7 = $[6];
+	const countAllMatches = t7;
+	let t8;
+	if ($[7] === Symbol.for("react.memo_cache_sentinel")) {
+		t8 = (id_0, countFn_0) => {
+			if (!counterOrder.current.has(id_0)) {
+				nextCounterSeq.current = nextCounterSeq.current + 1;
+				counterOrder.current.set(id_0, nextCounterSeq.current);
+			}
 			matchCounters.current.set(id_0, countFn_0);
 			matchCountersVersion.current = matchCountersVersion.current + 1;
 			return () => {
@@ -29030,37 +29048,88 @@ var ExtendedFindProvider = (t0) => {
 				matchCountersVersion.current = matchCountersVersion.current + 1;
 			};
 		};
-		$[5] = t6;
-	} else t6 = $[5];
-	const registerMatchCounter = t6;
-	let t7;
-	if ($[6] === Symbol.for("react.memo_cache_sentinel")) {
-		t7 = () => matchCountersVersion.current;
-		$[6] = t7;
-	} else t7 = $[6];
-	const getMatchCountersVersion = t7;
-	let t8;
-	if ($[7] === Symbol.for("react.memo_cache_sentinel")) {
-		t8 = {
+		$[7] = t8;
+	} else t8 = $[7];
+	const registerMatchCounter = t8;
+	let t9;
+	if ($[8] === Symbol.for("react.memo_cache_sentinel")) {
+		t9 = () => {
+			findSession.current = findSession.current + 1;
+		};
+		$[8] = t9;
+	} else t9 = $[8];
+	const beginFindSession = t9;
+	let t10;
+	if ($[9] === Symbol.for("react.memo_cache_sentinel")) {
+		t10 = () => findSession.current;
+		$[9] = t10;
+	} else t10 = $[9];
+	const getFindSessionId = t10;
+	let t11;
+	if ($[10] === Symbol.for("react.memo_cache_sentinel")) {
+		t11 = () => [...matchCounters.current.keys()].sort((a, b) => (counterOrder.current.get(a) ?? 0) - (counterOrder.current.get(b) ?? 0));
+		$[10] = t11;
+	} else t11 = $[10];
+	const orderedCounterIds = t11;
+	let t12;
+	if ($[11] === Symbol.for("react.memo_cache_sentinel")) {
+		t12 = (id_1, locatorFn) => {
+			matchLocators.current.set(id_1, locatorFn);
+			return () => {
+				matchLocators.current.delete(id_1);
+			};
+		};
+		$[11] = t12;
+	} else t12 = $[11];
+	const registerMatchLocator = t12;
+	let t13;
+	if ($[12] === Symbol.for("react.memo_cache_sentinel")) {
+		t13 = (term_1) => {
+			let offset = 0;
+			for (const id_2 of orderedCounterIds()) {
+				const countFn_1 = matchCounters.current.get(id_2);
+				if (countFn_1 === void 0) continue;
+				const idx = matchLocators.current.get(id_2)?.(term_1) ?? null;
+				if (idx !== null) return offset + idx;
+				offset = offset + countFn_1(term_1);
+			}
+			return null;
+		};
+		$[12] = t13;
+	} else t13 = $[12];
+	const ordinalAtSelection = t13;
+	let t14;
+	if ($[13] === Symbol.for("react.memo_cache_sentinel")) {
+		t14 = () => matchCountersVersion.current;
+		$[13] = t14;
+	} else t14 = $[13];
+	const getMatchCountersVersion = t14;
+	let t15;
+	if ($[14] === Symbol.for("react.memo_cache_sentinel")) {
+		t15 = {
 			extendedFindTerm,
 			registerVirtualList,
 			countAllMatches,
 			registerMatchCounter,
+			registerMatchLocator,
+			ordinalAtSelection,
+			beginFindSession,
+			getFindSessionId,
 			getMatchCountersVersion
 		};
-		$[7] = t8;
-	} else t8 = $[7];
-	const contextValue = t8;
-	let t9;
-	if ($[8] !== children) {
-		t9 = /*#__PURE__*/ (0, import_jsx_runtime.jsx)(ExtendedFindContext.Provider, {
+		$[14] = t15;
+	} else t15 = $[14];
+	const contextValue = t15;
+	let t16;
+	if ($[15] !== children) {
+		t16 = /*#__PURE__*/ (0, import_jsx_runtime.jsx)(ExtendedFindContext.Provider, {
 			value: contextValue,
 			children
 		});
-		$[8] = children;
-		$[9] = t9;
-	} else t9 = $[9];
-	return t9;
+		$[15] = children;
+		$[16] = t16;
+	} else t16 = $[16];
+	return t16;
 };
 var useExtendedFind = () => {
 	const context = useExtendedFindOptional();
@@ -42632,7 +42701,7 @@ var findConfig = {
 };
 var FindBand = ({ onClose, debounceMs = 100 }) => {
 	const searchBoxRef = (0, import_react.useRef)(null);
-	const { extendedFindTerm, countAllMatches, getMatchCountersVersion } = useExtendedFind();
+	const { extendedFindTerm, countAllMatches, getMatchCountersVersion, ordinalAtSelection, beginFindSession } = useExtendedFind();
 	const setFindTarget = useFindTargetSetter();
 	const lastFoundItem = (0, import_react.useRef)(null);
 	const currentSearchTerm = (0, import_react.useRef)("");
@@ -42718,7 +42787,9 @@ var FindBand = ({ onClose, debounceMs = 100 }) => {
 					term: searchTerm,
 					eventId: ""
 				});
-				if (isNewMatch) setCurrentMatchIndex((prev) => {
+				const ordinal = ordinalAtSelection(searchTerm);
+				if (ordinal !== null) setCurrentMatchIndex(ordinal + 1);
+				else if (isNewMatch) setCurrentMatchIndex((prev) => {
 					if (back) return prev <= 1 ? total : prev - 1;
 					else return prev >= total ? 1 : prev + 1;
 				});
@@ -42733,7 +42804,8 @@ var FindBand = ({ onClose, debounceMs = 100 }) => {
 		setFindTarget,
 		extendedFindTerm,
 		countAllMatches,
-		getMatchCountersVersion
+		getMatchCountersVersion,
+		ordinalAtSelection
 	]);
 	(0, import_react.useEffect)(() => {
 		focusTimeoutRef.current = window.setTimeout(() => {
@@ -42747,6 +42819,7 @@ var FindBand = ({ onClose, debounceMs = 100 }) => {
 			setFindTarget(null);
 		};
 	}, [setFindTarget]);
+	useMountEffect(beginFindSession);
 	const handleKeyDown = (0, import_react.useCallback)((e) => {
 		if (e.key === "Escape") onClose();
 		else if (e.key === "Enter") handleSearch(e.shiftKey);
@@ -59715,6 +59788,129 @@ var countMatchesInTexts = (lowerTextsByItem, lowerTerm) => {
 	}
 	return total;
 };
+/**
+* Index of the next item matching any of `lowerVariants`, scanning from `from`
+* in `direction` and wrapping once.
+*
+* `from` is the item the find session is standing on, NOT a viewport bound —
+* see `findScanOrigin` for how it is chosen and when the viewport seeds it.
+*
+* The final step revisits `from` itself, so a list whose only match is the
+* current item re-finds that item — letting `window.find` walk the occurrences
+* inside it — instead of reporting no match.
+*/ var nextMatchingItem = (lowerTextsByItem, lowerVariants, from, isForward) => {
+	const len = lowerTextsByItem.length;
+	const variants = lowerVariants.filter((v) => v.length > 0);
+	if (len === 0 || variants.length === 0) return null;
+	for (let offset = 1; offset <= len; offset++) {
+		const i = ((isForward ? from + offset : from - offset) % len + len) % len;
+		const texts = lowerTextsByItem[i];
+		if (texts === void 0) continue;
+		if (texts.some((t) => variants.some((v) => t.includes(v)))) return i;
+	}
+	return null;
+};
+/**
+* Where the next scan starts.
+*
+* The find session's own cursor wins whenever it addresses the current term
+* and data. Reading the viewport on every press is the defect this replaces:
+* `visibleRangeRef` is written in a post-render effect while `onContentReady`
+* fires on a fixed timer, so a press arriving before the commit rescanned from
+* the same origin and returned the same item — find plateaued on a subset of
+* the corpus and never reached the rest, while the counter kept climbing.
+*
+* The viewport still seeds a first press, and deliberately from the trailing
+* edge of the rendered window: this path only runs once `window.find` has
+* exhausted the rendered DOM, so every on-screen match has already been
+* walked and starting inside the window would re-cover it.
+*
+* A cursor is only trusted within the find session that created it. The find
+* band unmounts on Escape but the list does not, so the cursor outlives it:
+* without the session check, closing find at item 400, scrolling back to the
+* top and searching the same term again would resume at 401 and leave
+* everything in between unreachable. Session identity is the right test here
+* rather than proximity to the viewport — the viewport is precisely the
+* signal the cursor exists to stop trusting, so validating one against the
+* other would reject a good cursor after a long jump and saw back and forth.
+*/ var findScanOrigin = (cursor, term, sessionId, itemCount, isForward, range) => {
+	if (cursor && cursor.term === term && cursor.session === sessionId && cursor.index < itemCount) return cursor.index;
+	return isForward ? range.endIndex : range.startIndex;
+};
+/**
+* Whether a selection observed at `itemIndex` should move the find cursor.
+*
+* Only ever with the direction of travel. `window.find` restarts from the top
+* of the rendered DOM whenever it cannot advance, so an unguarded update drags
+* the cursor back to a row already passed — and if the scroll to the next
+* match never commits (its row stays unrendered), that pins the cursor and
+* find deadlocks on a single row. Measured on a 1,700-row chat: without this
+* the walk stalls at row 1705 and never reaches the rest of the list; with it,
+* 80 presses reach 29 rows instead of 13.
+*
+* A different term means a new walk, so anything is an advance.
+*/ var cursorAdvances = (cursor, term, itemIndex, direction) => {
+	if (!cursor || cursor.term !== term) return true;
+	return direction === "forward" ? itemIndex > cursor.index : itemIndex < cursor.index;
+};
+/**
+* 0-based ordinal of one occurrence across the whole list, counting in item
+* order — the same enumeration `countMatchesInTexts` totals, so the result
+* indexes into the count the find band displays.
+*
+* `occurrenceWithinItem` is observed in the RENDERED row, while the count is
+* taken from the row's search text, and the two need not agree: a chat row
+* renders its role as literal text above content that `itemSearchText` alone
+* contributes, so the DOM can hold occurrences the total does not know about.
+* Returns null rather than an ordinal the total cannot contain — reporting one
+* would render "2 of 1".
+*/ var occurrenceOrdinal = (lowerTextsByItem, lowerTerm, itemIndex, occurrenceWithinItem) => {
+	const itemTexts = lowerTextsByItem[itemIndex];
+	if (itemTexts === void 0) return null;
+	if (occurrenceWithinItem >= countMatchesInTexts([itemTexts], lowerTerm)) return null;
+	return countMatchesInTexts(lowerTextsByItem.slice(0, itemIndex), lowerTerm) + occurrenceWithinItem;
+};
+/**
+* Locate the document selection inside `root`: which rendered row holds it,
+* and how many occurrences of `lowerTerm` precede it within that row.
+*
+* Rows carry `data-item-index`, so the item index survives virtualization —
+* only rendered rows can hold a selection anyway. Scoped to `root` so a list
+* never claims a selection belonging to another list mounted alongside it.
+*
+* Returns null when there is no selection, it lies outside `root`, or it is
+* not inside a row.
+*/ var itemOccurrenceAtSelection = (root, lowerTerm) => {
+	if (typeof window === "undefined" || !root || lowerTerm.length === 0) return null;
+	const sel = window.getSelection();
+	if (!sel || sel.rangeCount === 0) return null;
+	const range = sel.getRangeAt(0);
+	if (!root.contains(range.startContainer)) return null;
+	let el = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+	while (el && el !== root && !el.hasAttribute("data-item-index")) el = el.parentElement;
+	if (!el || el === root) return null;
+	const itemIndex = Number(el.getAttribute("data-item-index"));
+	if (!Number.isInteger(itemIndex) || itemIndex < 0) return null;
+	const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+	let occurrence = 0;
+	let node;
+	while (node = walker.nextNode()) {
+		if (!(node instanceof Text)) continue;
+		const textNode = node;
+		const atSelection = textNode === range.startContainer;
+		const hay = (atSelection ? textNode.data.slice(0, range.startOffset) : textNode.data).toLowerCase();
+		let pos = 0;
+		while ((pos = hay.indexOf(lowerTerm, pos)) !== -1) {
+			occurrence++;
+			pos += lowerTerm.length;
+		}
+		if (atSelection) break;
+	}
+	return {
+		itemIndex,
+		occurrence
+	};
+};
 function VirtualList({ persistenceKey, persistScroll = true, ref, id, className, scrollRef: externalScroll, data, renderRow, estimatedItemHeight = DEFAULT_ITEM_HEIGHT_PX, overscan, useFlushSync, embedded = false, resetScrollOnMount: resetScrollOnMountProp, live, navOwned, followRequested, showProgress, initialIndex, initialScrollOffset, scrollPaddingStart, components, smoothScroll = true, itemSearchText, findScope = "local", scrollToTopOnFinish = false, onVisibleRangeChange }) {
 	const resetScrollOnMount = resetScrollOnMountProp ?? !embedded;
 	const externalScrollRef = externalScroll instanceof HTMLElement ? null : externalScroll ?? null;
@@ -60200,66 +60396,95 @@ function VirtualList({ persistenceKey, persistScroll = true, ref, id, className,
 	]);
 	const extendedFind = useExtendedFindOptional();
 	const findContext = findScope === "none" ? null : extendedFind;
-	const searchInData = (0, import_react.useCallback)((term, direction, onContentReady) => {
-		if (!term || data.length === 0) return Promise.resolve(false);
-		const isForward = direction === "forward";
-		const len = data.length;
-		const range_0 = visibleRangeRef.current;
-		const current = isForward ? range_0.endIndex : range_0.startIndex;
-		const getText = itemSearchText ?? ((item) => JSON.stringify(item));
-		const prepared = prepareSearchTerm(term);
-		for (let offset = 1; offset < len; offset++) {
-			const i = isForward ? (current + offset) % len : (current - offset + len) % len;
-			const item_0 = data[i];
-			if (item_0 === void 0) continue;
-			const texts = getText(item_0);
-			if ((Array.isArray(texts) ? texts : [texts]).some((text) => {
-				const lower = text.toLowerCase();
-				if (lower.includes(prepared.simple)) return true;
-				if (prepared.unquoted && lower.includes(prepared.unquoted)) return true;
-				if (prepared.jsonEscaped && lower.includes(prepared.jsonEscaped)) return true;
-				return false;
-			})) {
-				settleScrollToIndex(i, "center");
-				setTimeout(onContentReady, 200);
-				return Promise.resolve(true);
-			}
-		}
-		return Promise.resolve(false);
-	}, [
-		data,
-		itemSearchText,
-		settleScrollToIndex
-	]);
 	const precomputedSearchTexts = (0, import_react.useMemo)(() => {
 		if (!findContext) return [];
-		const getText_0 = itemSearchText ?? ((item_1) => JSON.stringify(item_1));
-		return data.map((item_2) => {
-			const texts_0 = getText_0(item_2);
-			return (Array.isArray(texts_0) ? texts_0 : [texts_0]).map((t) => t.toLowerCase());
+		const getText = itemSearchText ?? ((item) => JSON.stringify(item));
+		return data.map((item_0) => {
+			const texts = getText(item_0);
+			return (Array.isArray(texts) ? texts : [texts]).map((t) => t.toLowerCase());
 		});
 	}, [
 		data,
 		itemSearchText,
 		findContext
 	]);
-	const countMatchesInData = (0, import_react.useCallback)((term_0) => {
-		if (!term_0 || precomputedSearchTexts.length === 0) return 0;
-		return countMatchesInTexts(precomputedSearchTexts, term_0.toLowerCase());
+	const findCursorRef = (0, import_react.useRef)(null);
+	const activeFindTermRef = (0, import_react.useRef)("");
+	const findDirectionRef = (0, import_react.useRef)("forward");
+	useEventListener(findContext && typeof document !== "undefined" ? document : null, "selectionchange", () => {
+		if (!findContext) return;
+		const term = activeFindTermRef.current;
+		if (!term) return;
+		const sel = document.getSelection();
+		if (!sel || sel.rangeCount === 0) return;
+		const range_0 = sel.getRangeAt(0);
+		if (range_0.startContainer !== range_0.endContainer) return;
+		if (range_0.endOffset - range_0.startOffset !== term.length) return;
+		const at = itemOccurrenceAtSelection(wrapperRef.current, term.toLowerCase());
+		if (!at) return;
+		if (!cursorAdvances(findCursorRef.current, term, at.itemIndex, findDirectionRef.current)) return;
+		findCursorRef.current = {
+			term,
+			index: at.itemIndex,
+			session: findContext.getFindSessionId()
+		};
+	});
+	const searchInData = (0, import_react.useCallback)((term_0, direction, onContentReady) => {
+		const len = precomputedSearchTexts.length;
+		if (!term_0 || len === 0 || !findContext) return Promise.resolve(false);
+		const isForward = direction === "forward";
+		findDirectionRef.current = direction;
+		const prepared = prepareSearchTerm(term_0);
+		const variants = [
+			prepared.simple,
+			...prepared.unquoted ? [prepared.unquoted] : [],
+			...prepared.jsonEscaped ? [prepared.jsonEscaped] : []
+		];
+		const sessionId = findContext.getFindSessionId();
+		const from = findScanOrigin(findCursorRef.current, term_0, sessionId, len, isForward, visibleRangeRef.current);
+		const i = nextMatchingItem(precomputedSearchTexts, variants, from, isForward);
+		if (i === null) return Promise.resolve(false);
+		findCursorRef.current = {
+			term: term_0,
+			index: i,
+			session: sessionId
+		};
+		settleScrollToIndex(i, "center");
+		setTimeout(onContentReady, 200);
+		return Promise.resolve(true);
+	}, [
+		precomputedSearchTexts,
+		settleScrollToIndex,
+		findContext
+	]);
+	const countMatchesInData = (0, import_react.useCallback)((term_1) => {
+		activeFindTermRef.current = term_1;
+		if (!term_1 || precomputedSearchTexts.length === 0) return 0;
+		return countMatchesInTexts(precomputedSearchTexts, term_1.toLowerCase());
+	}, [precomputedSearchTexts]);
+	const locateInData = (0, import_react.useCallback)((term_2) => {
+		if (!term_2) return null;
+		const lowerTerm = term_2.toLowerCase();
+		const at_0 = itemOccurrenceAtSelection(wrapperRef.current, lowerTerm);
+		if (at_0 === null) return null;
+		return occurrenceOrdinal(precomputedSearchTexts, lowerTerm, at_0.itemIndex, at_0.occurrence);
 	}, [precomputedSearchTexts]);
 	(0, import_react.useEffect)(() => {
 		if (!findContext) return;
 		const u1 = findContext.registerVirtualList(persistenceKey, searchInData);
 		const u2 = findContext.registerMatchCounter(persistenceKey, countMatchesInData);
+		const u3 = findContext.registerMatchLocator(persistenceKey, locateInData);
 		return () => {
 			u1();
 			u2();
+			u3();
 		};
 	}, [
 		findContext,
 		persistenceKey,
 		searchInData,
-		countMatchesInData
+		countMatchesInData,
+		locateInData
 	]);
 	const ItemSlot = components?.Item;
 	const FooterSlot = components?.Footer;
@@ -60295,10 +60520,10 @@ function VirtualList({ persistenceKey, persistScroll = true, ref, id, className,
 					height: renderedBandHeight
 				},
 				children: items.map((vItem) => {
-					const item_3 = data[vItem.index];
-					if (item_3 === void 0) return null;
+					const item_1 = data[vItem.index];
+					if (item_1 === void 0) return null;
 					const top = vItem.start - bandStart;
-					const child = renderRow(vItem.index, item_3);
+					const child = renderRow(vItem.index, item_1);
 					if (ItemSlot) return /*#__PURE__*/ (0, import_jsx_runtime.jsx)("div", {
 						ref: virtualizer.measureElement,
 						"data-index": vItem.index,
@@ -68389,6 +68614,7 @@ var SearchPanel = ({ scope, api, stateController, navigation, defaultModel, mode
 		handleModelChange
 	]);
 	return /*#__PURE__*/ (0, import_jsx_runtime.jsxs)("div", {
+		"data-unsearchable": "true",
 		className: SearchPanel_module_default.container,
 		children: [
 			/*#__PURE__*/ (0, import_jsx_runtime.jsx)(SidebarHeader, {
@@ -99807,7 +100033,11 @@ var sanitizeStringify = (v) => {
 			const modelEvent = event;
 			if (modelEvent.model) fields.push(["model", modelEvent.model]);
 			for (const choice of modelEvent.output.choices) for (const text of extractContentText(choice.message.content)) fields.push(["output", text]);
-			for (const msg of modelEvent.input) if (msg.role === "user" || msg.role === "system") for (const text of extractContentText(msg.content)) fields.push([msg.role, text]);
+			const drawnMessages = recentInputMessages(modelEvent.input, {
+				agentResultsFiltered: !!modelEvent.agentResultsFiltered,
+				hasToolEvents: void 0
+			});
+			for (const msg of drawnMessages) for (const text of extractContentText(msg.content)) fields.push([msg.role, text]);
 			if (modelEvent.error) fields.push(["error", modelEvent.error]);
 			if (modelEvent.traceback) fields.push(["traceback", modelEvent.traceback]);
 			break;
@@ -108855,12 +109085,7 @@ function recordRowEvents(agent, rowKey, out) {
 * occurrences left-to-right. Stable across calls with the same inputs.
 */ function findAllMatches(events, term, eventToRow) {
 	if (!term) return [];
-	const prepared = prepareSearchTerm(term);
-	const variants = [
-		prepared.simple,
-		...prepared.unquoted ? [prepared.unquoted] : [],
-		...prepared.jsonEscaped ? [prepared.jsonEscaped] : []
-	];
+	const variants = searchVariants(term);
 	const out = [];
 	for (const event of events) {
 		const uuid = event.uuid;
@@ -108889,7 +109114,23 @@ function recordRowEvents(agent, rowKey, out) {
 * counts as one occurrence (the longer variant wins). Mirrors the variant
 * matching `LiveVirtualList.searchInText` does for the chat counter so the
 * two counters agree on the total.
-*/ function findVariantPositions(lowered, variants) {
+*/ /**
+* The lowercased forms a term is matched under.
+*
+* Exported so anything that has to agree with `findAllMatches`' enumeration —
+* notably `matchAtSelection`, which maps a DOM selection onto the n-th match
+* for an event — counts the same occurrences. Counting only `prepared.simple`
+* there would mis-index every quoted term, since `findAllMatches` also counts
+* the unquoted form.
+*/ function searchVariants(term) {
+	const prepared = prepareSearchTerm(term);
+	return [
+		prepared.simple,
+		...prepared.unquoted ? [prepared.unquoted] : [],
+		...prepared.jsonEscaped ? [prepared.jsonEscaped] : []
+	];
+}
+function findVariantPositions(lowered, variants) {
 	const hits = [];
 	for (const v of variants) {
 		if (!v) continue;
@@ -108927,10 +109168,10 @@ var SETTLE_LIMIT = 90;
 * Preconditions: must be mounted inside an `ExtendedFindProvider`. The
 * `FindTargetProvider` is optional — its setter no-ops when absent.
 */ function useTranscriptSearchSource(options) {
-	const $ = (0, import_compiler_runtime.c)(29);
+	const $ = (0, import_compiler_runtime.c)(36);
 	const { events, rows, selected, onSelect, viewNodesRef, onHeadroomResetAnchor, onHeadroomSetHidden, id: t0 } = options;
 	const id = t0 === void 0 ? DEFAULT_ID : t0;
-	const { registerVirtualList, registerMatchCounter } = useExtendedFind();
+	const { registerVirtualList, registerMatchCounter, registerMatchLocator } = useExtendedFind();
 	const setFindTarget = useFindTargetSetter();
 	let t1;
 	if ($[0] !== rows) {
@@ -108939,9 +109180,19 @@ var SETTLE_LIMIT = 90;
 		$[1] = t1;
 	} else t1 = $[1];
 	const eventToRow = t1;
+	let map;
+	if ($[2] !== events) {
+		map = /* @__PURE__ */ new Map();
+		events.forEach((event, index) => {
+			if (event.uuid) map.set(event.uuid, index);
+		});
+		$[2] = events;
+		$[3] = map;
+	} else map = $[3];
+	const eventOrder = map;
 	const cacheRef = (0, import_react.useRef)(null);
 	let t2;
-	if ($[2] !== eventToRow || $[3] !== events) {
+	if ($[4] !== eventToRow || $[5] !== events) {
 		t2 = (term) => {
 			const c = cacheRef.current;
 			if (c && c.events === events && c.eventToRow === eventToRow && c.term === term) return c.matches;
@@ -108954,48 +109205,48 @@ var SETTLE_LIMIT = 90;
 			};
 			return matches;
 		};
-		$[2] = eventToRow;
-		$[3] = events;
-		$[4] = t2;
-	} else t2 = $[4];
+		$[4] = eventToRow;
+		$[5] = events;
+		$[6] = t2;
+	} else t2 = $[6];
 	const getMatches = t2;
 	const selectedRef = (0, import_react.useRef)(selected);
 	let t3;
 	let t4;
-	if ($[5] !== selected) {
+	if ($[7] !== selected) {
 		t3 = () => {
 			selectedRef.current = selected;
 		};
 		t4 = [selected];
-		$[5] = selected;
-		$[6] = t3;
-		$[7] = t4;
+		$[7] = selected;
+		$[8] = t3;
+		$[9] = t4;
 	} else {
-		t3 = $[6];
-		t4 = $[7];
+		t3 = $[8];
+		t4 = $[9];
 	}
 	(0, import_react.useEffect)(t3, t4);
 	const lastResolvedRef = (0, import_react.useRef)(null);
 	const invocationIdRef = (0, import_react.useRef)(0);
 	let t5;
-	if ($[8] === Symbol.for("react.memo_cache_sentinel")) {
+	if ($[10] === Symbol.for("react.memo_cache_sentinel")) {
 		t5 = /* @__PURE__ */ new Set();
-		$[8] = t5;
-	} else t5 = $[8];
+		$[10] = t5;
+	} else t5 = $[10];
 	const pendingTimersRef = (0, import_react.useRef)(t5);
 	let t6;
-	if ($[9] === Symbol.for("react.memo_cache_sentinel")) {
+	if ($[11] === Symbol.for("react.memo_cache_sentinel")) {
 		t6 = () => {
 			for (const t of pendingTimersRef.current) clearTimeout(t);
 			pendingTimersRef.current.clear();
 		};
-		$[9] = t6;
-	} else t6 = $[9];
+		$[11] = t6;
+	} else t6 = $[11];
 	useUnmount(t6);
 	const activeTermRef = (0, import_react.useRef)("");
 	let t7;
 	let t8;
-	if ($[10] !== getMatches) {
+	if ($[12] !== getMatches) {
 		t7 = () => {
 			if (typeof document === "undefined") return;
 			const onSelectionChange = () => {
@@ -109012,59 +109263,79 @@ var SETTLE_LIMIT = 90;
 					match,
 					term: term_0
 				};
+				else if (!selectionInEvent(lastResolvedRef.current?.match.eventId)) lastResolvedRef.current = null;
 			};
 			document.addEventListener("selectionchange", onSelectionChange);
 			return () => document.removeEventListener("selectionchange", onSelectionChange);
 		};
 		t8 = [getMatches];
-		$[10] = getMatches;
-		$[11] = t7;
-		$[12] = t8;
+		$[12] = getMatches;
+		$[13] = t7;
+		$[14] = t8;
 	} else {
-		t7 = $[11];
-		t8 = $[12];
+		t7 = $[13];
+		t8 = $[14];
 	}
 	(0, import_react.useEffect)(t7, t8);
 	let t9;
-	if ($[13] !== getMatches) {
+	if ($[15] !== getMatches) {
 		t9 = (term_1) => {
 			activeTermRef.current = term_1;
 			return getMatches(term_1).length;
 		};
-		$[13] = getMatches;
-		$[14] = t9;
-	} else t9 = $[14];
+		$[15] = getMatches;
+		$[16] = t9;
+	} else t9 = $[16];
 	const countFn = t9;
 	let t10;
-	if ($[15] !== getMatches || $[16] !== onHeadroomResetAnchor || $[17] !== onHeadroomSetHidden || $[18] !== onSelect || $[19] !== setFindTarget || $[20] !== viewNodesRef) {
-		t10 = async (term_2, direction, onContentReady) => {
+	if ($[17] !== getMatches) {
+		t10 = (term_2) => {
+			if (!term_2) return null;
+			const matches_1 = getMatches(term_2);
+			const match_0 = matchAtSelection(matches_1, term_2);
+			return match_0 ? matches_1.indexOf(match_0) : null;
+		};
+		$[17] = getMatches;
+		$[18] = t10;
+	} else t10 = $[18];
+	const locatorFn = t10;
+	let t11;
+	if ($[19] !== eventOrder || $[20] !== getMatches || $[21] !== onHeadroomResetAnchor || $[22] !== onHeadroomSetHidden || $[23] !== onSelect || $[24] !== setFindTarget || $[25] !== viewNodesRef) {
+		t11 = async (term_3, direction, onContentReady) => {
 			const myId = invocationIdRef.current = invocationIdRef.current + 1;
 			const isStale = () => myId !== invocationIdRef.current;
-			const matches_1 = getMatches(term_2);
-			if (matches_1.length === 0) return false;
-			activeTermRef.current = term_2;
+			const matches_2 = getMatches(term_3);
+			if (matches_2.length === 0) return false;
+			activeTermRef.current = term_3;
 			onHeadroomResetAnchor?.(true);
 			onHeadroomSetHidden?.(direction === "forward");
-			let position = resolvePosition(matches_1, lastResolvedRef.current, viewNodesRef.current, selectedRef.current, term_2);
-			const SKIP_LIMIT = Math.min(matches_1.length, 8);
+			let position = resolvePosition({
+				matches: matches_2,
+				term: term_3,
+				direction,
+				last: lastResolvedRef.current,
+				view: viewNodesRef.current,
+				eventOrder
+			});
+			const SKIP_LIMIT = Math.min(matches_2.length, 8);
 			let next = null;
 			for (let attempt = 0; attempt < SKIP_LIMIT; attempt++) {
-				next = pickNext(matches_1, position, direction);
+				next = pickNext(matches_2, position, direction);
 				if (next.rowKey !== selectedRef.current) {
 					onSelect(next.rowKey);
 					const ready = await waitForRow(viewNodesRef, next.eventId);
 					if (isStale()) return false;
 					if (!ready) {
-						position = matches_1.indexOf(next);
+						position = matches_2.indexOf(next);
 						lastResolvedRef.current = {
 							match: next,
-							term: term_2
+							term: term_3
 						};
 						continue;
 					}
 				}
 				setFindTarget({
-					term: term_2,
+					term: term_3,
 					eventId: next.eventId
 				});
 				await raf();
@@ -109076,86 +109347,157 @@ var SETTLE_LIMIT = 90;
 				if (isStale()) return false;
 				if (inDom) break;
 				const skippedEventId = next.eventId;
-				let lastSkipIdx = matches_1.indexOf(next);
+				let lastSkipIdx = matches_2.indexOf(next);
 				const stride = direction === "forward" ? 1 : -1;
-				for (let idx = lastSkipIdx + stride; idx >= 0 && idx < matches_1.length && matches_1[idx].eventId === skippedEventId; idx = idx + stride) lastSkipIdx = idx;
+				for (let idx = lastSkipIdx + stride; idx >= 0 && idx < matches_2.length && matches_2[idx].eventId === skippedEventId; idx = idx + stride) lastSkipIdx = idx;
 				position = lastSkipIdx;
 				lastResolvedRef.current = {
-					match: matches_1[lastSkipIdx],
-					term: term_2
+					match: matches_2[lastSkipIdx],
+					term: term_3
 				};
 				next = null;
 			}
 			if (!next) return false;
-			positionSelectionAroundTerm(next.eventId, term_2, direction);
+			positionSelectionAroundTerm(next.eventId, term_3, direction);
 			lastResolvedRef.current = {
 				match: next,
-				term: term_2
+				term: term_3
 			};
 			onContentReady();
 			const reselectId = next.eventId;
 			const timer = window.setTimeout(() => {
 				if (isStale()) return;
-				reselectTermInPanel(reselectId, term_2);
+				reselectTermInPanel(reselectId, term_3);
 			}, 300);
 			pendingTimersRef.current.add(timer);
 			return true;
 		};
-		$[15] = getMatches;
-		$[16] = onHeadroomResetAnchor;
-		$[17] = onHeadroomSetHidden;
-		$[18] = onSelect;
-		$[19] = setFindTarget;
-		$[20] = viewNodesRef;
-		$[21] = t10;
-	} else t10 = $[21];
-	const searchFn = t10;
-	let t11;
+		$[19] = eventOrder;
+		$[20] = getMatches;
+		$[21] = onHeadroomResetAnchor;
+		$[22] = onHeadroomSetHidden;
+		$[23] = onSelect;
+		$[24] = setFindTarget;
+		$[25] = viewNodesRef;
+		$[26] = t11;
+	} else t11 = $[26];
+	const searchFn = t11;
 	let t12;
-	if ($[22] !== countFn || $[23] !== id || $[24] !== registerMatchCounter || $[25] !== registerVirtualList || $[26] !== searchFn) {
-		t11 = () => {
+	let t13;
+	if ($[27] !== countFn || $[28] !== id || $[29] !== locatorFn || $[30] !== registerMatchCounter || $[31] !== registerMatchLocator || $[32] !== registerVirtualList || $[33] !== searchFn) {
+		t12 = () => {
 			const unCount = registerMatchCounter(id, countFn);
 			const unSearch = registerVirtualList(id, searchFn);
+			const unLocate = registerMatchLocator(id, locatorFn);
 			return () => {
 				unCount();
 				unSearch();
+				unLocate();
 			};
 		};
-		t12 = [
+		t13 = [
 			id,
 			registerMatchCounter,
 			registerVirtualList,
+			registerMatchLocator,
 			countFn,
-			searchFn
+			searchFn,
+			locatorFn
 		];
-		$[22] = countFn;
-		$[23] = id;
-		$[24] = registerMatchCounter;
-		$[25] = registerVirtualList;
-		$[26] = searchFn;
-		$[27] = t11;
-		$[28] = t12;
+		$[27] = countFn;
+		$[28] = id;
+		$[29] = locatorFn;
+		$[30] = registerMatchCounter;
+		$[31] = registerMatchLocator;
+		$[32] = registerVirtualList;
+		$[33] = searchFn;
+		$[34] = t12;
+		$[35] = t13;
 	} else {
-		t11 = $[27];
-		t12 = $[28];
+		t12 = $[34];
+		t13 = $[35];
 	}
-	(0, import_react.useEffect)(t11, t12);
+	(0, import_react.useEffect)(t12, t13);
 }
 function pickNext(matches, position, dir) {
 	const len = matches.length;
 	if (position < 0) return dir === "forward" ? matches[0] : matches[len - 1];
 	return dir === "forward" ? matches[(position + 1) % len] : matches[(position - 1 + len) % len];
 }
-function resolvePosition(matches, last, view, selected, term) {
+/**
+* Index of the "current" match — the one `pickNext` advances from.
+*
+* Layered, most trustworthy first:
+*  1. the last match the selection listener resolved, when the term is
+*     unchanged. That listener sees every `window.find` hit, so this is the
+*     live selection's position; it is cleared when the selection leaves the
+*     remembered event (a selection on a different, unindexed occurrence
+*     within that same event does not clear it).
+*  2. the viewport, so a press moves on from what is on screen rather than
+*     jumping to the top of the transcript.
+*  3. -1, when no view is mounted, or when no visible node maps to a known
+*     event (see `viewportPosition`) — `pickNext` then falls back to
+*     `matches[0]` (forward) or the last match (backward), matching the
+*     direction, which is right for a fresh search with nothing resolved.
+*/ function resolvePosition(opts) {
+	const { matches, term, direction, last, view, eventOrder } = opts;
 	if (last && last.term === term) {
 		const idx = matches.findIndex((m) => m.eventId === last.match.eventId && m.fieldKey === last.match.fieldKey && m.fieldIndex === last.match.fieldIndex && m.occurrenceIndex === last.match.occurrenceIndex);
 		if (idx !== -1) return idx;
 	}
+	return viewportPosition(matches, direction, view, eventOrder);
+}
+/**
+* Anchor to what is on screen: map the visible nodes into the global event
+* order, then return the index just outside the viewport in the direction of
+* travel, so `pickNext` lands on the first match at or beyond the current view.
+*
+* Returns -1 when nothing is mounted or no visible node is a known event, which
+* `pickNext` reads as "no current position".
+*/ function viewportPosition(matches, direction, view, eventOrder) {
 	const range = view?.getVisibleRange();
 	const flattened = view?.getFlattenedNodes() ?? [];
 	if (!range || flattened.length === 0) return -1;
-	const visibleIds = new Set(flattened.slice(range.startIndex, range.endIndex + 1).map((n) => n.id));
-	return matches.findIndex((m) => m.rowKey === selected && visibleIds.has(m.eventId));
+	let minVisible = Infinity;
+	let maxVisible = -Infinity;
+	for (const node of flattened.slice(range.startIndex, range.endIndex + 1)) {
+		const order = eventOrder.get(node.id);
+		if (order === void 0) continue;
+		if (order < minVisible) minVisible = order;
+		if (order > maxVisible) maxVisible = order;
+	}
+	if (minVisible === Infinity) return -1;
+	if (direction === "forward") {
+		const first = matches.findIndex((m) => (eventOrder.get(m.eventId) ?? -1) >= minVisible);
+		if (first === -1) return matches.length - 1;
+		return first - 1;
+	}
+	let lastIdx = -1;
+	for (let i = 0; i < matches.length; i++) if ((eventOrder.get(matches[i].eventId) ?? Infinity) <= maxVisible) lastIdx = i;
+	if (lastIdx === -1) return 0;
+	return lastIdx + 1;
+}
+/**
+* Walk up from `node` to the nearest ancestor element whose `id` satisfies
+* `isMatch`, treating `node` itself as the starting point if it's already an
+* element. Returns `null` if no such ancestor exists.
+*/ function closestEventAncestor(node, isMatch) {
+	let el = node instanceof Element ? node : node.parentElement;
+	while (el && !isMatch(el.id)) el = el.parentElement;
+	return el;
+}
+/**
+* True if the current document selection sits inside the event panel with id
+* `eventId`. Used by the selectionchange listener to distinguish "the user
+* is still on the remembered match, but our occurrence index came up short"
+* from "the user has moved somewhere else" — only the latter should forget
+* `lastResolvedRef`. Returns `false` when `eventId` is `undefined` (nothing
+* remembered, so nothing to protect) or when there is no live selection.
+*/ function selectionInEvent(eventId) {
+	if (!eventId || typeof window === "undefined") return false;
+	const sel = window.getSelection();
+	if (!sel || sel.rangeCount === 0) return false;
+	return closestEventAncestor(sel.getRangeAt(0).startContainer, (id) => id === eventId) !== null;
 }
 /**
 * Find the SampleMatch corresponding to the current document selection, if any.
@@ -109175,32 +109517,20 @@ function resolvePosition(matches, last, view, selected, term) {
 	if (!sel || sel.rangeCount === 0) return null;
 	const range = sel.getRangeAt(0);
 	const eventIds = new Set(matches.map((m) => m.eventId));
-	let el = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
-	while (el && !eventIds.has(el.id)) el = el.parentElement;
+	const el = closestEventAncestor(range.startContainer, (id) => eventIds.has(id));
 	if (!el) return null;
 	const eventId = el.id;
-	const lowered = term.toLowerCase();
+	const variants = searchVariants(term);
 	const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
 	let occurrenceInEvent = 0;
 	let node;
 	while (node = walker.nextNode()) {
 		if (!(node instanceof Text)) continue;
 		const textNode = node;
-		if (textNode === range.startContainer) {
-			const head = textNode.data.slice(0, range.startOffset).toLowerCase();
-			let from = 0;
-			while ((from = head.indexOf(lowered, from)) !== -1) {
-				occurrenceInEvent++;
-				from += lowered.length;
-			}
-			break;
-		}
-		const text = textNode.data.toLowerCase();
-		let from = 0;
-		while ((from = text.indexOf(lowered, from)) !== -1) {
-			occurrenceInEvent++;
-			from += lowered.length;
-		}
+		const atSelection = textNode === range.startContainer;
+		const text = (atSelection ? textNode.data.slice(0, range.startOffset) : textNode.data).toLowerCase();
+		occurrenceInEvent += findVariantPositions(text, variants).length;
+		if (atSelection) break;
 	}
 	let seen = 0;
 	for (const m of matches) {
