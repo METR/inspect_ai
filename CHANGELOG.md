@@ -1,3 +1,8 @@
+## Unreleased
+
+- Automatic native compaction no longer duplicates task prompts, and reports the applied strategy and fallback reason.
+- Reduced memory spikes and event-loop stalls when finalizing long samples while preserving complete saved histories.
+
 ## 0.3.277 (06 October 2026)
 
 - Fixed trace logs growing to many gigabytes when model output caching is enabled.
