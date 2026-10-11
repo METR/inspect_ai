@@ -317,6 +317,50 @@ def _runs(log: EvalLog) -> list[tuple[str, int]]:
     return sorted((str(sample.id), sample.epoch) for sample in log.samples or [])
 
 
+@pytest.mark.parametrize("log_format", ["eval", "json"])
+@pytest.mark.parametrize("log_samples", [True, False])
+def test_sample_source_fail_fast_preserves_sample_counts(
+    log_format: Literal["eval", "json"], log_samples: bool, tmp_path: Path
+) -> None:
+    @solver
+    def fail_after_admission() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            if state.sample_id == "extra2":
+                raise ValueError("dynamic sample failure")
+            return state
+
+        return solve
+
+    source = _EpochAdds(
+        [(f"extra{i}", None) for i in range(18)], seed=["seed1", "seed2"]
+    )
+    log = eval(
+        Task(dataset=source, solver=[fail_after_admission(), generate()]),
+        model="mockllm/model",
+        display="none",
+        max_samples=1,
+        fail_on_error=True,
+        continue_on_fail=False,
+        retry_on_error=0,
+        log_format=log_format,
+        log_dir=str(tmp_path),
+        log_realtime=False,
+        log_samples=log_samples,
+    )[0]
+
+    persisted = read_eval_log(log.location)
+    assert persisted.status == "error"
+    assert persisted.results is None
+    assert persisted.eval.dataset.sample_ids == ["seed1", "seed2"]
+    if log_samples:
+        assert 0 < len(persisted.samples or []) < 20
+        assert log.eval.completed_samples == persisted.eval.completed_samples == 4
+    else:
+        assert not persisted.samples
+        assert log.eval.completed_samples is persisted.eval.completed_samples is None
+    assert log.eval.total_samples == persisted.eval.total_samples == 20
+
+
 def test_enqueue_sample_epoch_runs_one_id_as_distinct_epochs() -> None:
     # one sample enqueued as epochs 1..4 runs them concurrently, and as 5..6
     # once epoch 4 completed, every time under its own id (an RL harness
@@ -399,6 +443,7 @@ def test_enqueue_sample_epoch_runs(
     else:
         assert log.status == "success"
         assert _runs(log) == expected
+        assert log.eval.total_samples == len(expected)
 
 
 @pytest.mark.parametrize(
@@ -431,6 +476,7 @@ def test_enqueue_sample_epoch_limit_counts_samples(
     )[0]
     assert log.status == "success"
     assert _runs(log) == expected
+    assert log.eval.total_samples == len(expected)
 
 
 @pytest.mark.parametrize("epoch,expected", [(2, "dropped"), (1, "duplicate")])
@@ -1003,6 +1049,7 @@ def test_sample_source_limit_counts_samples_not_epoch_runs() -> None:
     assert log.status == "success"
     runs = sorted((str(sample.input), sample.epoch) for sample in (log.samples or []))
     assert runs == [("s0", 1), ("s0", 2), ("s1", 1), ("s1", 2)]
+    assert log.eval.total_samples == 4
 
 
 class _IdsSource(SampleSource):
@@ -1038,6 +1085,7 @@ def test_sample_source_sample_id_filters_produced_samples() -> None:
     log = logs[0]
     assert log.status == "success"
     assert sorted(sample.id for sample in (log.samples or [])) == [1, 3]
+    assert log.eval.total_samples == 2
 
 
 def test_sample_source_unaddressed_task_never_polls_source() -> None:
@@ -1953,6 +2001,8 @@ def test_sample_source_task_retry_keeps_explicit_epochs_through_failed_attempt(
         key=lambda log: log.eval.created,
     )
     assert [log.status for log in attempts] == ["error", "error", "success"]
+    assert [log.eval.total_samples for log in attempts] == [4, 2, 4]
+    assert [log.eval.completed_samples for log in attempts] == [3, 1, 4]
     assert attempts[1].error is not None
     assert "feed failure" in attempts[1].error.message
     assert {("q", 2), ("q", 3)} <= set(_runs(attempts[1]))

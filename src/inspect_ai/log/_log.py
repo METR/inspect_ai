@@ -1149,6 +1149,20 @@ class EvalSpec(BaseModel):
     dataset: EvalDataset
     """Dataset used for eval."""
 
+    total_samples: int | None = Field(default=None, ge=0)
+    """Planned sample runs, including epochs and admitted dynamic samples.
+
+    Available even when the eval ends without results. None in older logs.
+    """
+
+    completed_samples: int | None = Field(default=None, ge=0)
+    """Sample runs completed without error in this attempt.
+
+    Includes accepted prior results, but excludes historical records retained
+    without being admitted to this attempt. None while running, with sample
+    logging disabled, or in older logs.
+    """
+
     sandbox: SandboxEnvironmentSpec | None = Field(default=None)
     """Sandbox environment type and optional config file."""
 

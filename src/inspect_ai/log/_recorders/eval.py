@@ -21,7 +21,6 @@ from typing import (
     NamedTuple,
     SupportsIndex,
     TypeVar,
-    cast,
     overload,
 )
 from zipfile import ZipFile
@@ -968,6 +967,7 @@ class ZipLogFile:
         self._config_update_counter = 0
         self._config_updates: list[ConfigUpdate] = []
         self._log_start: LogStart | None = None
+        self._journaled_total_samples: int | None = None
         self._destination_written = False
         # whether the destination existed before this log (init seeded from
         # it) — such a file is never ours to remove on discard. Distinct from
@@ -997,6 +997,9 @@ class ZipLogFile:
             self._config_update_counter = config_update_counter
             self._config_updates = config_updates or []
             self._log_start = log_start
+            self._journaled_total_samples = (
+                log_start.eval.total_samples if log_start is not None else None
+            )
             self._destination_written = destination_exists
             self._destination_seeded = destination_exists
 
@@ -1043,6 +1046,7 @@ class ZipLogFile:
         async with self._lock:
             self._log_start = start
             self._zip_writestr(_journal_path(START_JSON), start)
+            self._journaled_total_samples = start.eval.total_samples
 
     async def buffer_sample(self, sample: EvalSample) -> None:
         buffered = _BufferedSample(sample=sample, summary=sample.summary())
@@ -1279,6 +1283,14 @@ class ZipLogFile:
                 ``write_local_snapshot``). Local paths only.
         """
         async with self._lock:
+            if (
+                self._log_start is not None
+                and self._log_start.eval.total_samples != self._journaled_total_samples
+            ):
+                # Running logs read start.json; the final header sees the live spec.
+                self._zip_writestr(_journal_path(START_JSON), self._log_start)
+                self._journaled_total_samples = self._log_start.eval.total_samples
+
             # close the zip file so it is flushed
             if self._zip:
                 self._zip.close()
@@ -1894,7 +1906,8 @@ async def _read_start_async(reader: AsyncZipReader) -> LogStart | None:
     cd = await reader.entries()
     start_path = _journal_path(START_JSON)
     if any(e.filename == start_path for e in cd.entries):
-        return cast(LogStart, await _read_member_json(reader, start_path))
+        data = await _read_member_json(reader, start_path)
+        return LogStart.model_validate(data, context=get_deserializing_context())
     else:
         return None
 

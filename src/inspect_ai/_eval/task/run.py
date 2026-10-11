@@ -817,6 +817,7 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
         else {}
     )
     total_samples = len(dataset) * epochs
+    logger.eval.total_samples = total_samples
 
     # capture sample ids now, before `dataset` may be paged to disk and
     # deleted below — used by register_eval and the prior-log seed
@@ -1785,6 +1786,8 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                         nonlocal total_samples
 
                         added = add_samples(samples)
+                        total_samples += len(added.runs)
+                        logger.eval.total_samples = total_samples
                         if (
                             logger.prior_seeded
                             and sample_source is not None
@@ -1808,7 +1811,6 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                                     sample_source.seed.source, seed_keys
                                 )
                         if added.runs:
-                            total_samples += len(added.runs)
                             sample_error_handler.total_samples = total_samples
                             record_samples_added(
                                 logger.eval.eval_id,
