@@ -210,6 +210,11 @@ dropping samples.
   retry reuse — `eval_log_sample_source` rejects a prior log when
   `eval.dataset.samples != len(dataset)`, and a retry's fresh seed is
   seed-sized — so the spec must not be rewritten to the grown size at finish.
+  The grown total is recorded separately as `eval.total_samples`: `task_run`
+  updates it as samples are added, and recorders write the new value on flush
+  (the `.eval` recorder rewrites `_journal/start.json`), so running logs and
+  logs that end without `results` carry it. The consumers above still read the
+  seed-sized spec.
 - **Sandboxes**: the task-level sandbox startup pass runs up front over the
   seed, and *incrementally* for samples the source adds: each added batch goes
   through `SandboxManager.start_for_samples` (threaded into the dispatcher as
