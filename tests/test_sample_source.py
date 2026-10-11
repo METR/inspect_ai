@@ -319,7 +319,7 @@ def _runs(log: EvalLog) -> list[tuple[str, int]]:
 
 @pytest.mark.parametrize("log_format", ["eval", "json"])
 @pytest.mark.parametrize("log_samples", [True, False])
-def test_sample_source_fail_fast_preserves_sample_counts(
+def test_sample_source_fail_fast_preserves_total_samples(
     log_format: Literal["eval", "json"], log_samples: bool, tmp_path: Path
 ) -> None:
     @solver
@@ -354,10 +354,8 @@ def test_sample_source_fail_fast_preserves_sample_counts(
     assert persisted.eval.dataset.sample_ids == ["seed1", "seed2"]
     if log_samples:
         assert 0 < len(persisted.samples or []) < 20
-        assert log.eval.completed_samples == persisted.eval.completed_samples == 4
     else:
         assert not persisted.samples
-        assert log.eval.completed_samples is persisted.eval.completed_samples is None
     assert log.eval.total_samples == persisted.eval.total_samples == 20
 
 
@@ -2002,7 +2000,6 @@ def test_sample_source_task_retry_keeps_explicit_epochs_through_failed_attempt(
     )
     assert [log.status for log in attempts] == ["error", "error", "success"]
     assert [log.eval.total_samples for log in attempts] == [4, 2, 4]
-    assert [log.eval.completed_samples for log in attempts] == [3, 1, 4]
     assert attempts[1].error is not None
     assert "feed failure" in attempts[1].error.message
     assert {("q", 2), ("q", 3)} <= set(_runs(attempts[1]))

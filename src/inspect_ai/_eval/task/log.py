@@ -423,9 +423,7 @@ class TaskLogger:
             # holds the seeded prior set plus this attempt's flushed
             # completions, and the dispatcher makes it the retry's source
             await self.discard(keep_destination=True)
-        self.eval = self.eval.model_copy(
-            update=dict(eval_id=uuid(), created=iso_now(), completed_samples=None)
-        )
+        self.eval = self.eval.model_copy(update=dict(eval_id=uuid(), created=iso_now()))
         self._samples_completed = 0
         self._logged_sample_keys = set()
         self._cancelled_sample_keys = set()
@@ -655,7 +653,6 @@ class TaskLogger:
         self._record_sample_outcome(sample)
 
     async def log_start(self, plan: EvalPlan) -> None:
-        self.eval.completed_samples = None
         await self.recorder.log_start(self.eval, plan)
         # the first destination write: for a seeded retry attempt it already
         # carries the complete prior sample set
@@ -1207,11 +1204,6 @@ class TaskLogger:
                 await self.recorder.log_prune(self.eval, set(self._seeded_pending))
 
             # finish and get log
-            self.eval.completed_samples = (
-                self.samples_completed
-                if status != "started" and self.eval.config.log_samples is not False
-                else None
-            )
             log = await self.recorder.log_finish(
                 self.eval, status, stats, results, reductions, error, self.header_only
             )

@@ -8,7 +8,6 @@ only the attributes the methods touch — a fake recorder records ``flush`` call
 import anyio
 
 from inspect_ai._eval.task.log import TaskLogger
-from inspect_ai.log import EvalConfig, EvalDataset, EvalSpec
 
 
 class FakeRecorder:
@@ -93,14 +92,6 @@ async def test_flush_during_log_finish_is_serialized() -> None:
     recorder = FinishRecorder()
     logger.recorder = recorder  # type: ignore[assignment]
     logger.header_only = False
-    logger.eval = EvalSpec(
-        created="2026-05-18T00:00:00+00:00",
-        task="task",
-        model="mockllm/model",
-        dataset=EvalDataset(),
-        config=EvalConfig(),
-    )
-    logger._samples_completed = 0
 
     flush_result: list[int] = []
 

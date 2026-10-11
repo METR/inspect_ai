@@ -157,18 +157,15 @@ def _eval_spec() -> EvalSpec:
     )
 
 
-@pytest.mark.parametrize("field", ["total_samples", "completed_samples"])
-def test_eval_spec_sample_counts_are_optional_and_nonnegative(field: str) -> None:
-    legacy = _eval_spec().model_dump(exclude={"total_samples", "completed_samples"})
+def test_eval_spec_total_samples_is_optional_and_nonnegative() -> None:
+    legacy = _eval_spec().model_dump(exclude={"total_samples"})
     spec = EvalSpec.model_validate(legacy)
-    assert spec.total_samples is spec.completed_samples is None
+    assert spec.total_samples is None
 
-    spec = EvalSpec.model_validate(
-        {**legacy, "total_samples": 20, "completed_samples": 4}
-    )
+    spec = EvalSpec.model_validate({**legacy, "total_samples": 20})
     assert EvalSpec.model_validate_json(spec.model_dump_json()) == spec
-    with pytest.raises(ValidationError, match=field):
-        EvalSpec.model_validate({**legacy, field: -1})
+    with pytest.raises(ValidationError, match="total_samples"):
+        EvalSpec.model_validate({**legacy, "total_samples": -1})
 
 
 class _FlushRecorder:
@@ -1057,13 +1054,11 @@ async def test_task_logger_reinit_leaves_finished_attempt_log(
     await logger.log_finish("error", EvalStats(), None, None, _error("boom"))
     finished_location = logger.location
     assert logger.finished
-    assert logger.eval.completed_samples == 0
 
     await logger.reinit()
 
     assert Path(finished_location).exists()
     assert not logger.finished
-    assert logger.eval.completed_samples is None
     assert len(recorder.data) == 1
 
 
@@ -2995,7 +2990,7 @@ async def test_task_logger_discard_drops_recorder_entry_when_cleanup_fails(
 
 @pytest.mark.parametrize("recorder_cls", [EvalRecorder, JSONRecorder])
 @pytest.mark.parametrize("status", ["started", "error"])
-async def test_recorder_flush_preserves_updated_sample_counts(
+async def test_recorder_flush_preserves_updated_total_samples(
     recorder_cls: type[EvalRecorder] | type[JSONRecorder],
     status: Literal["started", "error"],
     tmp_path: Path,
@@ -3009,21 +3004,17 @@ async def test_recorder_flush_preserves_updated_sample_counts(
     await logger.log_start(EvalPlan())
     initial = await read_eval_log_async(location, header_only=True)
     assert initial.eval.total_samples == 2
-    assert initial.eval.completed_samples is None
 
     spec.total_samples = 20
     await recorder.flush(spec)
     running = await read_eval_log_async(location, header_only=True)
     assert running.status == "started"
     assert running.eval.total_samples == 20
-    assert running.eval.completed_samples is None
 
-    logger._samples_completed = 4
     await logger.log_finish(status, EvalStats())
     finished = await read_eval_log_async(location, header_only=True)
     assert finished.results is None
     assert finished.eval.total_samples == 20
-    assert finished.eval.completed_samples == (4 if status == "error" else None)
 
 
 @pytest.mark.anyio
