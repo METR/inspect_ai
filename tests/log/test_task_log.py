@@ -1,3 +1,4 @@
+import json
 import tempfile
 import types
 from collections.abc import AsyncIterator
@@ -3048,6 +3049,28 @@ async def test_eval_recorder_ignores_total_journaled_by_another_attempt(
     running = await read_eval_log_async(location, header_only=True)
     assert running.eval.eval_id == "next-attempt"
     assert running.eval.total_samples == 3
+
+
+async def test_eval_log_readers_reject_negative_journaled_total(
+    tmp_path: Path,
+) -> None:
+    recorder = EvalRecorder(str(tmp_path))
+    spec = _eval_spec().model_copy(update={"total_samples": 2})
+    location = await recorder.log_init(spec)
+    await recorder.log_start(spec, EvalPlan())
+    await recorder.flush(spec)
+    with ZipFile(location, "a") as zf:
+        zf.writestr(
+            "_journal/total_samples.json",
+            json.dumps({"eval_id": spec.eval_id, "total_samples": -1}),
+        )
+
+    with pytest.raises(ValidationError, match="total_samples"):
+        await read_eval_log_async(location, header_only=True)
+    with ZipFile(location) as zf, pytest.raises(ValidationError, match="total_samples"):
+        _read_header(zf, location)
+    with pytest.raises(ValidationError, match="total_samples"):
+        await read_crashed_eval_log(location)
 
 
 @pytest.mark.anyio

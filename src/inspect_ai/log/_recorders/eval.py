@@ -112,7 +112,7 @@ class LogTotalSamples(BaseModel):
     """A running log's planned total, journaled after start.json as samples are added."""
 
     eval_id: str
-    total_samples: int
+    total_samples: int = Field(ge=0)
 
 
 JOURNAL_DIR = "_journal"
