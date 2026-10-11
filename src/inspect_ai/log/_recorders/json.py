@@ -205,6 +205,11 @@ class JSONRecorder(FileRecorder):
         log.data.config_updates.append(update)
 
     @override
+    async def log_total_samples(self, eval: EvalSpec, total_samples: int) -> None:
+        # in-memory like config updates; written at the next flush / log_finish
+        self.data[self._log_file_key(eval)].data.total_samples = total_samples
+
+    @override
     async def log_finish(
         self,
         eval: EvalSpec,
@@ -217,6 +222,7 @@ class JSONRecorder(FileRecorder):
         invalidated: bool = False,
         log_updates: list[LogUpdate] | None = None,
         config_updates: list[ConfigUpdate] | None = None,
+        total_samples: int | None = None,
     ) -> EvalLog:
         await self.close_seed_source(eval)
         log = self.data[self._log_file_key(eval)]
@@ -228,6 +234,8 @@ class JSONRecorder(FileRecorder):
         # None means "not supplied" — keep the updates accumulated mid-run
         if config_updates is not None:
             log.data.config_updates = config_updates
+        if total_samples is not None:
+            log.data.total_samples = total_samples
         log.data.recompute_tags_and_metadata()
         if error:
             log.data.error = error
@@ -552,6 +560,7 @@ def _read_header_streaming(log_file: str) -> EvalLog:
         error: EvalError | None = None
         log_updates: list[LogUpdate] | None = None
         config_updates: list[ConfigUpdate] | None = None
+        total_samples: int | None = None
         for k, v in ijson.kvitems(f, ""):
             if k == "status":
                 assert v in get_args(EvalStatus)
@@ -572,6 +581,8 @@ def _read_header_streaming(log_file: str) -> EvalLog:
                 log_updates = [LogUpdate.model_validate(u) for u in v]
             elif k == "config_updates":
                 config_updates = [ConfigUpdate.model_validate(u) for u in v]
+            elif k == "total_samples":
+                total_samples = v
             if k == last_header_field:
                 break
 
@@ -589,6 +600,7 @@ def _read_header_streaming(log_file: str) -> EvalLog:
         invalidated=invalidated,
         log_updates=log_updates,
         config_updates=config_updates,
+        total_samples=total_samples,
         version=version,
         error=error,
         location=log_file,

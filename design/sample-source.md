@@ -210,13 +210,15 @@ dropping samples.
   retry reuse — `eval_log_sample_source` rejects a prior log when
   `eval.dataset.samples != len(dataset)`, and a retry's fresh seed is
   seed-sized — so the spec must not be rewritten to the grown size at finish.
-  The grown total is recorded separately as `eval.total_samples`: `task_run`
-  updates it as samples are added, and recorders write the new value on flush,
-  so running logs and logs that end without `results` carry it. The `.eval`
-  recorder journals it as a small `_journal/total_samples.json` record that
-  readers (including crash recovery) apply over `start.json`, rather than
-  rewriting the whole start header. The consumers above still read the
-  seed-sized spec.
+  The grown total lives on the log as `EvalLog.total_samples`, not on the
+  spec, which stays the start-time descriptor (as for `config_updates`; see
+  [config-log-persistence](ctl/config-log-persistence.md)). `task_run`
+  records it as samples are added; the `.eval` recorder journals it on flush
+  as a small `_journal/total_samples.json` record tagged with the eval_id,
+  which the header readers and crash recovery apply, and writes it into
+  `header.json` at finish. ctl's log-dir snapshot and the viewer build running
+  headers from `start.json` and don't read it (neither uses the total). The
+  consumers above still read the seed-sized spec.
 - **Sandboxes**: the task-level sandbox startup pass runs up front over the
   seed, and *incrementally* for samples the source adds: each added batch goes
   through `SandboxManager.start_for_samples` (threaded into the dispatcher as

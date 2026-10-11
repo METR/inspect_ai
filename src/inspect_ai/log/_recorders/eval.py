@@ -270,6 +270,11 @@ class EvalRecorder(FileRecorder):
         return await log.buffered_sample(id, epoch, exclude_fields=exclude_fields)
 
     @override
+    async def log_total_samples(self, eval: EvalSpec, total_samples: int) -> None:
+        # journaled on the next flush, consolidated into header.json at finish
+        self.data[self._log_file_key(eval)].total_samples = total_samples
+
+    @override
     async def log_config_update(self, eval: EvalSpec, update: ConfigUpdate) -> None:
         log = self.data[self._log_file_key(eval)]
         await log.record_config_update(update)
@@ -305,8 +310,8 @@ class EvalRecorder(FileRecorder):
         # write the buffered samples
         await log.write_buffered_samples()
 
-        # journal a planned total that grew as samples were added
-        await log.journal_total_samples(eval)
+        # journal the planned total if it changed since it was last written
+        await log.journal_total_samples(eval.eval_id)
 
         # flush to underlying stream (intermediate snapshot: skip fsync)
         await log.flush(fsync=False)
@@ -324,6 +329,7 @@ class EvalRecorder(FileRecorder):
         invalidated: bool = False,
         log_updates: list[LogUpdate] | None = None,
         config_updates: list[ConfigUpdate] | None = None,
+        total_samples: int | None = None,
     ) -> EvalLog:
         await self.close_seed_source(eval)
         # get the key and log
@@ -366,6 +372,9 @@ class EvalRecorder(FileRecorder):
             invalidated=invalidated,
             log_updates=log_updates,
             config_updates=all_config_updates or None,
+            total_samples=(
+                total_samples if total_samples is not None else log.total_samples
+            ),
             eval=log_start.eval,
             plan=log_start.plan,
             results=log_results.results,
@@ -630,6 +639,7 @@ def _eval_log_header(log: EvalLog) -> EvalLog:
         invalidated=log.invalidated,
         log_updates=log.log_updates,
         config_updates=log.config_updates,
+        total_samples=log.total_samples,
         eval=log.eval,
         plan=log.plan,
         results=log.results,
@@ -741,6 +751,7 @@ async def _write_eval_log_with_recorder(
         invalidated=log.invalidated,
         log_updates=log.log_updates,
         config_updates=log.config_updates,
+        total_samples=log.total_samples,
     )
     return result.etag
 
@@ -979,6 +990,8 @@ class ZipLogFile:
         self._config_update_counter = 0
         self._config_updates: list[ConfigUpdate] = []
         self._log_start: LogStart | None = None
+        # latest planned total (EvalLog.total_samples), journaled on flush
+        self.total_samples: int | None = None
         # (eval_id, total_samples) a reader of the running log currently sees
         self._journaled_total: tuple[str, int | None] | None = None
         self._destination_written = False
@@ -1056,27 +1069,25 @@ class ZipLogFile:
         async with self._lock:
             self._log_start = start
             self._zip_writestr(_journal_path(START_JSON), start)
-            self._journaled_total = (start.eval.eval_id, start.eval.total_samples)
+            # a new attempt's total is recorded after its start
+            self.total_samples = None
+            self._journaled_total = (start.eval.eval_id, None)
 
-    async def journal_total_samples(self, eval: EvalSpec) -> None:
-        """Journal the planned total if samples were added since it was last written.
+    async def journal_total_samples(self, eval_id: str) -> None:
+        """Journal the planned total if it changed since it was last written.
 
-        A running or crashed log has no header.json, so readers take the total
-        from start.json. Rewriting start.json would append another copy of the
-        whole start header (including every seed sample id) each time; this
-        small record supersedes only the total, and readers apply it when its
-        eval_id matches start.json's.
+        A running or crashed log has no header.json, and start.json is written
+        once. This small record supersedes only the total; readers apply it
+        when its eval_id matches start.json's.
         """
-        if eval.total_samples is None:
+        if self.total_samples is None:
             return
         async with self._lock:
-            journaled = (eval.eval_id, eval.total_samples)
+            journaled = (eval_id, self.total_samples)
             if journaled != self._journaled_total:
                 self._zip_writestr(
                     _journal_path(TOTAL_SAMPLES_JSON),
-                    LogTotalSamples(
-                        eval_id=eval.eval_id, total_samples=eval.total_samples
-                    ),
+                    LogTotalSamples(eval_id=eval_id, total_samples=self.total_samples),
                 )
                 self._journaled_total = journaled
 
@@ -1909,7 +1920,9 @@ async def _read_header_async(
     else:
         data = await _read_member_json(reader, _journal_path(START_JSON))
         start = LogStart.model_validate(data, context=get_deserializing_context())
-        await _apply_journaled_total_async(reader, entry_names, start)
+        total_samples = await _read_journaled_total_async(
+            reader, entry_names, start.eval.eval_id
+        )
         # an in-progress/crashed log has no consolidated header — read any
         # journaled config updates so the header still reports mid-run retunes
         config_updates: list[ConfigUpdate] = []
@@ -1925,29 +1938,30 @@ async def _read_header_async(
             eval=start.eval,
             plan=start.plan,
             config_updates=config_updates or None,
+            total_samples=total_samples,
             location=location,
         )
 
 
-async def _apply_journaled_total_async(
-    reader: AsyncZipReader, entry_names: set[str], start: LogStart
-) -> None:
-    """Apply a planned total journaled after start.json (see `journal_total_samples`)."""
+async def _read_journaled_total_async(
+    reader: AsyncZipReader, entry_names: set[str], eval_id: str
+) -> int | None:
+    """The planned total journaled for `eval_id` (see `journal_total_samples`)."""
     path = _journal_path(TOTAL_SAMPLES_JSON)
-    if path in entry_names:
-        update = LogTotalSamples.model_validate(await _read_member_json(reader, path))
-        if update.eval_id == start.eval.eval_id:
-            start.eval.total_samples = update.total_samples
+    if path not in entry_names:
+        return None
+    update = LogTotalSamples.model_validate(await _read_member_json(reader, path))
+    return update.total_samples if update.eval_id == eval_id else None
 
 
-def _apply_journaled_total(zip: ZipFile, start: LogStart) -> None:
-    """Sync equivalent of `_apply_journaled_total_async`."""
+def _read_journaled_total(zip: ZipFile, eval_id: str) -> int | None:
+    """Sync equivalent of `_read_journaled_total_async`."""
     path = _journal_path(TOTAL_SAMPLES_JSON)
-    if path in zip.NameToInfo:
-        with zip.open(path, "r") as f:
-            update = LogTotalSamples.model_validate(json.load(f))
-        if update.eval_id == start.eval.eval_id:
-            start.eval.total_samples = update.total_samples
+    if path not in zip.NameToInfo:
+        return None
+    with zip.open(path, "r") as f:
+        update = LogTotalSamples.model_validate(json.load(f))
+    return update.total_samples if update.eval_id == eval_id else None
 
 
 async def _read_start_async(reader: AsyncZipReader) -> LogStart | None:
@@ -2049,7 +2063,7 @@ def _read_header(zip: ZipFile, location: str) -> EvalLog:
             start = LogStart.model_validate(
                 json.load(f), context=get_deserializing_context()
             )
-        _apply_journaled_total(zip, start)
+        total_samples = _read_journaled_total(zip, start.eval.eval_id)
         # see the equivalent journal read in _read_header_async
         config_updates: list[ConfigUpdate] = []
         for name in _sorted_config_update_entries(set(zip.namelist())):
@@ -2064,6 +2078,7 @@ def _read_header(zip: ZipFile, location: str) -> EvalLog:
             eval=start.eval,
             plan=start.plan,
             config_updates=config_updates or None,
+            total_samples=total_samples,
             location=location,
         )
 

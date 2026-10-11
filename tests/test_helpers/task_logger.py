@@ -10,6 +10,7 @@ class TaskLoggerShim(TaskLogger):
     def __init__(self, buffer_db: Any) -> None:
         self._buffer_db = cast(SampleBufferDatabase, buffer_db)
         self._samples_completed = 0
+        self._total_samples = None
         self._logged_sample_keys = set()
         self._cancelled_sample_keys = set()
         self._init_stale_flush_state()

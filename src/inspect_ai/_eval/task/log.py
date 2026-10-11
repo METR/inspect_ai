@@ -308,7 +308,6 @@ class TaskLogger:
                 sample_ids=sample_ids,
                 shuffled=dataset.shuffled,
             ),
-            total_samples=total_samples,
             scorers=eval_scorers,
             metrics=eval_metrics,
             headline_metric=headline_metric,
@@ -328,6 +327,8 @@ class TaskLogger:
         # number of samples logged without error / distinct samples logged
         # (cancellation-resolved ones tracked separately — see samples_logged)
         self._samples_completed = 0
+        # planned sample runs (EvalLog.total_samples); added samples grow it
+        self._total_samples: int | None = total_samples
         self._logged_sample_keys: set[tuple[str | int, int]] = set()
         self._cancelled_sample_keys: set[tuple[str | int, int]] = set()
 
@@ -654,9 +655,16 @@ class TaskLogger:
 
     async def log_start(self, plan: EvalPlan) -> None:
         await self.recorder.log_start(self.eval, plan)
+        if self._total_samples is not None:
+            await self.recorder.log_total_samples(self.eval, self._total_samples)
         # the first destination write: for a seeded retry attempt it already
         # carries the complete prior sample set
         await self.recorder.flush(self.eval)
+
+    async def log_total_samples(self, total_samples: int) -> None:
+        """Record the planned total as dynamically added samples grow it."""
+        self._total_samples = total_samples
+        await self.recorder.log_total_samples(self.eval, total_samples)
 
     async def start_sample(self, sample: EvalSampleSummary) -> None:
         if self._buffer_db is not None:
@@ -1204,6 +1212,7 @@ class TaskLogger:
                 await self.recorder.log_prune(self.eval, set(self._seeded_pending))
 
             # finish and get log
+            # the recorder writes the total it was given via log_total_samples
             log = await self.recorder.log_finish(
                 self.eval, status, stats, results, reductions, error, self.header_only
             )

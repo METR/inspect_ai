@@ -872,6 +872,10 @@ def test_sync_recover_eval_log() -> None:
         with ZipFile(eval_path, "w") as zf:
             zf.writestr("_journal/start.json", _to_json(log_start))
             zf.writestr(
+                "_journal/total_samples.json",
+                json.dumps({"eval_id": eval_spec.eval_id, "total_samples": 2}),
+            )
+            zf.writestr(
                 f"samples/{sample1.id}_epoch_{sample1.epoch}.json",
                 _to_json(sample1),
             )
@@ -917,6 +921,7 @@ def test_sync_recover_eval_log() -> None:
         assert log.status == "error"
         assert log.samples is not None
         assert len(log.samples) == 2
+        assert log.total_samples == 2
 
 
 async def test_streaming_recovery_synthesizes_uuid_for_in_progress_sample() -> None:

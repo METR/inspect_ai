@@ -30,10 +30,13 @@ from inspect_ai.dataset import Sample
 from inspect_ai.event._model import ModelEvent
 from inspect_ai.event._timeline import timeline_build
 from inspect_ai.log import EvalRevision
+from inspect_ai.log._convert import convert_eval_logs
 from inspect_ai.log._file import (
+    read_eval_log,
     read_eval_log_async,
     read_eval_log_sample_async,
     read_eval_log_sample_summaries_async,
+    write_eval_log,
 )
 from inspect_ai.log._log import (
     EvalConfig,
@@ -159,15 +162,29 @@ def _eval_spec() -> EvalSpec:
     )
 
 
-def test_eval_spec_total_samples_is_optional_and_nonnegative() -> None:
-    legacy = _eval_spec().model_dump(exclude={"total_samples"})
-    spec = EvalSpec.model_validate(legacy)
-    assert spec.total_samples is None
-
-    spec = EvalSpec.model_validate({**legacy, "total_samples": 20})
-    assert EvalSpec.model_validate_json(spec.model_dump_json()) == spec
+def test_eval_log_total_samples_is_optional_and_nonnegative() -> None:
+    assert EvalLog(eval=_eval_spec()).total_samples is None
+    log = EvalLog(eval=_eval_spec(), total_samples=20)
+    assert EvalLog.model_validate_json(log.model_dump_json()).total_samples == 20
     with pytest.raises(ValidationError, match="total_samples"):
-        EvalSpec.model_validate({**legacy, "total_samples": -1})
+        EvalLog(eval=_eval_spec(), total_samples=-1)
+
+
+@pytest.mark.parametrize("suffix,other", [(".eval", "json"), (".json", "eval")])
+def test_eval_log_total_samples_survives_rewrite_and_conversion(
+    tmp_path: Path, suffix: str, other: Literal["eval", "json"]
+) -> None:
+    path = str(tmp_path / f"log{suffix}")
+    write_eval_log(EvalLog(eval=_eval_spec(), status="success", total_samples=20), path)
+    for header_only in (True, False):
+        assert read_eval_log(path, header_only=header_only).total_samples == 20
+    write_eval_log(read_eval_log(path, header_only=True), path, header_only=True)
+    assert read_eval_log(path, header_only=True).total_samples == 20
+
+    output_dir = tmp_path / "converted"
+    convert_eval_logs(path, other, str(output_dir), stream=True)
+    (converted,) = output_dir.iterdir()
+    assert read_eval_log(str(converted), header_only=True).total_samples == 20
 
 
 class _FlushRecorder:
@@ -2999,63 +3016,69 @@ async def test_recorder_flush_preserves_updated_total_samples(
 ) -> None:
     recorder = recorder_cls(str(tmp_path))
     logger = _seed_logger(recorder)
+    logger._total_samples = 2
     spec = logger.eval
-    spec.total_samples = 2
     logger._location = await recorder.log_init(spec)
     location = logger.location
     await logger.log_start(EvalPlan())
     initial = await read_eval_log_async(location, header_only=True)
-    assert initial.eval.total_samples == 2
+    assert initial.total_samples == 2
     await recorder.flush(spec)
     if recorder_cls is EvalRecorder:
         with ZipFile(location) as zf:
-            # an unchanged total journals nothing
-            assert "_journal/total_samples.json" not in zf.namelist()
+            # an unchanged total journals nothing new
+            assert zf.namelist().count("_journal/total_samples.json") == 1
 
-    spec.total_samples = 20
+    await logger.log_total_samples(20)
     await recorder.flush(spec)
     running = await read_eval_log_async(location, header_only=True)
     assert running.status == "started"
-    assert running.eval.total_samples == 20
+    assert running.total_samples == 20
     if recorder_cls is EvalRecorder:
         with ZipFile(location) as zf:
-            # the total is journaled on its own, not as a second start header
+            # the total is journaled on its own; start.json is written once
             assert zf.namelist().count("_journal/start.json") == 1
-            assert _read_header(zf, location).eval.total_samples == 20
+            assert _read_header(zf, location).total_samples == 20
         crashed = await read_crashed_eval_log(location)
-        assert crashed.eval.total_samples == 20
+        assert crashed.total_samples == 20
 
     await logger.log_finish(status, EvalStats())
     finished = await read_eval_log_async(location, header_only=True)
     assert finished.results is None
-    assert finished.eval.total_samples == 20
+    assert finished.total_samples == 20
 
 
 async def test_eval_recorder_ignores_total_journaled_by_another_attempt(
     tmp_path: Path,
 ) -> None:
     recorder = EvalRecorder(str(tmp_path))
-    spec = _eval_spec().model_copy(update={"total_samples": 2})
+    spec = _eval_spec()
     location = await recorder.log_init(spec)
     await recorder.log_start(spec, EvalPlan())
-    spec.total_samples = 20
+    await recorder.log_total_samples(spec, 20)
     await recorder.flush(spec)
 
     # a retry restarts the log under a new eval_id; the old record is stale
-    retry = spec.model_copy(update={"eval_id": "next-attempt", "total_samples": 3})
+    retry = spec.model_copy(update={"eval_id": "next-attempt"})
     await recorder.log_start(retry, EvalPlan())
     await recorder.flush(retry)
-
     running = await read_eval_log_async(location, header_only=True)
     assert running.eval.eval_id == "next-attempt"
-    assert running.eval.total_samples == 3
+    assert running.total_samples is None
+    with ZipFile(location) as zf:
+        assert _read_header(zf, location).total_samples is None
+
+    await recorder.log_total_samples(retry, 3)
+    await recorder.flush(retry)
+    running = await read_eval_log_async(location, header_only=True)
+    assert running.total_samples == 3
 
 
 async def test_eval_log_readers_reject_negative_journaled_total(
     tmp_path: Path,
 ) -> None:
     recorder = EvalRecorder(str(tmp_path))
-    spec = _eval_spec().model_copy(update={"total_samples": 2})
+    spec = _eval_spec()
     location = await recorder.log_init(spec)
     await recorder.log_start(spec, EvalPlan())
     await recorder.flush(spec)

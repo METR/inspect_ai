@@ -132,7 +132,9 @@ inventory" below.
   (`write_buffered_samples`, `src/inspect_ai/log/_recorders/eval.py:1148-1185`)
   or per sample on the streaming completion path (`_journal_summary`,
   `:1082-1100`). `header.json`, `summaries.json` and `reductions.json` are
-  written at finish (`:303-340`). A running log has no `header.json`;
+  written at finish (`:303-340`). A `_journal/total_samples.json` record
+  carries the planned total once it is recorded; log-dir mode doesn't read it.
+  A running log has no `header.json`;
   readers synthesise the header from `start.json` (`_read_header_async`,
   `:1858-1886`) and read the journal summaries, 25 at a time
   (`_read_all_summaries_async`, `:1936-1970`). Each flush copies the whole

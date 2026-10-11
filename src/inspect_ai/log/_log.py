@@ -1149,13 +1149,6 @@ class EvalSpec(BaseModel):
     dataset: EvalDataset
     """Dataset used for eval."""
 
-    total_samples: int | None = Field(default=None, ge=0)
-    """Planned sample runs, including epochs and admitted dynamic samples.
-
-    Grows while the eval runs as samples are added. Available even when the
-    eval ends without results. None in older logs.
-    """
-
     sandbox: SandboxEnvironmentSpec | None = Field(default=None)
     """Sandbox environment type and optional config file."""
 
@@ -1343,6 +1336,13 @@ class EvalLog(BaseModel):
 
     config_updates: list[ConfigUpdate] | None = Field(default=None)
     """Mid-run configuration changes applied via the control channel (`inspect ctl config`)."""
+
+    total_samples: int | None = Field(default=None, ge=0)
+    """Planned sample runs, including epochs and samples added while the eval runs.
+
+    Unlike `results.total_samples`, present when the eval ends without results.
+    None in logs written by earlier versions.
+    """
 
     tags: list[str] = Field(default_factory=list)
     """Current tags (eval-time + edits). Do not set directly; use edit_eval_log()."""

@@ -1914,6 +1914,27 @@ async def _write_seed_prior(
     return location
 
 
+async def test_eval_recorder_seed_prunes_prior_total_record(tmp_path) -> None:
+    from inspect_ai.log._recorders.eval import EvalRecorder
+
+    # every prior sample is kept, so the seed prunes in place without a rewrite
+    prior = await _write_seed_prior(tmp_path / "prior", [_seed_sample(1, "one")])
+    with ZipFile(local_path(prior), "a") as zf:
+        zf.writestr(
+            "_journal/total_samples.json", '{"eval_id": "prior", "total_samples": 3}'
+        )
+
+    spec = _seed_spec("retry-attempt")
+    recorder = EvalRecorder(str(tmp_path / "retry"))
+    await recorder.log_init(spec)
+    await recorder.log_seed(spec, prior, keep={(1, 1)})
+
+    zip_log = recorder.data[recorder._log_file_key(spec)]
+    assert zip_log._zip is not None
+    assert "samples/1_epoch_1.json" in zip_log._zip.NameToInfo
+    assert "_journal/total_samples.json" not in zip_log._zip.NameToInfo
+
+
 async def test_eval_recorder_seed_copies_prunes_and_supersedes(tmp_path) -> None:
     from inspect_ai.log._file import (
         read_eval_log_async,
@@ -1934,6 +1955,11 @@ async def test_eval_recorder_seed_copies_prunes_and_supersedes(tmp_path) -> None
         ],
     )
     prior_bytes = Path(local_path(prior)).read_bytes()
+    # the prior attempt's journaled total is pruned with the rest of its journal
+    with ZipFile(local_path(prior), "a") as zf:
+        zf.writestr(
+            "_journal/total_samples.json", '{"eval_id": "prior", "total_samples": 3}'
+        )
 
     spec = _seed_spec("retry-attempt")
     recorder = EvalRecorder(str(tmp_path / "retry"))
@@ -1951,6 +1977,7 @@ async def test_eval_recorder_seed_copies_prunes_and_supersedes(tmp_path) -> None
     assert "samples/3_epoch_1.json" not in names
     assert not names & {"header.json", "summaries.json", "reductions.json"}
     assert "_journal/start.json" not in names
+    assert "_journal/total_samples.json" not in names
     journal = [n for n in names if n.startswith("_journal/summaries/")]
     assert journal == ["_journal/summaries/1.json"]
 

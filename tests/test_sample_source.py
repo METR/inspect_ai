@@ -356,7 +356,7 @@ def test_sample_source_fail_fast_preserves_total_samples(
         assert 0 < len(persisted.samples or []) < 20
     else:
         assert not persisted.samples
-    assert log.eval.total_samples == persisted.eval.total_samples == 20
+    assert log.total_samples == persisted.total_samples == 20
 
 
 def test_enqueue_sample_epoch_runs_one_id_as_distinct_epochs() -> None:
@@ -441,7 +441,7 @@ def test_enqueue_sample_epoch_runs(
     else:
         assert log.status == "success"
         assert _runs(log) == expected
-        assert log.eval.total_samples == len(expected)
+        assert log.total_samples == len(expected)
 
 
 @pytest.mark.parametrize(
@@ -474,7 +474,7 @@ def test_enqueue_sample_epoch_limit_counts_samples(
     )[0]
     assert log.status == "success"
     assert _runs(log) == expected
-    assert log.eval.total_samples == len(expected)
+    assert log.total_samples == len(expected)
 
 
 @pytest.mark.parametrize("epoch,expected", [(2, "dropped"), (1, "duplicate")])
@@ -1047,7 +1047,7 @@ def test_sample_source_limit_counts_samples_not_epoch_runs() -> None:
     assert log.status == "success"
     runs = sorted((str(sample.input), sample.epoch) for sample in (log.samples or []))
     assert runs == [("s0", 1), ("s0", 2), ("s1", 1), ("s1", 2)]
-    assert log.eval.total_samples == 4
+    assert log.total_samples == 4
 
 
 class _IdsSource(SampleSource):
@@ -1083,7 +1083,7 @@ def test_sample_source_sample_id_filters_produced_samples() -> None:
     log = logs[0]
     assert log.status == "success"
     assert sorted(sample.id for sample in (log.samples or [])) == [1, 3]
-    assert log.eval.total_samples == 2
+    assert log.total_samples == 2
 
 
 def test_sample_source_unaddressed_task_never_polls_source() -> None:
@@ -1999,7 +1999,7 @@ def test_sample_source_task_retry_keeps_explicit_epochs_through_failed_attempt(
         key=lambda log: log.eval.created,
     )
     assert [log.status for log in attempts] == ["error", "error", "success"]
-    assert [log.eval.total_samples for log in attempts] == [4, 2, 4]
+    assert [log.total_samples for log in attempts] == [4, 2, 4]
     assert attempts[1].error is not None
     assert "feed failure" in attempts[1].error.message
     assert {("q", 2), ("q", 3)} <= set(_runs(attempts[1]))

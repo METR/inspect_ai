@@ -370,6 +370,15 @@ class Recorder(abc.ABC):
         it in the in-memory log (JSON) so it lands in the finished header.
         """
 
+    async def log_total_samples(self, eval: EvalSpec, total_samples: int) -> None:
+        """Record the planned sample total (see ``EvalLog.total_samples``).
+
+        Called after `log_start` and whenever added samples grow the total.
+        The base implementation is a no-op so recorder subclasses that don't
+        persist mid-run state keep working; the built-in recorders journal it
+        (`.eval`) or keep it on the in-memory log (JSON).
+        """
+
     @abc.abstractmethod
     async def flush(self, eval: EvalSpec) -> None: ...
 
@@ -418,6 +427,7 @@ class Recorder(abc.ABC):
         invalidated: bool = False,
         log_updates: list[LogUpdate] | None = None,
         config_updates: list[ConfigUpdate] | None = None,
+        total_samples: int | None = None,
     ) -> EvalLog: ...
 
     @classmethod
