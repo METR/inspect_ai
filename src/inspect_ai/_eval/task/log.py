@@ -327,8 +327,10 @@ class TaskLogger:
         # number of samples logged without error / distinct samples logged
         # (cancellation-resolved ones tracked separately — see samples_logged)
         self._samples_completed = 0
-        # planned sample runs (EvalLog.total_samples); added samples grow it
+        # planned sample runs (EvalLog.total_samples); added samples grow it.
+        # The recorder receives it from log_start on.
         self._total_samples: int | None = total_samples
+        self._log_started = False
         self._logged_sample_keys: set[tuple[str | int, int]] = set()
         self._cancelled_sample_keys: set[tuple[str | int, int]] = set()
 
@@ -426,6 +428,7 @@ class TaskLogger:
             await self.discard(keep_destination=True)
         self.eval = self.eval.model_copy(update=dict(eval_id=uuid(), created=iso_now()))
         self._samples_completed = 0
+        self._log_started = False
         self._logged_sample_keys = set()
         self._cancelled_sample_keys = set()
         self.flush_pending = []
@@ -655,6 +658,7 @@ class TaskLogger:
 
     async def log_start(self, plan: EvalPlan) -> None:
         await self.recorder.log_start(self.eval, plan)
+        self._log_started = True
         if self._total_samples is not None:
             await self.recorder.log_total_samples(self.eval, self._total_samples)
         # the first destination write: for a seeded retry attempt it already
@@ -662,9 +666,10 @@ class TaskLogger:
         await self.recorder.flush(self.eval)
 
     async def log_total_samples(self, total_samples: int) -> None:
-        """Record the planned total as dynamically added samples grow it."""
+        """Record the planned total; the recorder receives it once the log starts."""
         self._total_samples = total_samples
-        await self.recorder.log_total_samples(self.eval, total_samples)
+        if self._log_started:
+            await self.recorder.log_total_samples(self.eval, total_samples)
 
     async def start_sample(self, sample: EvalSampleSummary) -> None:
         if self._buffer_db is not None:

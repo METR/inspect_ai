@@ -364,8 +364,9 @@ async def write_recovered_eval_log(
         results,
         reductions,
         error=error,
+        # no total_samples: samples added after the last save would leave the
+        # journaled total stale, so a recovered log reports it as unknown
         config_updates=crashed.config_updates or None,
-        total_samples=crashed.total_samples,
     )
 
 

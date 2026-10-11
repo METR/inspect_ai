@@ -9,7 +9,7 @@ The `.eval` file is a ZIP archive that accumulates data during an eval run. Its 
 ```
 _journal/
   start.json            # EvalSpec + EvalPlan (written at log_start)
-  total_samples.json    # Planned total (EvalLog.total_samples), on flush when it changes
+  total_samples.json    # Planned total as of the last flush (recovery doesn't use it)
   summaries_1.json      # Sample summaries after 1st flush
   summaries_2.json      # Sample summaries after 2nd flush
   ...
@@ -438,7 +438,7 @@ Created `src/inspect_ai/log/_recover/` package with:
 - `_read.py` — `CrashedEvalLog` dataclass, `read_crashed_eval_log()` (async, uses `AsyncFilesystem` for S3 compatibility), `read_flushed_sample()` for streaming individual samples from an `AsyncZipReader`
 - `__init__.py` — public exports
 
-`read_crashed_eval_log()` validates the file is crashed (has `_journal/start.json` but no `header.json`), extracts `LogStart` (EvalSpec + EvalPlan) and the journaled planned total, reads journal summaries from `_journal/summaries/*.json`, and collects sample entry names without loading sample data.
+`read_crashed_eval_log()` validates the file is crashed (has `_journal/start.json` but no `header.json`), extracts `LogStart` (EvalSpec + EvalPlan), reads journal summaries from `_journal/summaries/*.json`, and collects sample entry names without loading sample data.
 
 **Tests** (`tests/log/test_recover_read.py`): 6 tests covering basic reading, no-samples crash, rejection of complete logs, rejection of invalid files, individual sample reading, and multiple flush batches.
 

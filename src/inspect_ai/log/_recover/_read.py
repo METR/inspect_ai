@@ -18,7 +18,6 @@ from inspect_ai.log._recorders.eval import (
     SUMMARY_DIR,
     LogStart,
     _read_config_updates_async,
-    _read_journaled_total_async,
 )
 from inspect_ai.log._resolve import rebind_sample_timelines, resolve_sample_events_data
 
@@ -47,9 +46,6 @@ class CrashedEvalLog:
 
     config_updates: list[ConfigUpdate] = field(default_factory=list)
     """Mid-run config changes from journal flushes (see `EvalLog.config_updates`)."""
-
-    total_samples: int | None = None
-    """Planned total journaled while the eval ran (see `EvalLog.total_samples`)."""
 
 
 async def read_crashed_eval_log(location: str) -> CrashedEvalLog:
@@ -83,9 +79,6 @@ async def read_crashed_eval_log(location: str) -> CrashedEvalLog:
             await _read_member_json(reader, start_path),
             context=get_deserializing_context(),
         )
-        total_samples = await _read_journaled_total_async(
-            reader, entry_names, start.eval.eval_id
-        )
 
         # Read journal summaries
         summaries = await _read_journal_summaries(reader, entry_names)
@@ -108,7 +101,6 @@ async def read_crashed_eval_log(location: str) -> CrashedEvalLog:
             summaries=summaries,
             sample_entries=sample_entries,
             config_updates=config_updates,
-            total_samples=total_samples,
         )
 
 

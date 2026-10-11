@@ -155,6 +155,10 @@ async def _stream_convert_file(
     )
     await output_recorder.log_init(log_header.eval, location=output_file)
     await output_recorder.log_start(log_header.eval, log_header.plan)
+    if log_header.total_samples is not None:
+        await output_recorder.log_total_samples(
+            log_header.eval, log_header.total_samples
+        )
 
     async with anyio.create_task_group() as tg:
         for sample_id, epoch in sample_map:
@@ -170,5 +174,4 @@ async def _stream_convert_file(
         invalidated=log_header.invalidated,
         log_updates=log_header.log_updates,
         config_updates=log_header.config_updates,
-        total_samples=log_header.total_samples,
     )

@@ -183,6 +183,46 @@ async def test_score_stream_preserves_log_updates(
     assert rescored_log.total_samples == 7
 
 
+async def test_score_stream_interrupted_keeps_total_samples(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = await read_eval_log_async(str(LOG_SCORED))
+    log.total_samples = 7
+    log_file = tmp_path / "rescore.eval"
+    await write_eval_log_async(log, str(log_file))
+
+    monkeypatch.setattr(score_cli, "init_eval_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        score_cli, "resolve_scorers", lambda *args, **kwargs: [object()]
+    )
+
+    async def interrupted_score_async(*, log, samples, **kwargs):
+        # the first sample is written and flushed before the interruption
+        async with samples(0):
+            pass
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(score_cli, "score_async", interrupted_score_async)
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await score(
+            log_dir="",
+            log_file=str(log_file),
+            action="overwrite",
+            log_level=None,
+            output_file=str(log_file),
+            overwrite=True,
+            scorer="match",
+            s=(),
+            metric=None,
+            stream=1,
+        )
+
+    partial = await read_eval_log_async(str(log_file), header_only=True)
+    assert partial.status == "started"
+    assert partial.total_samples == 7
+
+
 @pytest.mark.anyio
 async def test_score_stream_flushes_periodically(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch

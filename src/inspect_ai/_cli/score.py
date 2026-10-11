@@ -241,6 +241,10 @@ async def score(
         read_sample = _read_sample
         await write_recorder.log_init(eval_log.eval, location=output_file)
         await write_recorder.log_start(eval_log.eval, eval_log.plan)
+        if eval_log.total_samples is not None:
+            await write_recorder.log_total_samples(
+                eval_log.eval, eval_log.total_samples
+            )
 
     eval_log = await score_async(
         log=eval_log,
@@ -264,7 +268,6 @@ async def score(
             invalidated=eval_log.invalidated,
             log_updates=eval_log.log_updates,
             config_updates=eval_log.config_updates,
-            total_samples=eval_log.total_samples,
         )
     else:
         await recorder.write_log(output_file, eval_log)

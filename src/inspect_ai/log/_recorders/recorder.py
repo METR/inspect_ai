@@ -427,7 +427,6 @@ class Recorder(abc.ABC):
         invalidated: bool = False,
         log_updates: list[LogUpdate] | None = None,
         config_updates: list[ConfigUpdate] | None = None,
-        total_samples: int | None = None,
     ) -> EvalLog: ...
 
     @classmethod

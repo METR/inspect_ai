@@ -871,9 +871,10 @@ def test_sync_recover_eval_log() -> None:
         sample1 = _make_realistic_sample(1, epoch=1)
         with ZipFile(eval_path, "w") as zf:
             zf.writestr("_journal/start.json", _to_json(log_start))
+            # saved before sample 2 was added, so stale by the time of the crash
             zf.writestr(
                 "_journal/total_samples.json",
-                json.dumps({"eval_id": eval_spec.eval_id, "total_samples": 2}),
+                json.dumps({"eval_id": eval_spec.eval_id, "total_samples": 1}),
             )
             zf.writestr(
                 f"samples/{sample1.id}_epoch_{sample1.epoch}.json",
@@ -921,7 +922,8 @@ def test_sync_recover_eval_log() -> None:
         assert log.status == "error"
         assert log.samples is not None
         assert len(log.samples) == 2
-        assert log.total_samples == 2
+        # recovery can't vouch for a saved total, so it leaves it unknown
+        assert log.total_samples is None
 
 
 async def test_streaming_recovery_synthesizes_uuid_for_in_progress_sample() -> None:

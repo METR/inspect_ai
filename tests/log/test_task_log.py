@@ -54,7 +54,6 @@ from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
 from inspect_ai.log._recorders.eval import EvalRecorder, _read_header
 from inspect_ai.log._recorders.json import JSONRecorder
 from inspect_ai.log._recorders.recorder import Recorder, SampleRecordKey
-from inspect_ai.log._recover._read import read_crashed_eval_log
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
 from inspect_ai.model._chat_message import ChatMessageUser
 
@@ -3039,8 +3038,6 @@ async def test_recorder_flush_preserves_updated_total_samples(
             # the total is journaled on its own; start.json is written once
             assert zf.namelist().count("_journal/start.json") == 1
             assert _read_header(zf, location).total_samples == 20
-        crashed = await read_crashed_eval_log(location)
-        assert crashed.total_samples == 20
 
     await logger.log_finish(status, EvalStats())
     finished = await read_eval_log_async(location, header_only=True)
@@ -3092,8 +3089,6 @@ async def test_eval_log_readers_reject_negative_journaled_total(
         await read_eval_log_async(location, header_only=True)
     with ZipFile(location) as zf, pytest.raises(ValidationError, match="total_samples"):
         _read_header(zf, location)
-    with pytest.raises(ValidationError, match="total_samples"):
-        await read_crashed_eval_log(location)
 
 
 @pytest.mark.anyio

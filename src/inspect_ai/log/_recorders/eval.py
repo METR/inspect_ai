@@ -329,7 +329,6 @@ class EvalRecorder(FileRecorder):
         invalidated: bool = False,
         log_updates: list[LogUpdate] | None = None,
         config_updates: list[ConfigUpdate] | None = None,
-        total_samples: int | None = None,
     ) -> EvalLog:
         await self.close_seed_source(eval)
         # get the key and log
@@ -372,9 +371,7 @@ class EvalRecorder(FileRecorder):
             invalidated=invalidated,
             log_updates=log_updates,
             config_updates=all_config_updates or None,
-            total_samples=(
-                total_samples if total_samples is not None else log.total_samples
-            ),
+            total_samples=log.total_samples,
             eval=log_start.eval,
             plan=log_start.plan,
             results=log_results.results,
@@ -738,6 +735,8 @@ async def _write_eval_log_with_recorder(
     recorder = EvalRecorder(recorder_dir)
     await recorder.log_init(log.eval, output_file, clean=True)
     await recorder.log_start(log.eval, log.plan)
+    if log.total_samples is not None:
+        await recorder.log_total_samples(log.eval, log.total_samples)
     for sample in log.samples or []:
         sample = condense_sample(sample)
         await recorder.log_sample(log.eval, sample)
@@ -751,7 +750,6 @@ async def _write_eval_log_with_recorder(
         invalidated=log.invalidated,
         log_updates=log.log_updates,
         config_updates=log.config_updates,
-        total_samples=log.total_samples,
     )
     return result.etag
 

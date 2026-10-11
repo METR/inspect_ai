@@ -215,10 +215,11 @@ dropping samples.
   [config-log-persistence](ctl/config-log-persistence.md)). `task_run`
   records it as samples are added; the `.eval` recorder journals it on flush
   as a small `_journal/total_samples.json` record tagged with the eval_id,
-  which the header readers and crash recovery apply, and writes it into
-  `header.json` at finish. ctl's log-dir snapshot and the viewer build running
-  headers from `start.json` and don't read it (neither uses the total). The
-  consumers above still read the seed-sized spec.
+  which the header readers apply, and writes it into `header.json` at finish.
+  Crash recovery leaves it unset: samples added after the last save would
+  make the saved total stale. ctl's log-dir snapshot and the viewer build
+  running headers from `start.json` and don't read it (neither uses the
+  total). The consumers above still read the seed-sized spec.
 - **Sandboxes**: the task-level sandbox startup pass runs up front over the
   seed, and *incrementally* for samples the source adds: each added batch goes
   through `SandboxManager.start_for_samples` (threaded into the dispatcher as
