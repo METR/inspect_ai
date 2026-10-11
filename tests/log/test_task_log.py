@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, cast
 from unittest.mock import patch
-from zipfile import ZipExtFile
+from zipfile import ZipExtFile, ZipFile
 
 import anyio
 import pytest
@@ -47,9 +47,10 @@ from inspect_ai.log._log import (
     EvalStats,
 )
 from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
-from inspect_ai.log._recorders.eval import EvalRecorder
+from inspect_ai.log._recorders.eval import EvalRecorder, _read_header
 from inspect_ai.log._recorders.json import JSONRecorder
 from inspect_ai.log._recorders.recorder import Recorder, SampleRecordKey
+from inspect_ai.log._recover._read import read_crashed_eval_log
 from inspect_ai.model import GenerateConfig, ModelOutput, get_model
 from inspect_ai.model._chat_message import ChatMessageUser
 
@@ -3004,17 +3005,49 @@ async def test_recorder_flush_preserves_updated_total_samples(
     await logger.log_start(EvalPlan())
     initial = await read_eval_log_async(location, header_only=True)
     assert initial.eval.total_samples == 2
+    await recorder.flush(spec)
+    if recorder_cls is EvalRecorder:
+        with ZipFile(location) as zf:
+            # an unchanged total journals nothing
+            assert "_journal/total_samples.json" not in zf.namelist()
 
     spec.total_samples = 20
     await recorder.flush(spec)
     running = await read_eval_log_async(location, header_only=True)
     assert running.status == "started"
     assert running.eval.total_samples == 20
+    if recorder_cls is EvalRecorder:
+        with ZipFile(location) as zf:
+            # the total is journaled on its own, not as a second start header
+            assert zf.namelist().count("_journal/start.json") == 1
+            assert _read_header(zf, location).eval.total_samples == 20
+        crashed = await read_crashed_eval_log(location)
+        assert crashed.eval.total_samples == 20
 
     await logger.log_finish(status, EvalStats())
     finished = await read_eval_log_async(location, header_only=True)
     assert finished.results is None
     assert finished.eval.total_samples == 20
+
+
+async def test_eval_recorder_ignores_total_journaled_by_another_attempt(
+    tmp_path: Path,
+) -> None:
+    recorder = EvalRecorder(str(tmp_path))
+    spec = _eval_spec().model_copy(update={"total_samples": 2})
+    location = await recorder.log_init(spec)
+    await recorder.log_start(spec, EvalPlan())
+    spec.total_samples = 20
+    await recorder.flush(spec)
+
+    # a retry restarts the log under a new eval_id; the old record is stale
+    retry = spec.model_copy(update={"eval_id": "next-attempt", "total_samples": 3})
+    await recorder.log_start(retry, EvalPlan())
+    await recorder.flush(retry)
+
+    running = await read_eval_log_async(location, header_only=True)
+    assert running.eval.eval_id == "next-attempt"
+    assert running.eval.total_samples == 3
 
 
 @pytest.mark.anyio

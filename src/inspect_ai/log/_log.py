@@ -1152,7 +1152,8 @@ class EvalSpec(BaseModel):
     total_samples: int | None = Field(default=None, ge=0)
     """Planned sample runs, including epochs and admitted dynamic samples.
 
-    Available even when the eval ends without results. None in older logs.
+    Grows while the eval runs as samples are added. Available even when the
+    eval ends without results. None in older logs.
     """
 
     sandbox: SandboxEnvironmentSpec | None = Field(default=None)

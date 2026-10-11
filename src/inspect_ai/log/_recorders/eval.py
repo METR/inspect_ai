@@ -21,6 +21,7 @@ from typing import (
     NamedTuple,
     SupportsIndex,
     TypeVar,
+    cast,
     overload,
 )
 from zipfile import ZipFile
@@ -107,12 +108,20 @@ class LogResults(BaseModel):
     error: EvalError | None = Field(default=None)
 
 
+class LogTotalSamples(BaseModel):
+    """A running log's planned total, journaled after start.json as samples are added."""
+
+    eval_id: str
+    total_samples: int
+
+
 JOURNAL_DIR = "_journal"
 SUMMARY_DIR = "summaries"
 CONFIG_UPDATES_DIR = "config_updates"
 SAMPLES_DIR = "samples"
 
 START_JSON = "start.json"
+TOTAL_SAMPLES_JSON = "total_samples.json"
 RESULTS_JSON = "results.json"
 REDUCTIONS_JSON = "reductions.json"
 SUMMARIES_JSON = "summaries.json"
@@ -295,6 +304,9 @@ class EvalRecorder(FileRecorder):
 
         # write the buffered samples
         await log.write_buffered_samples()
+
+        # journal a planned total that grew as samples were added
+        await log.journal_total_samples(eval)
 
         # flush to underlying stream (intermediate snapshot: skip fsync)
         await log.flush(fsync=False)
@@ -967,7 +979,8 @@ class ZipLogFile:
         self._config_update_counter = 0
         self._config_updates: list[ConfigUpdate] = []
         self._log_start: LogStart | None = None
-        self._journaled_total_samples: int | None = None
+        # (eval_id, total_samples) a reader of the running log currently sees
+        self._journaled_total: tuple[str, int | None] | None = None
         self._destination_written = False
         # whether the destination existed before this log (init seeded from
         # it) — such a file is never ours to remove on discard. Distinct from
@@ -997,9 +1010,6 @@ class ZipLogFile:
             self._config_update_counter = config_update_counter
             self._config_updates = config_updates or []
             self._log_start = log_start
-            self._journaled_total_samples = (
-                log_start.eval.total_samples if log_start is not None else None
-            )
             self._destination_written = destination_exists
             self._destination_seeded = destination_exists
 
@@ -1046,7 +1056,29 @@ class ZipLogFile:
         async with self._lock:
             self._log_start = start
             self._zip_writestr(_journal_path(START_JSON), start)
-            self._journaled_total_samples = start.eval.total_samples
+            self._journaled_total = (start.eval.eval_id, start.eval.total_samples)
+
+    async def journal_total_samples(self, eval: EvalSpec) -> None:
+        """Journal the planned total if samples were added since it was last written.
+
+        A running or crashed log has no header.json, so readers take the total
+        from start.json. Rewriting start.json would append another copy of the
+        whole start header (including every seed sample id) each time; this
+        small record supersedes only the total, and readers apply it when its
+        eval_id matches start.json's.
+        """
+        if eval.total_samples is None:
+            return
+        async with self._lock:
+            journaled = (eval.eval_id, eval.total_samples)
+            if journaled != self._journaled_total:
+                self._zip_writestr(
+                    _journal_path(TOTAL_SAMPLES_JSON),
+                    LogTotalSamples(
+                        eval_id=eval.eval_id, total_samples=eval.total_samples
+                    ),
+                )
+                self._journaled_total = journaled
 
     async def buffer_sample(self, sample: EvalSample) -> None:
         buffered = _BufferedSample(sample=sample, summary=sample.summary())
@@ -1283,14 +1315,6 @@ class ZipLogFile:
                 ``write_local_snapshot``). Local paths only.
         """
         async with self._lock:
-            if (
-                self._log_start is not None
-                and self._log_start.eval.total_samples != self._journaled_total_samples
-            ):
-                # Running logs read start.json; the final header sees the live spec.
-                self._zip_writestr(_journal_path(START_JSON), self._log_start)
-                self._journaled_total_samples = self._log_start.eval.total_samples
-
             # close the zip file so it is flushed
             if self._zip:
                 self._zip.close()
@@ -1540,13 +1564,14 @@ class ZipLogFile:
         """Drop the prior log's superseded members from the central directory.
 
         Removes its finished-log metadata (``header.json``, ``summaries.json``,
-        ``reductions.json``, ``start.json``, journaled config updates and
-        summaries) — an in-progress read of this log would otherwise return
-        the prior attempt's header and eval_id — and every sample member not
-        in ``kept_sample_names``. Seeds requiring a rewrite have already
-        physically removed these members. Otherwise, metadata bytes stay
-        unreferenced (the idiom ``_replace_eval_header_in_place`` uses) until
-        :meth:`compact` measures and reclaims them. Caller holds ``_lock``.
+        ``reductions.json``, ``start.json``, the journaled total, journaled
+        config updates and summaries) — an in-progress read of this log would
+        otherwise return the prior attempt's header and eval_id — and every
+        sample member not in ``kept_sample_names``. Seeds requiring a rewrite
+        have already physically removed these members. Otherwise, metadata
+        bytes stay unreferenced (the idiom ``_replace_eval_header_in_place``
+        uses) until :meth:`compact` measures and reclaims them. Caller holds
+        ``_lock``.
         """
         assert self._zip is not None
         metadata = {
@@ -1554,6 +1579,7 @@ class ZipLogFile:
             SUMMARIES_JSON,
             REDUCTIONS_JSON,
             _journal_path(START_JSON),
+            _journal_path(TOTAL_SAMPLES_JSON),
         }
         config_prefix = _journal_config_update_path() + "/"
         summary_prefix = _journal_summary_path() + "/"
@@ -1883,6 +1909,7 @@ async def _read_header_async(
     else:
         data = await _read_member_json(reader, _journal_path(START_JSON))
         start = LogStart.model_validate(data, context=get_deserializing_context())
+        await _apply_journaled_total_async(reader, entry_names, start)
         # an in-progress/crashed log has no consolidated header — read any
         # journaled config updates so the header still reports mid-run retunes
         config_updates: list[ConfigUpdate] = []
@@ -1902,12 +1929,32 @@ async def _read_header_async(
         )
 
 
+async def _apply_journaled_total_async(
+    reader: AsyncZipReader, entry_names: set[str], start: LogStart
+) -> None:
+    """Apply a planned total journaled after start.json (see `journal_total_samples`)."""
+    path = _journal_path(TOTAL_SAMPLES_JSON)
+    if path in entry_names:
+        update = LogTotalSamples.model_validate(await _read_member_json(reader, path))
+        if update.eval_id == start.eval.eval_id:
+            start.eval.total_samples = update.total_samples
+
+
+def _apply_journaled_total(zip: ZipFile, start: LogStart) -> None:
+    """Sync equivalent of `_apply_journaled_total_async`."""
+    path = _journal_path(TOTAL_SAMPLES_JSON)
+    if path in zip.NameToInfo:
+        with zip.open(path, "r") as f:
+            update = LogTotalSamples.model_validate(json.load(f))
+        if update.eval_id == start.eval.eval_id:
+            start.eval.total_samples = update.total_samples
+
+
 async def _read_start_async(reader: AsyncZipReader) -> LogStart | None:
     cd = await reader.entries()
     start_path = _journal_path(START_JSON)
     if any(e.filename == start_path for e in cd.entries):
-        data = await _read_member_json(reader, start_path)
-        return LogStart.model_validate(data, context=get_deserializing_context())
+        return cast(LogStart, await _read_member_json(reader, start_path))
     else:
         return None
 
@@ -2002,6 +2049,7 @@ def _read_header(zip: ZipFile, location: str) -> EvalLog:
             start = LogStart.model_validate(
                 json.load(f), context=get_deserializing_context()
             )
+        _apply_journaled_total(zip, start)
         # see the equivalent journal read in _read_header_async
         config_updates: list[ConfigUpdate] = []
         for name in _sorted_config_update_entries(set(zip.namelist())):

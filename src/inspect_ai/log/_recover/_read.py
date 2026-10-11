@@ -17,6 +17,7 @@ from inspect_ai.log._recorders.eval import (
     SUMMARIES_JSON,
     SUMMARY_DIR,
     LogStart,
+    _apply_journaled_total_async,
     _read_config_updates_async,
 )
 from inspect_ai.log._resolve import rebind_sample_timelines, resolve_sample_events_data
@@ -79,6 +80,7 @@ async def read_crashed_eval_log(location: str) -> CrashedEvalLog:
             await _read_member_json(reader, start_path),
             context=get_deserializing_context(),
         )
+        await _apply_journaled_total_async(reader, entry_names, start)
 
         # Read journal summaries
         summaries = await _read_journal_summaries(reader, entry_names)
