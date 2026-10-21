@@ -239,6 +239,11 @@ _CHAT_MESSAGE_ROLES: dict[str, type[ChatMessageBase]] = {
     "tool": ChatMessageTool,
 }
 
+CHAT_MESSAGE_TYPES: frozenset[type[ChatMessageBase]] = frozenset(
+    _CHAT_MESSAGE_ROLES.values()
+)
+"""The concrete ``ChatMessage`` classes."""
+
 
 def _chat_message_tag(value: Any) -> str:
     """Union member for a message: its class, else its ``role`` key.

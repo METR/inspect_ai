@@ -112,3 +112,38 @@ def test_chat_message_json_schema_is_plain_union() -> None:
         "ChatMessageAssistant",
         "ChatMessageTool",
     ]
+
+
+def _model_event(input: Any) -> Any:
+    from inspect_ai.event._model import ModelEvent
+    from inspect_ai.model import GenerateConfig, ModelOutput
+
+    return ModelEvent(
+        model="m",
+        input=input,
+        tools=[],
+        tool_choice="auto",
+        config=GenerateConfig(),
+        output=ModelOutput.from_content("m", ""),
+    )
+
+
+def test_model_event_input_keeps_message_instances_in_a_new_list():
+    messages: list[ChatMessage] = [
+        ChatMessageSystem(content="s"),
+        ChatMessageUser(content="u"),
+        ChatMessageAssistant(content="a"),
+        ChatMessageTool(content="t", tool_call_id="1"),
+    ]
+    event = _model_event(messages)
+    assert event.input is not messages
+    assert all(x is y for x, y in zip(event.input, messages, strict=True))
+
+
+def test_model_event_input_validates_dicts():
+    event = _model_event(
+        [{"role": "user", "content": "u"}, {"role": "assistant", "content": "a"}]
+    )
+    assert [type(m) for m in event.input] == [ChatMessageUser, ChatMessageAssistant]
+    with pytest.raises(ValidationError):
+        _model_event([{"role": "user"}])
