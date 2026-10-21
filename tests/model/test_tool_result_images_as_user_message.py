@@ -64,3 +64,15 @@ def _modified_image_response_message(message: ChatMessageTool) -> ChatMessageToo
     return message.model_copy(
         update={"content": [ContentText(text="Image content is included below.")]}
     )
+
+
+def test_messages_without_tool_media_are_returned_in_a_new_list():
+    messages: list[ChatMessage] = [
+        ChatMessageUser(content="yo"),
+        ChatMessageTool(tool_call_id="a", content=[ContentText(text="text")]),
+        ChatMessageTool(tool_call_id="b", content="plain"),
+    ]
+    result = tool_result_media_as_user_message(messages, (ContentImage,))
+    assert result == messages
+    assert result is not messages
+    assert all(x is y for x, y in zip(result, messages))

@@ -1498,7 +1498,9 @@ class Model:
                 config=config,
                 cache=cache_mode,
             )
-            _validate_model_input_media(input)
+            # only an enabled hook can have changed the input validated above
+            if any(hook.enabled() for hook in get_all_hooks()):
+                _validate_model_input_media(input)
 
             event_tools = (
                 snapshot_tools_for_event(call_tools, base_tools)
@@ -2584,12 +2586,10 @@ def resolve_reasoning_history(
 ) -> list[ChatMessage]:
     # determine up front if we have any reasoning content
     have_reasoning = any(
-        [
-            isinstance(m, ChatMessageAssistant)
-            and isinstance(m.content, list)
-            and any([c for c in m.content if isinstance(c, ContentReasoning)])
-            for m in messages
-        ]
+        isinstance(m, ChatMessageAssistant)
+        and isinstance(m.content, list)
+        and any(isinstance(c, ContentReasoning) for c in m.content)
+        for m in messages
     )
     if not have_reasoning:
         return messages
@@ -2698,6 +2698,14 @@ def tool_result_media_as_user_message(
     Tool responses will have matching media replaced with placeholder text,
     and the extracted content will appear in a new user message.
     """
+    if not any(
+        isinstance(message, ChatMessageTool)
+        and isinstance(message.content, list)
+        and any(isinstance(c, extract_types) for c in message.content)
+        for message in messages
+    ):
+        return list(messages)
+
     content_reducer = _make_content_reducer(extract_types)
     chat_messages: list[ChatMessage] = []
     pending_content: list[Content] = []
