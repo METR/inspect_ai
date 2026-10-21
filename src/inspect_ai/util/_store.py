@@ -1,4 +1,5 @@
 import contextlib
+import operator
 from contextvars import ContextVar
 from copy import deepcopy
 from typing import (
@@ -45,6 +46,8 @@ class Store:
 
     def __init__(self, data: dict[str, Any] | None = None) -> None:
         self._data = deepcopy(data) if data else {}
+        # (keys, values, jsonable) of the last scalar-only snapshot
+        self._jsonable: tuple[list[str], list[Any], dict[str, Any]] | None = None
 
     @overload
     def get(self, key: str, default: None = None) -> Any: ...
@@ -180,8 +183,32 @@ def store_changes(
     return json_changes(before, after)
 
 
+_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
 def store_jsonable(store: Store) -> dict[str, Any]:
-    return dict_jsonable(store._data)
+    """Jsonable snapshot of a store.
+
+    Scalar values are immutable, so a store holding only scalars whose keys
+    and values are the very objects of the last snapshot serializes the same
+    way, and that snapshot is reused. Stores holding containers or objects
+    are serialized on every call, since their values can be mutated in place.
+    """
+    data = store._data
+    cached = getattr(store, "_jsonable", None)
+    if (
+        cached is not None
+        and len(cached[0]) == len(data)
+        and all(map(operator.is_, data.keys(), cached[0]))
+        and all(map(operator.is_, data.values(), cached[1]))
+    ):
+        return dict(cached[2])
+    jsonable = dict_jsonable(data)
+    if all(type(v) in _SCALAR_TYPES for v in data.values()):
+        store._jsonable = (list(data.keys()), list(data.values()), jsonable)
+        return dict(jsonable)
+    store._jsonable = None
+    return jsonable
 
 
 def dict_jsonable(data: dict[str, Any]) -> dict[str, Any]:
