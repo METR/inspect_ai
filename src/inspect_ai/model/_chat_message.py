@@ -1,9 +1,19 @@
 import hashlib
 import json
 from logging import getLogger
-from typing import Any, Literal, Type, Union
+from typing import Annotated, Any, Literal, Type, Union
 
-from pydantic import BaseModel, Field, ModelWrapValidatorHandler, model_validator
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Field,
+    GetJsonSchemaHandler,
+    ModelWrapValidatorHandler,
+    Tag,
+    model_validator,
+)
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 from pydantic_core.core_schema import ValidationInfo
 from shortuuid import uuid
 
@@ -218,7 +228,66 @@ class ChatMessageTool(ChatMessageBase):
         return values
 
 
-ChatMessage = Union[
+_ChatMessageUnion = Union[
     ChatMessageSystem, ChatMessageUser, ChatMessageAssistant, ChatMessageTool
+]
+
+_CHAT_MESSAGE_ROLES: dict[str, type[ChatMessageBase]] = {
+    "system": ChatMessageSystem,
+    "user": ChatMessageUser,
+    "assistant": ChatMessageAssistant,
+    "tool": ChatMessageTool,
+}
+
+CHAT_MESSAGE_TYPES: frozenset[type[ChatMessageBase]] = frozenset(
+    _CHAT_MESSAGE_ROLES.values()
+)
+"""The concrete ``ChatMessage`` classes."""
+
+
+def _chat_message_tag(value: Any) -> str:
+    """Union member for a message: its class, else its ``role`` key.
+
+    Values carrying neither (e.g. a dict without ``role``) fall back to
+    ``"union"``, which validates them against the plain smart union.
+    """
+    if isinstance(value, ChatMessageBase):
+        for tag, cls in _CHAT_MESSAGE_ROLES.items():
+            if isinstance(value, cls):
+                return tag
+        return "union"
+    role = value.get("role") if isinstance(value, dict) else None
+    return role if isinstance(role, str) and role in _CHAT_MESSAGE_ROLES else "union"
+
+
+class _ChatMessageJsonSchema:
+    """JSON schema of ``ChatMessage``: the plain union of the four messages.
+
+    The tagged union's generated schema is a ``oneOf`` that also lists the
+    ``"union"`` fallback member, whose alternatives overlap the tagged ones.
+    The fallback is a validation detail, so the schema (and the TypeScript
+    types generated from it) describe the four message types only.
+    """
+
+    def __get_pydantic_json_schema__(
+        self, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        schema = handler(core_schema)
+        members = schema.pop("oneOf", None)
+        if members is None:
+            return schema
+        return {"anyOf": [m for m in members if "anyOf" not in m], **schema}
+
+
+ChatMessage = Annotated[
+    Union[
+        Annotated[ChatMessageSystem, Tag("system")],
+        Annotated[ChatMessageUser, Tag("user")],
+        Annotated[ChatMessageAssistant, Tag("assistant")],
+        Annotated[ChatMessageTool, Tag("tool")],
+        Annotated[_ChatMessageUnion, Tag("union")],
+    ],
+    Discriminator(_chat_message_tag),
+    _ChatMessageJsonSchema(),
 ]
 """Message in a chat conversation"""

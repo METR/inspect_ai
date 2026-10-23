@@ -1,11 +1,17 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, PrivateAttr, field_serializer
+from pydantic import (
+    Field,
+    PrivateAttr,
+    ValidatorFunctionWrapHandler,
+    field_serializer,
+    field_validator,
+)
 
 from inspect_ai._util.dateutil import UtcDatetime, datetime_to_iso_format_safe
-from inspect_ai.model._chat_message import ChatMessage
+from inspect_ai.model._chat_message import CHAT_MESSAGE_TYPES, ChatMessage
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._model_call import ModelCall, ModelRequestId
 from inspect_ai.model._model_output import ModelOutput
@@ -147,6 +153,22 @@ class ModelEvent(BaseEvent):
     _progress: ModelEventProgress | None = PrivateAttr(default=None)
     """In-flight stream progress while pending (see :class:`ModelEventProgress`);
     access via :func:`model_event_progress`."""
+
+    @field_validator("input", mode="wrap")
+    @classmethod
+    def _validate_input(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler
+    ) -> list[ChatMessage]:
+        """Pass through a list of message instances without revalidating each.
+
+        Instances are not revalidated by the union either; this skips the
+        per-message union dispatch, which runs for every message of every
+        model call's history.
+        """
+        if type(value) is list and all(type(m) in CHAT_MESSAGE_TYPES for m in value):
+            return list(value)
+        result: list[ChatMessage] = handler(value)
+        return result
 
     @field_serializer("completed")
     def serialize_completed(self, dt: datetime | None) -> str | None:
