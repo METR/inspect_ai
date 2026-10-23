@@ -1,6 +1,5 @@
 """Tests for text-editor path validation, directory views, and RPC errors."""
 
-import asyncio
 import json
 import os
 import shlex
@@ -153,7 +152,7 @@ def test_view_directory_launch_failure_is_tool_error(
         "params": {"command": "view", "path": str(tmp_path)},
     }
 
-    asyncio.run(_exec(json.dumps(request)))
+    _exec(json.dumps(request))
     response = json.loads(capsys.readouterr().out)
 
     assert response["error"]["code"] == -32099
@@ -181,7 +180,7 @@ def test_view_directory_timeout_preserves_rpc_failure(
         "params": {"command": "view", "path": str(tmp_path)},
     }
 
-    asyncio.run(_exec(json.dumps(request)))
+    _exec(json.dumps(request))
     response = json.loads(capsys.readouterr().out)
 
     assert response["error"]["code"] == -32098
