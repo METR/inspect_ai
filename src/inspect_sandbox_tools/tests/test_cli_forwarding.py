@@ -20,6 +20,7 @@ from tests.conftest import RpcClient
 _HEAVY_MODULES = [
     "aiohttp",
     "asyncio",
+    "importlib.metadata",
     "jsonrpcserver",
     "psutil",
     "pydantic",
