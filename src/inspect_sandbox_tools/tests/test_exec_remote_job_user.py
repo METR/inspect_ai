@@ -133,7 +133,7 @@ class TestCliRunAs:
             "id": 1,
             "params": {"command": "view", "path": str(tmp_path), "_run_as": run_as},
         }
-        asyncio.run(_exec(json.dumps(request)))
+        _exec(json.dumps(request))
         return cast(dict[str, Any], json.loads(capsys.readouterr().out))
 
     def test_current_identity_needs_no_switch(
@@ -141,7 +141,9 @@ class TestCliRunAs:
     ) -> None:
         me = {"uid": os.getuid(), "gid": os.getgid(), "groups": os.getgroups()}
         home = os.environ.get("HOME")
-        with patch("inspect_sandbox_tools._cli.main.switch_user") as mock_switch:
+        with patch(
+            "inspect_sandbox_tools._util.user_switch.switch_user"
+        ) as mock_switch:
             response = self._view(me, tmp_path, capsys)
         mock_switch.assert_not_called()
         assert "error" not in response, response
@@ -150,7 +152,9 @@ class TestCliRunAs:
     def test_current_username_needs_no_switch(
         self, tmp_path: Path, capsys: Any
     ) -> None:
-        with patch("inspect_sandbox_tools._cli.main.switch_user") as mock_switch:
+        with patch(
+            "inspect_sandbox_tools._util.user_switch.switch_user"
+        ) as mock_switch:
             response = self._view(pwd.getpwuid(os.getuid()).pw_name, tmp_path, capsys)
         mock_switch.assert_not_called()
         assert "error" not in response, response
