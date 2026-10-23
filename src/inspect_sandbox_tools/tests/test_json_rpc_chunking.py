@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 import os
@@ -209,7 +208,7 @@ def test_cli_chunks_large_in_process_tool_response(
 def _exec_cli(request: dict[str, object], capsys: pytest.CaptureFixture[str]) -> str:
     from inspect_sandbox_tools._cli.main import _exec
 
-    asyncio.run(_exec(json.dumps(request)))
+    _exec(json.dumps(request))
     captured = capsys.readouterr()
     assert captured.err == ""
     return captured.out.strip()
@@ -331,7 +330,7 @@ def test_cli_reserves_the_spill_before_switching_user(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     pytest.importorskip("jsonrpcserver")
-    import inspect_sandbox_tools._cli.main as main_module
+    import inspect_sandbox_tools._util.user_switch as user_switch
 
     reserved_at_switch: list[int] = []
 
@@ -340,10 +339,10 @@ def test_cli_reserves_the_spill_before_switching_user(
         _simulate_switch_away_from_tools_user()
 
     monkeypatch.setattr(
-        main_module, "switch_target", lambda user, can_switch_user: user
+        user_switch, "switch_target", lambda user, can_switch_user: user
     )
-    monkeypatch.setattr(main_module, "switch_user", switch)
-    monkeypatch.setattr(main_module, "get_home_dir", lambda _user: os.environ["HOME"])
+    monkeypatch.setattr(user_switch, "switch_user", switch)
+    monkeypatch.setattr(user_switch, "get_home_dir", lambda _user: os.environ["HOME"])
     monkeypatch.setenv(JSON_RPC_RESPONSE_MAX_BYTES_ENV, "4096")
     target = tmp_path / "large.txt"
     target.write_text("line\n" * 2000)
@@ -463,13 +462,13 @@ def test_unusable_chunk_storage_fails_only_responses_that_need_chunking(
 ) -> None:
     """A failed reservation before the switch is raised only if chunking is needed."""
     pytest.importorskip("jsonrpcserver")
-    import inspect_sandbox_tools._cli.main as main_module
+    import inspect_sandbox_tools._util.user_switch as user_switch
 
     monkeypatch.setattr(
-        main_module, "switch_target", lambda user, can_switch_user: user
+        user_switch, "switch_target", lambda user, can_switch_user: user
     )
-    monkeypatch.setattr(main_module, "switch_user", lambda _user: None)
-    monkeypatch.setattr(main_module, "get_home_dir", lambda _user: os.environ["HOME"])
+    monkeypatch.setattr(user_switch, "switch_user", lambda _user: None)
+    monkeypatch.setattr(user_switch, "get_home_dir", lambda _user: os.environ["HOME"])
     monkeypatch.setenv(JSON_RPC_RESPONSE_MAX_BYTES_ENV, "4096")
     chunking._CHUNK_DIR.touch()
     small = tmp_path / "small.txt"

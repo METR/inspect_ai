@@ -29,6 +29,7 @@ from inspect_sandbox_tools._remote_tools._exec_remote import (
     json_rpc_methods as exec_remote_methods,
 )
 from inspect_sandbox_tools._remote_tools._mcp import json_rpc_methods as mcp_methods
+from inspect_sandbox_tools._util import json_rpc_helpers
 from inspect_sandbox_tools._util.server_dir import (
     ensure_private_server_dir,
     open_private_append,
@@ -1098,7 +1099,7 @@ async def test_stop_server_waits_for_starting_daemon(
     monkeypatch.setattr(main_module, "SERVER_PID_PATH", pid_path)
     monkeypatch.setattr(main_module, "_can_connect_to_socket", can_connect)
     monkeypatch.setattr(main_module, "_server_process_is_running", lambda: True)
-    monkeypatch.setattr(main_module, "json_rpc_unix_call", shutdown_call)
+    monkeypatch.setattr(json_rpc_helpers, "json_rpc_unix_call", shutdown_call)
 
     await main_module._stop_server()
 
@@ -1135,7 +1136,7 @@ async def test_stop_server_ignores_connection_loss_after_socket_probe(
     monkeypatch.setattr(main_module, "SERVER_PID_PATH", pid_path)
     monkeypatch.setattr(main_module, "_can_connect_to_socket", lambda: True)
     monkeypatch.setattr(main_module, "_server_process_is_running", lambda: False)
-    monkeypatch.setattr(main_module, "json_rpc_unix_call", shutdown_call)
+    monkeypatch.setattr(json_rpc_helpers, "json_rpc_unix_call", shutdown_call)
 
     await main_module._stop_server()
 
@@ -1193,12 +1194,11 @@ async def test_stop_server_without_server_dir_touches_nothing(
     assert stale_socket.exists()
 
 
-@pytest.mark.asyncio
-async def test_exec_hides_server_directory_from_in_process_tools(
+def test_exec_hides_server_directory_from_in_process_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(main_module.SERVER_DIR_ENV, "/private/server-dir")
-    monkeypatch.setattr(main_module, "load_tools", lambda _module: {"in_process"})
+    monkeypatch.setattr(main_module, "_IN_PROCESS_TOOLS", {"in_process"})
 
     async def dispatch(_request: str) -> str:
         assert main_module.SERVER_DIR_ENV not in os.environ
@@ -1206,4 +1206,4 @@ async def test_exec_hides_server_directory_from_in_process_tools(
 
     monkeypatch.setattr(main_module, "_dispatch_local_method", dispatch)
 
-    await main_module._exec('{"jsonrpc":"2.0","method":"in_process","id":1}')
+    main_module._exec('{"jsonrpc":"2.0","method":"in_process","id":1}')
