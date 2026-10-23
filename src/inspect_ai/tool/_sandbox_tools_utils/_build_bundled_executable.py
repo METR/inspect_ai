@@ -168,6 +168,11 @@ def _build_executable(
         "unittest",
         "--exclude-module",
         "pdb",
+        # aiohttp's optional `backports.zstd` import resolves to the copy of `backports`
+        # vendored in setuptools, which pulls in setuptools and its runtime hook; the hook
+        # imports setuptools at every start, and nothing uses it at run time.
+        "--exclude-module",
+        "setuptools",
         "--name",
         launcher_name,
     ] + [str(entrypoint)]
