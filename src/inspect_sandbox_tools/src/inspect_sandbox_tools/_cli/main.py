@@ -1,21 +1,17 @@
+# Forwarding an `exec` request to the server runs once per host request, so it
+# imports only the standard library. Modules that only other commands, in-process
+# tools, or server startup need are imported where they are used.
 import argparse
-import asyncio
 import fcntl
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
 import time
-from typing import Literal
+from typing import Any
 
-import aiohttp
-import psutil
-from jsonrpcserver import async_dispatch
-from pydantic import BaseModel
-
-from inspect_sandbox_tools._agent_bridge.proxy import run_model_proxy_server
-from inspect_sandbox_tools._cli.server import main as server_main
 from inspect_sandbox_tools._util.common_types import JSONRPCResponseJSON
 from inspect_sandbox_tools._util.constants import (
     SERVER_DIR,
@@ -32,20 +28,45 @@ from inspect_sandbox_tools._util.json_rpc_chunking import (
     handle_json_rpc_response_chunk_request,
     reserve_chunk_spill,
 )
-from inspect_sandbox_tools._util.json_rpc_helpers import json_rpc_unix_call
-from inspect_sandbox_tools._util.load_tools import load_tools
 from inspect_sandbox_tools._util.server_dir import (
     ensure_private_server_dir,
     open_private_append,
     read_private_text,
     write_private_text,
 )
-from inspect_sandbox_tools._util.user_switch import (
-    RunAs,
-    get_home_dir,
-    switch_target,
-    switch_user,
-)
+
+# When running as a PyInstaller bundle, the bootloader prepends the bundle's
+# lib directory to LD_LIBRARY_PATH so the daemon's native dependencies can be
+# loaded, and saves the user's original value to LD_LIBRARY_PATH_ORIG. (This
+# applies to --onedir bundles too: _MEIPASS points at the on-disk bundle dir.)
+# Every frozen process (CLI, server, model proxy) starts in this module, so we
+# sanitize here the environment that propagates into every subprocess we spawn
+# (the server, in-process tools' commands, exec_remote, bash_session, MCP
+# servers, and our own re-invocations such as `model_proxy`). The dynamic loader
+# read LD_LIBRARY_PATH at process start, so C extensions imported later in this
+# process still resolve. Two things must go:
+#
+#   1. LD_LIBRARY_PATH — restore it to its pre-bootloader value, otherwise the
+#      bundle's lib directory forces foreign children to look for shared
+#      libraries inside the bundle before the host distribution, breaking any
+#      user binary that depends on system libs newer than the ones we ship.
+#
+#   2. The PyInstaller `_PYI_*` / `_MEI*` parent-process markers — a child that
+#      inherits these treats itself as a *nested* invocation and skips
+#      re-establishing LD_LIBRARY_PATH. Combined with (1) that leaves a
+#      re-invocation of our own frozen binary (the spawned `server`, or
+#      `model_proxy` launched via exec_remote) unable to find bundled libs like
+#      libssl. Dropping the markers makes such children bootstrap cleanly as a
+#      fresh top-level instance, exactly as a direct invocation does.
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    original_ld_library_path = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if original_ld_library_path is None:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+    else:
+        os.environ["LD_LIBRARY_PATH"] = original_ld_library_path
+
+    for _key in [k for k in os.environ if k.startswith(("_PYI", "_MEI"))]:
+        del os.environ[_key]
 
 # Resource shutdown has a 30s graceful budget plus a 5s post-SIGKILL wait.
 # This 45s CLI deadline also leaves time for HTTP shutdown; LocalSandbox's 55s
@@ -54,22 +75,9 @@ _SHUTDOWN_STATUS_TIMEOUT = 45
 _SERVER_STARTUP_TIMEOUT = 5
 _SERVER_PROCESS_STOP_TIMEOUT = 5
 
-
-# Shapes for peeking at host->injectable control RPCs — a different wire
-# contract from the server-relay envelope models in
-# _remote_tools/_mcp/jsonrpc_types.py; the two are not interchangeable.
-class JSONRPCIncoming(BaseModel):
-    jsonrpc: Literal["2.0"]
-    method: str
-    params: list[object] | dict[str, object] | None = None
-
-
-class JSONRPCRequest(JSONRPCIncoming):
-    id: int | float | str
-
-
-class JSONRPCNotification(JSONRPCIncoming):
-    pass
+# The methods `exec` runs in this process; it forwards all others to the server.
+# Kept as names so that forwarding does not import the tools (load_tools does).
+_IN_PROCESS_TOOLS = frozenset({"text_editor", "version"})
 
 
 def main() -> None:
@@ -78,14 +86,22 @@ def main() -> None:
         case "healthcheck":
             healthcheck()
         case "exec":
-            asyncio.run(_exec(args.request))
+            _exec(args.request)
         case "start-server":
             start_server()
         case "stop-server":
             stop_server()
         case "server":
+            from inspect_sandbox_tools._cli.server import main as server_main
+
             server_main()
         case "model_proxy":
+            import asyncio
+
+            from inspect_sandbox_tools._agent_bridge.proxy import (
+                run_model_proxy_server,
+            )
+
             asyncio.run(run_model_proxy_server())
 
 
@@ -97,10 +113,18 @@ def start_server() -> None:
 
 def stop_server() -> None:
     """Stop this server directory's sandbox-tools server if it is running."""
+    import asyncio
+
     asyncio.run(_stop_server())
 
 
 async def _stop_server() -> None:
+    import asyncio
+
+    import aiohttp
+
+    from inspect_sandbox_tools._util.json_rpc_helpers import json_rpc_unix_call
+
     try:
         ensure_private_server_dir(SERVER_DIR, create=False)
     except FileNotFoundError:
@@ -145,6 +169,8 @@ async def _stop_server() -> None:
 
 
 async def _wait_for_shutdown_status() -> None:
+    import asyncio
+
     deadline = time.monotonic() + _SHUTDOWN_STATUS_TIMEOUT
     while time.monotonic() < deadline:
         if SHUTDOWN_STATUS_PATH.exists():
@@ -169,19 +195,17 @@ async def _wait_for_shutdown_status() -> None:
 
 
 def healthcheck():
-    asyncio.run(_exec('{"jsonrpc": "2.0", "method": "version", "id": 666}'))
-    asyncio.run(_exec('{"jsonrpc": "2.0", "method": "remote_version", "id": 667}'))
+    _exec('{"jsonrpc": "2.0", "method": "version", "id": 666}')
+    _exec('{"jsonrpc": "2.0", "method": "remote_version", "id": 667}')
 
 
 # Example/testing requests
 # {"jsonrpc": "2.0", "method": "editor", "id": 666, "params": {"command": "view", "path": "/tmp"}}
 # {"jsonrpc": "2.0", "method": "bash", "id": 666, "params": {"command": "ls ~/Downloads"}}
-async def _exec(request: str | None) -> None:
-    in_process_tools = load_tools("inspect_sandbox_tools._in_process_tools")
-
+def _exec(request: str | None) -> None:
     request_json_str = request or sys.stdin.read().strip()
     request_data = json.loads(request_json_str)
-    tool_name = JSONRPCIncoming.model_validate(request_data).method
+    tool_name = _request_method(request_data)
     assert isinstance(tool_name, str)
 
     if tool_name == JSON_RPC_RESPONSE_CHUNK_METHOD:
@@ -197,7 +221,21 @@ async def _exec(request: str | None) -> None:
     # invocation per request), so in-process setuid is safe. HOME follows the user
     # only when an identity switch happens, as in the server's tools.
     spill: ChunkSpill | UnreservedChunkSpill | None = None
-    if tool_name in in_process_tools:
+    if tool_name in _IN_PROCESS_TOOLS:
+        # Import the tools (which registers their methods with jsonrpcserver)
+        # before any switch below: the sandbox user may not be able to read
+        # the tools user's private install tree.
+        import asyncio
+
+        from inspect_sandbox_tools._util.load_tools import load_tools
+        from inspect_sandbox_tools._util.user_switch import (
+            RunAs,
+            get_home_dir,
+            switch_target,
+            switch_user,
+        )
+
+        load_tools("inspect_sandbox_tools._in_process_tools")
         run_as: str | RunAs | None = None
         if isinstance(request_data.get("params"), dict):
             run_as_spec = request_data["params"].pop("_run_as", None)
@@ -220,21 +258,75 @@ async def _exec(request: str | None) -> None:
                 switch_user(target)
                 os.environ["HOME"] = get_home_dir(target)
 
-    response = await (
-        _dispatch_local_method
-        if tool_name in in_process_tools
-        else _dispatch_remote_method
-    )(request_json_str)
+        response = asyncio.run(_dispatch_local_method(request_json_str))
+    else:
+        response = _dispatch_remote_method(request_json_str)
     print(chunk_json_rpc_response_if_needed(request_data, response, spill=spill))
 
 
+def _request_method(request_data: Any) -> str:
+    """Return the method of a request that JSONRPCIncoming would accept.
+
+    Checks the same fields without loading pydantic; anything else goes to
+    JSONRPCIncoming, so a malformed request fails with the same error as before.
+    """
+    if (
+        isinstance(request_data, dict)
+        and request_data.get("jsonrpc") == "2.0"
+        and isinstance(request_data.get("method"), str)
+        and isinstance(request_data.get("params"), list | dict | None)
+    ):
+        return request_data["method"]
+
+    from inspect_sandbox_tools._cli.jsonrpc_incoming import JSONRPCIncoming
+
+    return JSONRPCIncoming.model_validate(request_data).method
+
+
 async def _dispatch_local_method(request_json_str: str) -> JSONRPCResponseJSON:
+    from jsonrpcserver import async_dispatch
+
     return JSONRPCResponseJSON(await async_dispatch(request_json_str))
 
 
-async def _dispatch_remote_method(request_json_str: str) -> JSONRPCResponseJSON:
+def _dispatch_remote_method(request_json_str: str) -> JSONRPCResponseJSON:
     _ensure_server_is_running()
-    return await json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
+    return _json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
+
+
+_CONTENT_LENGTH = re.compile(
+    rb"^content-length:[ \t]*(\d+)[ \t]*\r?$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _json_rpc_unix_call(socket_path: str, request_json_str: str) -> JSONRPCResponseJSON:
+    """Make a JSON-RPC call to the server with only the standard library.
+
+    Unlike json_rpc_unix_call, this does not load aiohttp. The request is
+    HTTP/1.0, so the server sends an unchunked body and then closes the
+    connection: the response is everything read until EOF.
+    """
+    body = request_json_str.encode("utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(100 * 60 * 60)  # Match json_rpc_unix_call
+        sock.connect(socket_path)
+        sock.sendall(
+            b"POST / HTTP/1.0\r\nContent-Type: application/json\r\n"
+            b"Content-Length: %d\r\n\r\n%s" % (len(body), body)
+        )
+        with sock.makefile("rb") as response_file:
+            response = response_file.read()
+
+    head, separator, payload = response.partition(b"\r\n\r\n")
+    content_length = _CONTENT_LENGTH.search(head)
+    if not (separator and head.startswith(b"HTTP/")) or (
+        content_length and int(content_length[1]) != len(payload)
+    ):
+        raise ConnectionError(
+            f"Sandbox-tools server at {socket_path} closed the connection "
+            "before sending a complete response"
+        )
+    return JSONRPCResponseJSON(payload.decode("utf-8"))
 
 
 _SERVER_STDOUT_LOG = SERVER_DIR / "server-stdout.log"
@@ -265,6 +357,8 @@ def _ensure_server_is_running() -> None:
 def _ensure_server_is_running_locked() -> None:
     if _can_connect_to_socket():
         return  # Server already running and responsive
+
+    import psutil
 
     if SOCKET_PATH.exists() or SERVER_PID_PATH.exists():
         startup_deadline = time.monotonic() + _SERVER_STARTUP_TIMEOUT
@@ -358,6 +452,8 @@ def _can_connect_to_socket() -> bool:
 
 
 def _server_process_is_running() -> bool:
+    import psutil
+
     metadata = _server_process_metadata()
     if metadata is None:
         return False
@@ -368,6 +464,8 @@ def _server_process_is_running() -> bool:
 
 
 async def _wait_for_starting_server() -> bool:
+    import asyncio
+
     if not _server_process_is_running():
         return False
 
@@ -385,6 +483,8 @@ async def _wait_for_starting_server() -> bool:
 
 def _terminate_unresponsive_server() -> None:
     """Stop an identified daemon before removing its socket or PID file."""
+    import psutil
+
     metadata = _server_process_metadata()
     if metadata is None or not _server_process_is_running():
         return
