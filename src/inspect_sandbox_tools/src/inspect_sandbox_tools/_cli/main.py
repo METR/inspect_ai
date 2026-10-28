@@ -260,6 +260,13 @@ def _exec(request: str | None) -> None:
 
         response = asyncio.run(_dispatch_local_method(request_json_str))
     else:
+        if isinstance(request_data.get("params"), dict) and (
+            "_run_as" in request_data["params"]
+        ):
+            # Only in-process tools switch user. The server would run the request
+            # as its own user (root in most sandboxes), so refuse rather than
+            # forward if this set ever falls behind the tool registry.
+            raise ValueError(f"{tool_name} cannot run as another user")
         response = _dispatch_remote_method(request_json_str)
     print(chunk_json_rpc_response_if_needed(request_data, response, spill=spill))
 
@@ -294,9 +301,8 @@ def _dispatch_remote_method(request_json_str: str) -> JSONRPCResponseJSON:
     return _json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
 
 
-_CONTENT_LENGTH = re.compile(
-    rb"^content-length:[ \t]*(\d+)[ \t]*\r?$", re.IGNORECASE | re.MULTILINE
-)
+_STATUS_LINE = re.compile(rb"HTTP/1\.[01] \d{3}(?: [^\r\n]*)?")
+_HEADER_FIELD = re.compile(rb"([!#$%&'*+.^_`|~0-9A-Za-z-]+)[ \t]*:[ \t]*(.*?)[ \t]*")
 
 
 def _json_rpc_unix_call(socket_path: str, request_json_str: str) -> JSONRPCResponseJSON:
@@ -318,9 +324,22 @@ def _json_rpc_unix_call(socket_path: str, request_json_str: str) -> JSONRPCRespo
             response = response_file.read()
 
     head, separator, payload = response.partition(b"\r\n\r\n")
-    content_length = _CONTENT_LENGTH.search(head)
-    if not (separator and head.startswith(b"HTTP/")) or (
-        content_length and int(content_length[1]) != len(payload)
+    status_line, _, header_block = head.partition(b"\r\n")
+    fields = [_HEADER_FIELD.fullmatch(line) for line in header_block.split(b"\r\n")]
+    names = [field[1].lower() for field in fields if field]
+    lengths = [
+        field[2] for field in fields if field and field[1].lower() == b"content-length"
+    ]
+    # The server answers HTTP/1.0 with one Content-Length and no transfer coding;
+    # anything else is not a complete, unambiguous reply from it.
+    if (
+        not separator
+        or not _STATUS_LINE.fullmatch(status_line)
+        or (header_block and not all(fields))
+        or b"transfer-encoding" in names
+        or len(lengths) != 1
+        or not lengths[0].isdigit()
+        or int(lengths[0]) != len(payload)
     ):
         raise ConnectionError(
             f"Sandbox-tools server at {socket_path} closed the connection "
