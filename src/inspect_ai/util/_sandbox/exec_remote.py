@@ -108,7 +108,21 @@ class ExecRemoteCommonOptions:
     """User to run the command as"""
 
     poll_interval: float | None = None
-    """Interval between poll requests in seconds"""
+    """Interval between poll requests in seconds (at least 5).
+
+    When this is not set, the first polls that find the command still running
+    with no output are followed by shorter waits of 0.25, 0.5, 1 and 2 seconds
+    (`POLL_RAMP_SECONDS`), so a short command is not left waiting a whole
+    interval. These polls are added to the ones the sandbox's default interval
+    makes and are skipped when they would not reply before the next of those.
+    When it is set, every such poll is followed by this interval.
+
+    A poll that returns output is followed by another at once, without using up
+    the ramp. In awaitable mode (`stream=False`), where the output is read only
+    when the command ends, that next poll only checks whether the command has
+    ended: while polls in a row keep returning output, each later one is
+    followed by `OUTPUT_REPOLL_SECONDS` (whatever this is set to), unless a
+    reply is full (`MAX_POLL_OUTPUT_BYTES` of stdout or stderr)."""
 
     poll_timeout: float | None = None
     """Timeout for individual RPC poll requests in seconds. Defaults to 120 seconds.
@@ -223,6 +237,23 @@ class _CloseStdinResult(BaseModel):
 
 MIN_POLL_INTERVAL = 5
 
+POLL_RAMP_SECONDS = (0.25, 0.5, 1.0, 2.0)
+"""Waits after the first polls that find a command still running with no output
+(not used when the caller sets `poll_interval`). They add polls before the one
+the default interval would make, and are skipped when they would not reply
+before it. Output does not restart the ramp: once it is used up, polls that
+find the command still running with no output are spaced by the interval."""
+
+OUTPUT_REPOLL_SECONDS = 0.5
+"""Wait in awaitable mode after a poll that returns output, not a full reply,
+when the poll before it did too. Not stretched by `poll_interval`, which spaces
+polls that find no output."""
+
+MAX_POLL_OUTPUT_BYTES = 1024 * 1024
+"""Most new stdout (and stderr) bytes the sandbox drains for one poll reply (the
+sandbox tools' `_MAX_POLL_OUTPUT_BYTES`); a reply that also replays unacknowledged
+output can be larger."""
+
 RPC_TIMEOUT = 120
 """Timeout for individual JSON-RPC calls in seconds."""
 
@@ -290,6 +321,19 @@ class ExecRemoteProcess:
         self._poll_interval = max(
             MIN_POLL_INTERVAL, options.poll_interval or sandbox_default_poll_interval
         )
+        self._use_ramp = options.poll_interval is None
+        self._poll_ramp = iter(POLL_RAMP_SECONDS)
+        self._awaitable = False
+        # awaitable: the last poll returned output, not a full reply
+        self._small_output = False
+        # when the interval alone would poll next; only a poll that starts then
+        # or later stands in for it
+        self._interval_due: float | None = None
+        # a ramp poll took output the interval's poll would have found
+        self._output_before_due = False
+        # an extra poll after early output waits for the interval's poll if it
+        # would not reply before it
+        self._hold_until: float | None = None
         self._pid: int | None = None
         self._last_seq: int = 0
         self._killed = False
@@ -402,7 +446,11 @@ class ExecRemoteProcess:
 
         try:
             while True:
+                if self._hold_until is not None:
+                    hold, self._hold_until = self._hold_until, None
+                    await anyio.sleep(max(0.0, hold - anyio.current_time()))
                 # Perform the poll
+                started = anyio.current_time() if self._use_ramp else 0.0
                 result = await self._poll()
 
                 # Collect events from this poll
@@ -428,6 +476,18 @@ class ExecRemoteProcess:
                 # If we have events, return the first and queue the rest
                 if events:
                     self._pending_events = events[1:]
+                    if self._use_ramp:
+                        if self._interval_due is None or started >= self._interval_due:
+                            # the interval's poll: it sees output, polls again at once
+                            self._interval_due = anyio.current_time()
+                            self._output_before_due = False
+                        else:
+                            self._output_before_due = True
+                            now = anyio.current_time()
+                            if now + (now - started) >= self._interval_due:
+                                self._hold_until = self._interval_due
+                    if self._awaitable and result.state == "running":
+                        await self._wait_after_output(result)
                     return events[0]
 
                 # If killed with no events, stop iteration
@@ -435,13 +495,69 @@ class ExecRemoteProcess:
                     raise StopAsyncIteration
 
                 # Still running with no output, wait before polling again
-                await anyio.sleep(self._poll_interval)
+                self._small_output = False
+                await anyio.sleep(self._idle_wait(started))
 
         except anyio.get_cancelled_exc_class():
             # Kill the process on cancellation to avoid leaving orphaned processes.
             with anyio.CancelScope(shield=True):
                 await self.kill()
             raise
+
+    def _idle_wait(self, started: float) -> float:
+        """Seconds to wait after a poll that found the command running with no output.
+
+        The interval alone polls `poll_interval` after such a poll, and at once
+        after output. The ramp (POLL_RAMP_SECONDS) adds earlier polls, which do
+        not take the place of the interval's: only a poll that starts when the
+        interval's would, or later, does. A ramp poll goes out only if, taking
+        as long as this one did, it would reply before the interval's poll is
+        due; one that still replies after it is followed by another at once.
+        If a ramp poll took output the interval's poll would have found, that
+        poll is followed by another at once, as it would have been (and the poll
+        right after that output waits for the interval's poll if it would not
+        reply before it). A `poll_interval` set by the caller (at least 5 s) is
+        used without the ramp.
+        """
+        if not self._use_ramp:
+            return self._poll_interval
+        now = anyio.current_time()
+        due_at = self._interval_due
+        if due_at is None or started >= due_at:
+            if self._output_before_due:
+                # the interval's poll would have found the output a ramp poll
+                # took, and polled again at once
+                self._output_before_due = False
+                return 0.0
+            # this poll took the interval's place: the next one is due an interval on
+            due_at = self._interval_due = now + self._poll_interval
+        elif now >= due_at:
+            return 0.0
+        due = due_at - now
+        step = next(self._poll_ramp, None)
+        if step is not None and step + (now - started) < due:
+            return step
+        return due
+
+    async def _wait_after_output(self, result: _PollResult) -> None:
+        """Pace polls after one that found an awaitable command running with output.
+
+        Nobody reads the output before the command ends, so the next poll goes
+        out at once only to empty a full reply or to see whether the command
+        has ended (the sandbox reports "running" in the poll that returns a
+        finished command's last output). While polls in a row return output
+        that is not a full reply, wait `OUTPUT_REPOLL_SECONDS` after each, so
+        a command that keeps printing is not polled back to back and its end
+        is still seen soon after.
+        """
+        # the sandbox's UTF-8 decoder holds back up to 3 bytes of a split character
+        full = any(
+            len(output.encode("utf-8")) >= MAX_POLL_OUTPUT_BYTES - 3
+            for output in (result.stdout, result.stderr)
+        )
+        if self._small_output and not full:
+            await anyio.sleep(OUTPUT_REPOLL_SECONDS)
+        self._small_output = not full
 
     async def _poll(self) -> _PollResult:
         recovery_deadline: float | None = None
@@ -700,6 +816,7 @@ async def exec_remote_awaitable(
     proc = await exec_remote_streaming(
         sandbox, cmd, sandbox_default_poll_interval, opts
     )
+    proc._awaitable = True
 
     # Accumulate output chunks with memory limiting
     output_limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
