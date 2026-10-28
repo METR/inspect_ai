@@ -98,10 +98,55 @@ def test_request_method_matches_jsonrpc_incoming(request_data: object) -> None:
         assert main_module._request_method(request_data) == expected
 
 
+def test_forwarding_refuses_a_request_to_run_as_another_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only in-process tools switch user, so a forwarded `_run_as` is refused."""
+    forwarded: list[str] = []
+    monkeypatch.setattr(main_module, "_dispatch_remote_method", forwarded.append)
+    request = {
+        "jsonrpc": "2.0",
+        "method": "exec_remote_start",
+        "params": {"command": "id", "_run_as": "nobody"},
+        "id": 1,
+    }
+
+    with pytest.raises(ValueError, match="cannot run as another user"):
+        main_module._exec(json.dumps(request))
+
+    assert forwarded == []
+
+
 @pytest.mark.parametrize(
     "reply",
-    [b"", b"HTTP/1.0 200 OK\r\nContent-Length: 10\r\n\r\n{}"],
-    ids=["no response", "truncated body"],
+    [
+        b"",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 10\r\n\r\n{}",
+        b"SMTP 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding : chunked\r\nContent-Length: 2\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 2x\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\nContent-Length: -1\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nContent-Length: rubbish\r\n\r\n{}",
+        b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\nnot a header\r\n\r\n{}",
+        b"HTTP/1.0 2000 OK\r\nContent-Length: 2\r\n\r\n{}",
+    ],
+    ids=[
+        "no response",
+        "truncated body",
+        "not an HTTP status line",
+        "conflicting lengths",
+        "chunked",
+        "chunked spelled with a space",
+        "no length",
+        "malformed length",
+        "negative length",
+        "valid and malformed lengths",
+        "malformed header line",
+        "malformed status code",
+    ],
 )
 def test_forwarding_fails_on_an_incomplete_response(reply: bytes) -> None:
     directory = tempfile.mkdtemp(dir="/tmp")  # short enough for a socket path
@@ -121,6 +166,29 @@ def test_forwarding_fails_on_an_incomplete_response(reply: bytes) -> None:
             thread.start()
             with pytest.raises(ConnectionError, match="complete response"):
                 main_module._json_rpc_unix_call(socket_path, "{}")
+            thread.join()
+    finally:
+        shutil.rmtree(directory)
+
+
+def test_forwarding_accepts_the_servers_reply() -> None:
+    reply = b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+    directory = tempfile.mkdtemp(dir="/tmp")  # short enough for a socket path
+    socket_path = f"{directory}/server.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(socket_path)
+            server.listen(1)
+
+            def reply_once() -> None:
+                connection, _ = server.accept()
+                with connection:
+                    connection.recv(65536)
+                    connection.sendall(reply)
+
+            thread = threading.Thread(target=reply_once)
+            thread.start()
+            assert main_module._json_rpc_unix_call(socket_path, "{}") == "{}"
             thread.join()
     finally:
         shutil.rmtree(directory)
