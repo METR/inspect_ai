@@ -1387,6 +1387,85 @@ async def test_summary_overflow_not_used_as_summary() -> None:
         await strategy.compact(model, messages, tools=[])
 
 
+async def test_summary_generate_sends_tools_without_allowing_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The summarization request carries the agent's tools with tool_choice="none".
+
+    Anthropic binds thinking blocks to the tools list they were generated
+    with: a summarization request without the tools makes every replayed
+    thinking block mismatch, which fails with a 400 (or, with drop_block,
+    silently drops all prior reasoning). Like Anthropic, the provider here
+    keeps tools alongside "none".
+    """
+    received: dict[str, object] = {}
+
+    def summarizer(
+        input: list[ChatMessage], tools: object, tool_choice: object, config: object
+    ) -> ModelOutput:
+        received["tools"] = tools
+        received["tool_choice"] = tool_choice
+        return ModelOutput.from_content("mockllm/model", "GOOD SUMMARY")
+
+    model = get_model("mockllm/model", custom_outputs=summarizer)
+    monkeypatch.setattr(model.api, "tools_required", lambda: True)
+    tools = [ToolInfo(name="bash", description="Run a bash command.")]
+    strategy = CompactionSummary()
+    messages: list[ChatMessage] = [
+        system_msg("S", "sys1"),
+        user_msg("do the task", "u1", source="input"),
+        assistant_msg("working on it", "a1"),
+    ]
+
+    _, summary = await strategy.compact(model, messages, tools=tools)
+
+    assert summary is not None
+    assert received["tools"] == tools
+    assert received["tool_choice"] == "none"
+
+
+@pytest.mark.parametrize("tools_required", [True, False])
+async def test_summary_fit_reserves_tool_definition_tokens(
+    monkeypatch: pytest.MonkeyPatch, tools_required: bool
+) -> None:
+    """Tool definitions count toward the fit only when the provider keeps them."""
+    import inspect_ai.model._model_info as _model_info
+    from inspect_ai.model import ModelInfo
+
+    received_tool_texts: list[str] = []
+
+    def summarizer(
+        input: list[ChatMessage], tools: object, tool_choice: object, config: object
+    ) -> ModelOutput:
+        received_tool_texts.extend(
+            m.text for m in input if isinstance(m, ChatMessageTool)
+        )
+        return ModelOutput.from_content("mockllm/tool-fit-test", "GOOD SUMMARY")
+
+    model = get_model("mockllm/tool-fit-test", custom_outputs=summarizer)
+    monkeypatch.setattr(model.api, "tools_required", lambda: tools_required)
+    monkeypatch.setitem(
+        _model_info._custom_models, str(model), ModelInfo(_input_tokens=2000)
+    )
+
+    strategy = CompactionSummary(prompt=FIT_TEST_PROMPT)
+    # sized to fit the 1000-token fit target on its own, but not once the
+    # tool definition below is counted against it
+    small = " ".join(f"word{i}" for i in range(100))
+    tools = [ToolInfo(name="bash", description=" ".join(f"d{i}" for i in range(400)))]
+    messages: list[ChatMessage] = [
+        system_msg("S", "sys1"),
+        user_msg("do the task", "u1", source="input"),
+        ChatMessageTool(content=small, tool_call_id="t1", function="bash", id="tool1"),
+    ]
+
+    _, summary = await strategy.compact(model, messages, tools=tools)
+
+    assert summary is not None
+    truncated = "truncated for summarization" in received_tool_texts[-1]
+    assert truncated is tools_required
+
+
 async def test_summary_truncates_oversized_tool_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
