@@ -15,7 +15,7 @@ from inspect_ai._util.content import (
 )
 from inspect_ai._util.list import find_last_match
 from inspect_ai.model._chat_message import ChatMessage, ChatMessageTool, ChatMessageUser
-from inspect_ai.model._model import Model, get_model
+from inspect_ai.model._model import Model, get_model, tools_for_tool_choice
 from inspect_ai.model._model_info import get_model_input_tokens
 from inspect_ai.model._tokens import count_media_tokens
 from inspect_ai.model._trim import partition_messages
@@ -119,11 +119,19 @@ class CompactionSummary(CompactionStrategy):
         # a long tool output right before compaction can push the summarization
         # input past the model's context window; truncate it so the summary
         # generate below doesn't itself overflow
-        summarization_input = await _fit_summarization_input(model, summarization_input)
+        summarization_input = await _fit_summarization_input(
+            model, summarization_input, tools
+        )
 
-        # perform summary
+        # perform summary. send the agent's tools (but don't allow calling them)
+        # so the request prefix matches the turns that produced the conversation:
+        # providers that bind reasoning to that prefix (e.g. Anthropic's thinking
+        # block binding) otherwise reject or drop all of the replayed reasoning,
+        # and a matching prefix also lets the summary hit the agent's prompt cache
         with sentinel_scope(AgentScope.OFF, final=True):
-            output = await model.generate(input=summarization_input)
+            output = await model.generate(
+                input=summarization_input, tools=tools, tool_choice="none"
+            )
         if output.stop_reason == "model_length":
             raise RuntimeError(
                 "Compaction summary generation exceeded the model's context "
@@ -335,7 +343,7 @@ _CHARS_PER_TOKEN = 4
 
 
 async def _fit_summarization_input(
-    model: Model, messages: list[ChatMessage]
+    model: Model, messages: list[ChatMessage], tools: list[ToolInfo]
 ) -> list[ChatMessage]:
     """Shrink oversized tool output so the summarization input fits the window.
 
@@ -350,7 +358,8 @@ async def _fit_summarization_input(
 
     The fit target reserves output headroom below the context window because
     providers that send an explicit `max_tokens` reject requests whose input
-    and output budget together exceed the window.
+    and output budget together exceed the window. It also reserves the tool
+    definitions, for providers that keep them alongside `tool_choice="none"`.
 
     Returns the input unchanged when the context window is unknown or the input
     already fits. Edited messages are replaced with copies so the live
@@ -361,6 +370,9 @@ async def _fit_summarization_input(
         return messages
 
     target = context_window - _output_reserve(model, context_window)
+    sent_tools, _ = tools_for_tool_choice(model.api, tools, "none")
+    if sent_tools:
+        target -= await model.count_tool_tokens(sent_tools)
     tokens = await model.count_tokens(messages)
     if tokens <= target:
         return messages
