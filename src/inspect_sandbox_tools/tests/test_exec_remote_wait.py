@@ -125,6 +125,37 @@ async def test_concurrent_duplicate_starts_launch_once(
     assert marker.read_text() == "x"
 
 
+async def test_a_restarted_server_does_not_relaunch_a_request(tmp_path: Path) -> None:
+    launched, marker = tmp_path / "launched", tmp_path / "launches"
+    params = _params(f"printf x >> {shlex.quote(str(marker))}; printf answer")
+    before = WaitController()
+    before.persist_launches(launched)
+    try:
+        assert (await before.start(params)).result.stdout == "answer"
+    finally:
+        with anyio.fail_after(10):
+            await before.shutdown()
+
+    after = WaitController()
+    after.persist_launches(launched)
+    try:
+        with pytest.raises(ToolException, match="may have run before the sandbox"):
+            await after.start(params)
+        # a request the earlier server never saw still launches
+        assert (await after.start(_params("printf fresh"))).result.stdout == "fresh"
+    finally:
+        with anyio.fail_after(10):
+            await after.shutdown()
+    assert marker.read_text() == "x"
+
+
+async def test_a_launch_that_cannot_be_recorded_still_runs(
+    controller: WaitController, tmp_path: Path
+) -> None:
+    controller.persist_launches(tmp_path / "missing" / "launched")
+    assert (await controller.start(_params("printf ran"))).result.stdout == "ran"
+
+
 async def test_start_returns_output_and_exit_together_within_the_wait(
     controller: WaitController,
 ) -> None:

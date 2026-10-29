@@ -4,6 +4,7 @@ import asyncio
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 from typing import NamedTuple
 
@@ -18,6 +19,7 @@ _MAX_RETAINED_BYTES = 64 * 1024 * 1024
 _EXPIRED_ID_TTL = 3600.0
 _MAX_EXPIRED_IDS = 50_000  # about 13 MB
 _LAUNCH_SHUTDOWN_GRACE = 1.0
+_RESTARTED = "may have run before the sandbox tools server restarted"
 
 
 @dataclass
@@ -78,13 +80,44 @@ class WaitController:
     Request IDs must never be reused by clients. A repeated start with a known
     ID reports that request instead of launching again. Retention is described
     in `_prune`; a missing entry is an explicit error, never an implicit new launch.
-    A restart forgets every ID, so a start repeated after one launches again.
+    With `persist_launches`, a restarted server also knows the IDs the previous one
+    launched, so a start repeated across a restart is reported lost, not run again.
     """
 
     def __init__(self) -> None:
         self._requests: dict[str, _Request] = {}
         self._expired: OrderedDict[str, _Expired] = OrderedDict()
         self._retired_jobs: list[Job] = []
+        self._launched_path: Path | None = None
+
+    def persist_launches(self, path: Path) -> None:
+        """Record each request ID in `path` before launching it, and load earlier ones.
+
+        A client resends a start whose reply was lost (and the sandbox transport
+        retries a dropped call), so a server restarted in between must know which
+        IDs the previous one already launched.
+        """
+        try:
+            launched = path.read_text().split()
+        except FileNotFoundError:
+            launched = []
+        now = monotonic()
+        for request_id in launched[-_MAX_EXPIRED_IDS:]:
+            self._expired[request_id] = _Expired(now, _RESTARTED)
+        self._launched_path = path
+
+    def _record_launch(self, request_id: str) -> None:
+        if self._launched_path is None:
+            return
+        try:
+            with self._launched_path.open("a") as launched:
+                launched.write(f"{request_id}\n")
+        except OSError as ex:
+            # Best effort: a full disk must not stop commands (such as cleanup) running.
+            print(
+                f"exec_remote: could not record request {request_id}: {ex}",
+                file=sys.stderr,
+            )
 
     async def start(
         self, params: StartWaitParams, can_switch_user: bool = False
@@ -100,6 +133,7 @@ class WaitController:
             raise ToolException("Awaitable exec_remote requests cannot keep stdin open")
         entry = _Request(seen_at=monotonic())
         self._requests[params.request_id] = entry
+        self._record_launch(params.request_id)
         entry.launch = asyncio.create_task(self._launch(entry, params, can_switch_user))
         await asyncio.shield(entry.launch)
         job = self._job(entry, params.request_id)

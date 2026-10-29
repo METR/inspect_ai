@@ -9,6 +9,7 @@ from inspect_sandbox_tools._util.server_dir import (
 )
 
 __all__ = [
+    "EXEC_REMOTE_LAUNCHED_PATH",
     "PKG_NAME",
     "SERVER_DIR",
     "SERVER_DIR_ENV",
@@ -25,3 +26,4 @@ SERVER_DIR = resolve_server_dir(
 SOCKET_PATH = server_socket_path(SERVER_DIR)
 SHUTDOWN_STATUS_PATH = SERVER_DIR / "shutdown-status.json"
 SERVER_PID_PATH = SERVER_DIR / "server.pid"
+EXEC_REMOTE_LAUNCHED_PATH = SERVER_DIR / "exec-remote-launched"

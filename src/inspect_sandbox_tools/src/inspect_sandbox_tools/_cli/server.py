@@ -10,6 +10,7 @@ from aiohttp.web import Application, Request, Response, run_app
 from jsonrpcserver import Success, async_dispatch, method
 
 from inspect_sandbox_tools._util.constants import (
+    EXEC_REMOTE_LAUNCHED_PATH,
     SERVER_DIR,
     SERVER_DIR_ENV,
     SERVER_PID_PATH,
@@ -104,6 +105,12 @@ def main() -> None:
     load_tools("inspect_sandbox_tools._remote_tools")
 
     ensure_private_server_dir(SERVER_DIR)
+    from inspect_sandbox_tools._remote_tools._exec_remote.json_rpc_methods import (
+        wait_controller as exec_remote_wait_controller,
+    )
+
+    # Kept in the private server directory, which a restart does not clear.
+    exec_remote_wait_controller.persist_launches(EXEC_REMOTE_LAUNCHED_PATH)
     _prepare_socket_parent()
 
     # Remove stale socket file

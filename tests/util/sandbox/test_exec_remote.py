@@ -1415,10 +1415,16 @@ class TestAwaitableWaitProtocol:
         monkeypatch.delenv(exec_remote_module.SERVER_WAIT_ENV)
         assert not ExecRemoteAwaitableOptions().server_wait
 
+    @pytest.mark.parametrize("concurrency", [True, False])
     async def test_no_free_held_slot_sends_requests_at_once_without_a_hold(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, concurrency: bool
     ) -> None:
-        """Other commands' holds never delay a start or poll; it is sent unheld."""
+        """Other commands' holds never delay a start or poll; it is sent unheld.
+
+        The held-request limit applies whether or not the caller asks for
+        `concurrency`.
+        """
+        options = ExecRemoteAwaitableOptions(server_wait=True, concurrency=concurrency)
         monkeypatch.setenv("INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY", "1")
         sandbox = _mock_sandbox()
         sandbox._exec_remote_wait_supported = None
@@ -1453,18 +1459,18 @@ class TestAwaitableWaitProtocol:
         sandbox.exec = AsyncMock(side_effect=fake_exec)
         with patch.object(anyio, "sleep", AsyncMock()) as sleep:
             async with anyio.create_task_group() as group:
-                group.start_soon(exec_remote_awaitable, sandbox, ["slow"], 5, _WAIT)
+                group.start_soon(exec_remote_awaitable, sandbox, ["slow"], 5, options)
                 await held.wait()
                 # completes while the slow command still holds the only slot
                 with anyio.fail_after(5):
-                    quick = await exec_remote_awaitable(sandbox, ["quick"], 5, _WAIT)
+                    quick = await exec_remote_awaitable(sandbox, ["quick"], 5, options)
                 release.set()
 
         assert quick.stdout == "quick"
         assert sent == [
             ("exec_remote_start_wait", "slow", 5.0, False),
-            ("exec_remote_start_wait", "quick", 0.0, True),
-            ("exec_remote_poll_wait", "quick", 0.0, True),
+            ("exec_remote_start_wait", "quick", 0.0, concurrency),
+            ("exec_remote_poll_wait", "quick", 0.0, concurrency),
         ]
         # an unheld reply of a running command is followed by the poll ramp
         assert [call.args for call in sleep.await_args_list] == [
@@ -2571,6 +2577,40 @@ async def test_lost_start_reply_does_not_launch_twice(docker_sandbox) -> None:
 
     assert methods == ["exec_remote_start_wait", "exec_remote_start_wait"]
     assert result.stdout == launches.stdout == "x\n"
+
+
+@skip_if_no_docker
+@pytest.mark.slow
+async def test_a_start_resent_across_a_server_restart_is_not_run_again(
+    docker_sandbox,
+) -> None:
+    from inspect_ai._util._json_rpc import exec_model_request as original
+
+    methods: list[str] = []
+
+    async def record(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
+        methods.append(kwargs["method"])
+        if len(methods) == 1:
+            # The command ran, but the server restarts before its reply arrives.
+            await docker_sandbox.exec([SANDBOX_CLI, "stop-server"])
+            raise ConnectionError("connection dropped after the server replied")
+        return result
+
+    with (
+        patch.object(exec_remote_module, "exec_model_request", record),
+        pytest.raises(RuntimeError, match="may have run before the sandbox"),
+    ):
+        await exec_remote_awaitable(
+            docker_sandbox,
+            ["sh", "-c", "echo x >> /tmp/restart-launches"],
+            docker_sandbox.default_polling_interval(),
+            _WAIT,
+        )
+    launches = await docker_sandbox.exec(["cat", "/tmp/restart-launches"])
+
+    assert methods == ["exec_remote_start_wait", "exec_remote_start_wait"]
+    assert launches.stdout == "x\n"
 
 
 @skip_if_no_docker

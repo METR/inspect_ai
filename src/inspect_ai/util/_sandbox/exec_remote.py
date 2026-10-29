@@ -214,9 +214,10 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     transport), so a quick command completes in one request. Requests are
     held only for the first 60 seconds of a command; after that, it is polled
     as usual. Held requests do not take the subprocess or Docker
-    CLI slots that ordinary commands need; with `concurrency`, at most
+    CLI slots that ordinary commands need; at most
     `INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY` of them (default: twice the
-    available CPUs, at least 4) are in flight at once. A request never waits
+    available CPUs, at least 4) are in flight at once, whatever `concurrency`
+    is. A request never waits
     for that limit: when it is reached, the request is sent without a hold, as
     an ordinary command, and a command still running with no output is polled
     again as usual.
@@ -228,8 +229,10 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     keeps it, instead of launching it again. Once that result is no longer
     kept, the resent start fails with an error that says the result was lost
     and how the command ended (for example its exit code). It remembers request
-    IDs for an hour after their results are dropped, but not across a restart of
-    the sandbox tools server. Servers without support are polled as usual.
+    IDs for an hour after their results are dropped, and the IDs it launched
+    across a restart of the sandbox tools server: a start resent after one fails
+    with an error that the command may have run, and is not run again. Servers
+    without support are polled as usual.
     """
 
 
@@ -488,7 +491,7 @@ class ExecRemoteProcess:
         """Make an RPC call to the sandbox."""
         held = bool(params.get("wait_seconds"))
         slot: ConcurrencySemaphore | None = None
-        if held and self._options.concurrency:
+        if held:
             slot = await get_or_create_semaphore(
                 "exec-remote-wait", _wait_concurrency(), None, False
             )
