@@ -2589,8 +2589,8 @@ async def test_a_start_resent_across_a_server_restart_is_not_run_again(
     methods: list[str] = []
 
     async def record(*args: Any, **kwargs: Any) -> Any:
+        methods.append(kwargs["method"])  # before sending: the resent start fails
         result = await original(*args, **kwargs)
-        methods.append(kwargs["method"])
         if len(methods) == 1:
             # The command ran, but the server restarts before its reply arrives.
             await docker_sandbox.exec([SANDBOX_CLI, "stop-server"])
