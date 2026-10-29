@@ -1698,11 +1698,14 @@ class TestAwaitableWaitProtocol:
         ]
         assert requests[-1]["params"]["pid"] == 42
 
-    @pytest.mark.parametrize("options", [None, ExecRemoteAwaitableOptions(timeout=30)])
+    @pytest.mark.parametrize("pass_options", [False, True])
     async def test_server_waits_are_off_by_default(
-        self, options: ExecRemoteAwaitableOptions | None
+        self, monkeypatch: pytest.MonkeyPatch, pass_options: bool
     ) -> None:
         """A supporting server gets exactly the polling requests sent without waits."""
+        # the default comes from the environment, so build the options without it
+        monkeypatch.delenv(exec_remote_module.SERVER_WAIT_ENV, raising=False)
+        options = ExecRemoteAwaitableOptions(timeout=30) if pass_options else None
         sandbox = _make_scripted_sandbox(
             [
                 _start_response(),
