@@ -2575,7 +2575,11 @@ async def test_lost_start_reply_does_not_launch_twice(docker_sandbox) -> None:
 
 @skip_if_no_docker
 @pytest.mark.slow
-async def test_awaitable_polls_without_server_wait(docker_sandbox) -> None:
+async def test_awaitable_polls_without_server_wait(
+    docker_sandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the default comes from the environment, so check it without the variable
+    monkeypatch.delenv(exec_remote_module.SERVER_WAIT_ENV, raising=False)
     methods, recording = _record_methods()
     with recording:
         result = await exec_remote_awaitable(
