@@ -914,7 +914,13 @@ class AnthropicAPI(ModelAPI):
                         )
                         resolved_choice = "auto"
                     tool_choice_degraded = resolved_choice != tool_choice
-                    if not self.is_using_extended_thinking(config):
+                    # extended thinking rejects forced tool choices but accepts
+                    # "none" (e.g. compaction summaries that send tools only to
+                    # keep the request prefix intact)
+                    if (
+                        not self.is_using_extended_thinking(config)
+                        or resolved_choice == "none"
+                    ):
                         request["tool_choice"] = message_tool_choice(
                             resolved_choice, config
                         )

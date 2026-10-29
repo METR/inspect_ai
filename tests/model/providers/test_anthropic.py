@@ -2493,10 +2493,11 @@ async def test_anthropic_forced_tool_choice_with_thinking_records_metadata(
 async def test_anthropic_tool_choice_none_with_thinking(
     config_kwargs: dict[str, Any], expected_thinking: str | None
 ) -> None:
-    """tool_choice="none" keeps the tools; only extended thinking omits it.
+    """tool_choice="none" keeps the tools and is sent with any thinking mode.
 
     Anthropic requires tool definitions to validate tool history, so
     `Model.generate` passes "none" through to the provider with the tools.
+    Extended thinking rejects forced tool choices but accepts "none".
     """
     from inspect_ai.model._model_output import ModelOutput
     from inspect_ai.tool._tool_params import ToolParam, ToolParams
@@ -2533,10 +2534,7 @@ async def test_anthropic_tool_choice_none_with_thinking(
 
     assert captured.get("thinking", {}).get("type") == expected_thinking
     assert [tool["name"] for tool in captured["tools"]] == ["addition"]
-    if expected_thinking == "enabled":
-        assert "tool_choice" not in captured
-    else:
-        assert captured["tool_choice"] == {"type": "none"}
+    assert captured["tool_choice"] == {"type": "none"}
 
 
 def _message_with_transformations(transformations: list[dict[str, Any]]) -> Any:
