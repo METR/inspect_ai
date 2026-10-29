@@ -6,11 +6,14 @@ long-running commands in sandbox environments with streaming output.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import shlex
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, Union, cast
+from uuid import uuid4
 
 import anyio
 from pydantic import BaseModel
@@ -22,7 +25,18 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from inspect_ai._util._json_rpc import GenericJSONRPCErrorMapper, exec_model_request
+from inspect_ai._util._json_rpc import (
+    GenericJSONRPCErrorMapper,
+    JSONRPCErrorMapper,
+    JSONRPCMethodNotFoundError,
+    JSONRPCParamsType,
+    exec_model_request,
+)
+from inspect_ai._util.cpu import effective_cpu_count
+from inspect_ai.util._concurrency import (
+    ConcurrencySemaphore,
+    get_or_create_semaphore,
+)
 
 from ._cli import SANDBOX_CLI, tools_user_param
 from ._json_rpc_transport import SandboxJSONRPCTransport
@@ -138,7 +152,8 @@ class ExecRemoteCommonOptions:
 
     concurrency: bool = True
     """For sandboxes that run locally, request that the `concurrency()`
-    function be used to throttle concurrent subprocesses."""
+    function be used to throttle concurrent subprocesses. Requests held by
+    `server_wait` are throttled by their own limit instead (see `server_wait`)."""
 
     poll_timeout_recovery: float | None = field(default=None, kw_only=True)
     """Seconds to keep re-issuing a poll after it times out. Defaults to `None`.
@@ -151,7 +166,8 @@ class ExecRemoteCommonOptions:
     so recovery can run past this value by the 5-second pause plus one re-issued
     poll, including that poll's retries. While the command is running, a
     re-issued poll replays any output the lost response carried; if the command
-    ended during the stall, its exit status is lost and `RuntimeError` is raised.
+    ended during the stall, its exit status is lost and `RuntimeError` is raised
+    (with `server_wait`, the server keeps the final reply for a limited time).
     Only polls are re-issued, and none once `kill()` has been called, even if the
     kill request itself timed out; the error the last poll got is raised instead.
     A caller's `timeout` (awaitable mode) or cancellation still ends the wait at
@@ -183,7 +199,37 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
 
     timeout: float | None = None
     """Maximum execution time in seconds. On timeout, the process is killed and
-    TimeoutError is raised"""
+    TimeoutError is raised. With `server_wait`, this includes starting the command."""
+
+    server_wait: bool = field(
+        default_factory=lambda: _server_wait_default(), kw_only=True
+    )
+    """Wait for output in the sandbox instead of polling. Defaults to `False`, or
+    to `True` when `INSPECT_EXEC_REMOTE_SERVER_WAIT` is `1` or `true`.
+
+    When `True` and the sandbox tools server supports it, the server holds each
+    request until the command exits or a full reply of output is ready, for at
+    most 5 seconds and a quarter of `poll_timeout` (leaving the rest for the
+    transport), so a quick command completes in one request. Requests are
+    held only for the first 60 seconds of a command; after that, it is polled
+    as usual. Held requests do not take the subprocess or Docker
+    CLI slots that ordinary commands need; with `concurrency`, at most
+    `INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY` of them (default: twice the
+    available CPUs, at least 4) are in flight at once. A request never waits
+    for that limit: when it is reached, the request is sent without a hold, as
+    an ordinary command, and a command still running with no output is polled
+    again as usual.
+
+    A start that fails without an answer from the server (a lost connection, or
+    a timeout unless `poll_timeout_retry` is False) is resent once with the same
+    request ID, within 60 seconds of the first attempt. The server then reports
+    the command it already launched, or its final result while the server
+    keeps it, instead of launching it again. Once that result is no longer
+    kept, the resent start fails with an error that says the result was lost
+    and how the command ended (for example its exit code). It remembers request
+    IDs for an hour after their results are dropped, but not across a restart of
+    the sandbox tools server. Servers without support are polled as usual.
+    """
 
 
 # ============================================================================
@@ -205,6 +251,33 @@ class _PollResult(BaseModel):
     seq: int
     stdout: str
     stderr: str
+
+
+class _WaitResult(BaseModel):
+    pid: int
+    result: _PollResult
+
+
+class _ServerReplyError(RuntimeError):
+    """The server answered a request with an error, so resending it cannot help."""
+
+
+class _ServerReplyErrorMapper(GenericJSONRPCErrorMapper):
+    """Keep the generic error messages, marking the errors the server returned."""
+
+    @staticmethod
+    def server_error(
+        code: int, message: str, method: str, params: JSONRPCParamsType
+    ) -> Exception:
+        del code, method, params
+        return _ServerReplyError(message)
+
+    @staticmethod
+    def internal_error(
+        message: str, method: str, params: JSONRPCParamsType
+    ) -> Exception:
+        del method, params
+        return _ServerReplyError(message)
 
 
 class _KillResult(BaseModel):
@@ -236,6 +309,11 @@ class _CloseStdinResult(BaseModel):
 # ============================================================================
 
 MIN_POLL_INTERVAL = 5
+MAX_WAIT_SECONDS = 5.0
+
+WAIT_WINDOW_SECONDS = 60.0
+"""Use server-side waits for this long after start, then poll at the interval,
+so a long command does not hold a sandbox exec for its whole life."""
 
 POLL_RAMP_SECONDS = (0.25, 0.5, 1.0, 2.0)
 """Waits after the first polls that find a command still running with no output
@@ -257,10 +335,30 @@ output can be larger."""
 RPC_TIMEOUT = 120
 """Timeout for individual JSON-RPC calls in seconds."""
 
+WAIT_CONCURRENCY_ENV = "INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY"
+"""Overrides the limit on held `server_wait` requests in flight."""
+
+SERVER_WAIT_ENV = "INSPECT_EXEC_REMOTE_SERVER_WAIT"
+"""Turns `server_wait` on by default when `1` or `true`."""
+
+
+def _server_wait_default() -> bool:
+    return os.environ.get(SERVER_WAIT_ENV, "").strip().lower() in ("1", "true")
+
+
+START_RESEND_SECONDS = 60.0
+"""A failed `server_wait` start is resent only this soon after it was first
+sent, well within the 5 minutes the server keeps a completed reply."""
+
 POLL_TIMEOUT_RECOVERY_WAIT_SECONDS: float = 5.0
 """Pause before re-issuing a timed-out poll (see `poll_timeout_recovery`)."""
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _wait_concurrency() -> int:
+    """Held `server_wait` requests allowed in flight, sized like the Docker CLI limit."""
+    return int(os.environ.get(WAIT_CONCURRENCY_ENV, max(effective_cpu_count() * 2, 4)))
 
 
 class ExecRemoteProcess:
@@ -340,6 +438,16 @@ class ExecRemoteProcess:
         self._completed = False
         self._iteration_started = False
         self._pending_events: list[ExecOutput] = []
+        self._request_id: str | None = None
+        self._initial_result: _PollResult | None = None
+        self._wait_until = 0.0
+        self._held = False  # whether the server held the last request
+        rpc_timeout = (
+            options.poll_timeout if options.poll_timeout is not None else RPC_TIMEOUT
+        )
+        # A held request keeps at least three quarters of its RPC timeout for
+        # the transport (exec startup, queueing, retries of a slow exec).
+        self._wait_seconds = min(MAX_WAIT_SECONDS, max(0.0, rpc_timeout / 4))
         self._transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
 
     @property
@@ -354,9 +462,23 @@ class ExecRemoteProcess:
     # -------------------------------------------------------------------------
 
     async def _rpc(
-        self, method: str, params: dict[str, object], result_type: type[T]
+        self,
+        method: str,
+        params: dict[str, object],
+        result_type: type[T],
+        error_mapper: type[JSONRPCErrorMapper] = GenericJSONRPCErrorMapper,
     ) -> T:
         """Make an RPC call to the sandbox."""
+        held = bool(params.get("wait_seconds"))
+        slot: ConcurrencySemaphore | None = None
+        if held and self._options.concurrency:
+            slot = await get_or_create_semaphore(
+                "exec-remote-wait", _wait_concurrency(), None, False
+            )
+            if slot.value < 1:
+                # Never wait for a free slot: send the request without a hold.
+                params, held, slot = {**params, "wait_seconds": 0.0}, False, None
+        self._held = held
         extra_args: dict[str, object] = dict(
             timeout=RPC_TIMEOUT
             if self._options.poll_timeout is None
@@ -366,20 +488,23 @@ class ExecRemoteProcess:
             # server's private state directory inside the 0700 tools tree).
             # When root isn't available, this is None (sandbox default user).
             user=self._sandbox._tools_user,
-            concurrency=self._options.concurrency,
+            # A held wait idles in the sandbox, so it must not occupy a local
+            # subprocess slot that ordinary commands and cleanup need.
+            concurrency=self._options.concurrency and not held,
         )
         if self._options.poll_timeout_retry is not None:
             extra_args["timeout_retry"] = self._options.poll_timeout_retry
-        return await exec_model_request(
-            method=method,
-            params=params,
-            result_type=result_type,
-            transport=self._transport,
-            error_mapper=GenericJSONRPCErrorMapper,
-            **extra_args,
-        )
+        async with slot.semaphore if slot is not None else contextlib.nullcontext():
+            return await exec_model_request(
+                method=method,
+                params=params,
+                result_type=result_type,
+                transport=self._transport,
+                error_mapper=error_mapper,
+                **extra_args,
+            )
 
-    async def _start(self) -> None:
+    async def _start(self, *, wait: bool = False) -> None:
         """Submit the job to the sandbox."""
         # Build params, converting bytes input to string if needed
         params: dict[str, object] = {"command": shlex.join(self._cmd)}
@@ -400,8 +525,85 @@ class ExecRemoteProcess:
         if (user := tools_user_param(self._sandbox, self._options.user)) is not None:
             params["user"] = user
 
-        result = await self._rpc("exec_remote_start", params, _StartResult)
+        if (
+            wait
+            and self._wait_seconds > 0
+            and self._sandbox._exec_remote_wait_supported is not False
+        ):
+            from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
+            self._request_id = uuid4().hex
+            # Acknowledge earlier terminal replies so the server can drop them.
+            acks, self._sandbox._exec_remote_acks = self._sandbox._exec_remote_acks, ()
+            request = {
+                **params,
+                "request_id": self._request_id,
+                "wait_seconds": self._wait_seconds,
+            }
+            if acks:
+                request["acks"] = list(acks)
+            sandbox_proxy = cast(SandboxEnvironmentProxy, self._transport.sandbox)
+            first_sent = time.monotonic()
+            try:
+                # Like exec_remote_start, the start is the command's one sandbox
+                # event; its reply carries command output, which is logged elsewhere.
+                with sandbox_proxy.no_event_output():
+                    try:
+                        initial = await self._rpc(
+                            "exec_remote_start_wait",
+                            request,
+                            _WaitResult,
+                            _ServerReplyErrorMapper,
+                        )
+                    except Exception as ex:
+                        if not self._may_resend_start(ex, first_sent):
+                            raise
+                        # The server may have launched it before the reply was lost.
+                        # A repeated start reports that launch instead of relaunching.
+                        initial = await self._rpc(
+                            "exec_remote_start_wait",
+                            request,
+                            _WaitResult,
+                            _ServerReplyErrorMapper,
+                        )
+            except JSONRPCMethodNotFoundError:
+                self._sandbox._exec_remote_wait_supported = False
+                self._request_id = None
+            except _ServerReplyError:
+                # The server answered, so it runs nothing that needs a kill.
+                self._request_id = None
+                raise
+            else:
+                self._accept_initial_result(initial)
+                return
+
+        # Legacy servers cannot be cancelled by request ID; keep the PID reply
+        # reachable before acting on an awaitable command's cancellation.
+        with anyio.CancelScope(shield=wait):
+            result = await self._rpc("exec_remote_start", params, _StartResult)
+            self._pid = result.pid
+        if wait:
+            await anyio.lowlevel.checkpoint_if_cancelled()
+
+    def _may_resend_start(self, ex: Exception, first_sent: float) -> bool:
+        """Whether a failed `server_wait` start may be sent again.
+
+        Only a failure that leaves unknown whether the server launched the command
+        (a lost connection or reply) is resent, not an error the server returned.
+        Timeouts are resent unless `poll_timeout_retry` is False. Nothing is resent
+        `START_RESEND_SECONDS` after the first attempt.
+        """
+        if isinstance(ex, (_ServerReplyError, JSONRPCMethodNotFoundError, ValueError)):
+            return False
+        if isinstance(ex, TimeoutError) and self._options.poll_timeout_retry is False:
+            return False
+        return time.monotonic() - first_sent < START_RESEND_SECONDS
+
+    def _accept_initial_result(self, result: _WaitResult) -> None:
+        self._sandbox._exec_remote_wait_supported = True
         self._pid = result.pid
+        self._initial_result = result.result
+        self._wait_until = time.monotonic() + WAIT_WINDOW_SECONDS
 
     # -------------------------------------------------------------------------
     # Async Iterator Protocol
@@ -460,6 +662,9 @@ class ExecRemoteProcess:
                 if result.stderr:
                     events.append(ExecStderr(data=result.stderr))
 
+                if result.state != "running" and self._request_id is not None:
+                    self._sandbox._exec_remote_acks += (self._request_id,)
+
                 # Check for terminal state
                 if result.state == "completed":
                     self._completed = True
@@ -476,7 +681,8 @@ class ExecRemoteProcess:
                 # If we have events, return the first and queue the rest
                 if events:
                     self._pending_events = events[1:]
-                    if self._use_ramp:
+                    # A held poll already waited in the sandbox: poll again at once.
+                    if self._use_ramp and not self._held:
                         if self._interval_due is None or started >= self._interval_due:
                             # the interval's poll: it sees output, polls again at once
                             self._interval_due = anyio.current_time()
@@ -486,7 +692,7 @@ class ExecRemoteProcess:
                             now = anyio.current_time()
                             if now + (now - started) >= self._interval_due:
                                 self._hold_until = self._interval_due
-                    if self._awaitable and result.state == "running":
+                    if self._awaitable and result.state == "running" and not self._held:
                         await self._wait_after_output(result)
                     return events[0]
 
@@ -494,9 +700,11 @@ class ExecRemoteProcess:
                 if self._killed:
                     raise StopAsyncIteration
 
-                # Still running with no output, wait before polling again
+                # Still running with no output: unless the server held the
+                # request, wait before polling again
                 self._small_output = False
-                await anyio.sleep(self._idle_wait(started))
+                if not self._held:
+                    await anyio.sleep(self._idle_wait(started))
 
         except anyio.get_cancelled_exc_class():
             # Kill the process on cancellation to avoid leaving orphaned processes.
@@ -560,6 +768,10 @@ class ExecRemoteProcess:
         self._small_output = not full
 
     async def _poll(self) -> _PollResult:
+        if self._initial_result is not None:
+            result, self._initial_result = self._initial_result, None
+            self._last_seq = result.seq
+            return result
         recovery_deadline: float | None = None
         retried_repoll_error: RuntimeError | None = None
 
@@ -593,11 +805,24 @@ class ExecRemoteProcess:
 
             sandbox_proxy = cast(SandboxEnvironmentProxy, self._transport.sandbox)
             with sandbox_proxy.no_events():
-                result = await self._rpc(
-                    "exec_remote_poll",
-                    {"pid": self._pid, "ack_seq": self._last_seq},
-                    _PollResult,
-                )
+                if self._request_id is not None:
+                    holding = time.monotonic() < self._wait_until
+                    reply = await self._rpc(
+                        "exec_remote_poll_wait",
+                        {
+                            "request_id": self._request_id,
+                            "ack_seq": self._last_seq,
+                            "wait_seconds": self._wait_seconds if holding else 0.0,
+                        },
+                        _WaitResult,
+                    )
+                    result = reply.result
+                else:
+                    result = await self._rpc(
+                        "exec_remote_poll",
+                        {"pid": self._pid, "ack_seq": self._last_seq},
+                        _PollResult,
+                    )
             self._last_seq = result.seq
             return result
 
@@ -725,16 +950,28 @@ class ExecRemoteProcess:
 
         If the process has already completed or been killed, this is a no-op.
         """
-        if self._pid is None or self._completed or self._killed:
+        if (
+            (self._pid is None and self._request_id is None)
+            or self._completed
+            or self._killed
+        ):
             return
 
         self._killed = True
         try:
-            result = await self._rpc(
-                "exec_remote_kill",
-                {"pid": self._pid, "ack_seq": self._last_seq},
-                _KillResult,
-            )
+            if self._request_id is not None:
+                result = await self._rpc(
+                    "exec_remote_kill_wait",
+                    {"request_id": self._request_id, "ack_seq": self._last_seq},
+                    _KillResult,
+                )
+                self._sandbox._exec_remote_acks += (self._request_id,)
+            else:
+                result = await self._rpc(
+                    "exec_remote_kill",
+                    {"pid": self._pid, "ack_seq": self._last_seq},
+                    _KillResult,
+                )
             self._last_seq = result.seq
             self._enqueue_output(result.stdout, result.stderr)
         except Exception:
@@ -790,6 +1027,7 @@ async def exec_remote_awaitable(
     """Run a command and return the result without streaming.
 
     Submits the command, polls until completion, and returns ExecResult.
+    With `server_wait`, the server holds requests until output is ready instead.
     If cancelled or timed out, the process will be killed.
 
     Each output stream (stdout and stderr) is limited to 10 MiB. If output
@@ -813,9 +1051,13 @@ async def exec_remote_awaitable(
     from .limits import SandboxEnvironmentLimits
 
     opts = options or ExecRemoteCommonOptions()
-    proc = await exec_remote_streaming(
-        sandbox, cmd, sandbox_default_poll_interval, opts
-    )
+    server_wait = isinstance(opts, ExecRemoteAwaitableOptions) and opts.server_wait
+    if server_wait:
+        proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
+    else:
+        proc = await exec_remote_streaming(
+            sandbox, cmd, sandbox_default_poll_interval, opts
+        )
     proc._awaitable = True
 
     # Accumulate output chunks with memory limiting
@@ -827,6 +1069,8 @@ async def exec_remote_awaitable(
 
     try:
         with anyio.fail_after(timeout):
+            if server_wait:
+                await proc._start(wait=True)
             async for event in proc:
                 if isinstance(event, ExecStdout):
                     stdout_buffer.write(event.data.encode("utf-8"))
@@ -843,12 +1087,13 @@ async def exec_remote_awaitable(
                             "utf-8", errors="replace"
                         ),
                     )
-    except TimeoutError:
-        # Kill the process (the cancellation handler in __anext__ already
-        # does this, but we call it explicitly in case the timeout fires
-        # between iterations rather than inside __anext__)
-        with anyio.CancelScope(shield=True):
-            await proc.kill()
+    except BaseException as ex:
+        if proc._request_id is not None or isinstance(
+            ex, (TimeoutError, anyio.get_cancelled_exc_class())
+        ):
+            # Cleanup also covers an ambiguous start whose recovery request failed.
+            with anyio.CancelScope(shield=True):
+                await proc.kill()
         raise
 
     # If we get here, the process was killed (no Completed event)

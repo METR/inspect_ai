@@ -2,21 +2,47 @@ import os
 
 from ..._util.json_rpc_helpers import validated_json_rpc_method
 from ._controller import Controller
+from ._wait_controller import WaitController
 from .tool_types import (
     CloseStdinParams,
     CloseStdinResult,
     KillParams,
     KillResult,
+    KillWaitParams,
     PollParams,
     PollResult,
+    PollWaitParams,
+    StartWaitParams,
     SubmitParams,
     SubmitResult,
+    WaitResult,
     WriteStdinParams,
     WriteStdinResult,
 )
 
 controller = Controller()
+wait_controller = WaitController()
 _can_switch_user = os.getuid() == 0
+
+
+@validated_json_rpc_method(StartWaitParams)
+async def exec_remote_start_wait(params: StartWaitParams) -> WaitResult:
+    """Start an awaitable command and include its first result."""
+    return await wait_controller.start(params, _can_switch_user)
+
+
+@validated_json_rpc_method(PollWaitParams)
+async def exec_remote_poll_wait(params: PollWaitParams) -> WaitResult:
+    """Wait for output or completion of an awaitable command."""
+    return await wait_controller.poll(
+        params.request_id, params.ack_seq, params.wait_seconds
+    )
+
+
+@validated_json_rpc_method(KillWaitParams)
+async def exec_remote_kill_wait(params: KillWaitParams) -> KillResult:
+    """Cancel an awaitable command by its client-generated identity."""
+    return await wait_controller.kill(params.request_id, params.ack_seq)
 
 
 @validated_json_rpc_method(SubmitParams)

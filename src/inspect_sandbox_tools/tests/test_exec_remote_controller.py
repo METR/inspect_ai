@@ -151,6 +151,46 @@ async def test_retired_job_shutdown_uses_only_its_captured_processes(
     )
 
 
+async def test_failed_initial_input_never_signals_a_reused_group_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader exited before reading its input, and its PID was reused."""
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+    # the identity check finds another process at the leader's PID
+    monkeypatch.setattr(job_module, "_leader_handle", lambda process: None)
+    controller = Controller()
+
+    with pytest.raises((BrokenPipeError, ConnectionResetError)):
+        await controller.submit("exit 0", input="x" * 1_000_000)
+
+    assert signalled == []
+    assert controller._jobs == {}
+
+
+async def test_failed_initial_input_kills_a_running_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command that closed its stdin and kept running is stopped, by group."""
+    jobs: list[Job] = []
+    signalled: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def record_killpg(pgid: int, sig: int) -> None:
+        signalled.append((pgid, sig))
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", record_killpg)
+
+    with pytest.raises((BrokenPipeError, ConnectionResetError)):
+        await Job.create(
+            "exec 0<&-; sleep 60", input="x" * 1_000_000, on_create=jobs.append
+        )
+
+    assert jobs[0]._process.returncode is not None
+    assert signalled == [(jobs[0].pid, signal.SIGTERM)]
+
+
 async def _stop_job(job: Job) -> None:
     if job._process.returncode is None:
         job._process.kill()

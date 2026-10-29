@@ -54,12 +54,16 @@ async def _cleanup_remote_resources(_app: Application) -> None:
     from inspect_sandbox_tools._remote_tools._exec_remote.json_rpc_methods import (
         controller as exec_remote_controller,
     )
+    from inspect_sandbox_tools._remote_tools._exec_remote.json_rpc_methods import (
+        wait_controller as exec_remote_wait_controller,
+    )
     from inspect_sandbox_tools._remote_tools._mcp.json_rpc_methods import (
         shutdown as shutdown_mcp_sessions,
     )
 
     cleanups = (
         ("exec_remote", exec_remote_controller.shutdown),
+        ("exec_remote_wait", exec_remote_wait_controller.shutdown),
         ("bash_session", bash_session_controller.shutdown),
         ("mcp", shutdown_mcp_sessions),
     )
