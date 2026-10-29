@@ -817,9 +817,9 @@ async def test_an_unsent_result_is_kept_while_its_poll_settles_the_readers(
     settling = anyio.Event()
     wait_for_readers = Job._wait_for_readers
 
-    async def signal_then_wait(job: Job) -> None:
+    async def signal_then_wait(job: Job, *, reply_full: bool = False) -> None:
         settling.set()
-        await wait_for_readers(job)
+        await wait_for_readers(job, reply_full=reply_full)
 
     monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
     go, release = tmp_path / "go", tmp_path / "release"
