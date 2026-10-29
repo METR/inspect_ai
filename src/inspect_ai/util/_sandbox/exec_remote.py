@@ -33,6 +33,7 @@ from inspect_ai._util._json_rpc import (
     exec_model_request,
 )
 from inspect_ai._util.cpu import effective_cpu_count
+from inspect_ai._util.logger import warn_once
 from inspect_ai.util._concurrency import (
     ConcurrencySemaphore,
     get_or_create_semaphore,
@@ -315,6 +316,9 @@ WAIT_WINDOW_SECONDS = 60.0
 """Use server-side waits for this long after start, then poll at the interval,
 so a long command does not hold a sandbox exec for its whole life."""
 
+MIN_WAIT_SECONDS = 1.0
+"""The shortest hold sent; a `poll_timeout` that leaves less polls without holds."""
+
 POLL_RAMP_SECONDS = (0.25, 0.5, 1.0, 2.0)
 """Waits after the first polls that find a command still running with no output
 (not used when the caller sets `poll_interval`). They add polls before the one
@@ -358,7 +362,18 @@ T = TypeVar("T", bound=BaseModel)
 
 def _wait_concurrency() -> int:
     """Held `server_wait` requests allowed in flight, sized like the Docker CLI limit."""
-    return int(os.environ.get(WAIT_CONCURRENCY_ENV, max(effective_cpu_count() * 2, 4)))
+    default = max(effective_cpu_count() * 2, 4)
+    value = os.environ.get(WAIT_CONCURRENCY_ENV)
+    if value is None:
+        return default
+    try:
+        return max(int(value), 0)
+    except ValueError:
+        warn_once(
+            logger,
+            f"{WAIT_CONCURRENCY_ENV}={value!r} is not an integer; using {default}.",
+        )
+        return default
 
 
 class ExecRemoteProcess:
@@ -447,7 +462,9 @@ class ExecRemoteProcess:
         )
         # A held request keeps at least three quarters of its RPC timeout for
         # the transport (exec startup, queueing, retries of a slow exec).
-        self._wait_seconds = min(MAX_WAIT_SECONDS, max(0.0, rpc_timeout / 4))
+        hold = min(MAX_WAIT_SECONDS, max(0.0, rpc_timeout / 4))
+        # A hold under MIN_WAIT_SECONDS would only make more requests: poll instead.
+        self._wait_seconds = hold if hold >= MIN_WAIT_SECONDS else 0.0
         self._transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
 
     @property
@@ -807,6 +824,9 @@ class ExecRemoteProcess:
             with sandbox_proxy.no_events():
                 if self._request_id is not None:
                     holding = time.monotonic() < self._wait_until
+                    if not holding:
+                        # past the wait window: poll on the interval, not the ramp
+                        self._poll_ramp = iter(())
                     reply = await self._rpc(
                         "exec_remote_poll_wait",
                         {
@@ -1052,7 +1072,11 @@ async def exec_remote_awaitable(
 
     # Awaitable defaults, so INSPECT_EXEC_REMOTE_SERVER_WAIT reaches a call without options.
     opts = options or ExecRemoteAwaitableOptions()
-    server_wait = isinstance(opts, ExecRemoteAwaitableOptions) and opts.server_wait
+    server_wait = (
+        opts.server_wait
+        if isinstance(opts, ExecRemoteAwaitableOptions)
+        else _server_wait_default()
+    )
     if server_wait:
         proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
     else:

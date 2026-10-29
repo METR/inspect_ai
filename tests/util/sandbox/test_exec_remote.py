@@ -1358,6 +1358,52 @@ class TestAwaitableWaitProtocol:
         assert result.stdout == "out"
         assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
 
+    async def test_a_short_poll_timeout_polls_without_holds(self) -> None:
+        """A quarter of a 2 s poll_timeout is under a second: holding it only adds requests."""
+        sandbox = _make_scripted_sandbox(
+            [_start_response(), _poll_response(stdout="done", seq=1)]
+        )
+        sandbox._exec_remote_wait_supported = None
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=2)
+
+        with patch.object(anyio, "sleep", AsyncMock()):
+            result = await exec_remote_awaitable(sandbox, ["cmd"], 5, options)
+
+        assert result.stdout == "done"
+        assert [method for method, _ in sandbox.requests] == [
+            "exec_remote_start",
+            "exec_remote_poll",
+        ]
+
+    async def test_server_wait_env_reaches_explicit_common_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(exec_remote_module.SERVER_WAIT_ENV, "1")
+        sandbox = _make_scripted_sandbox([_wait_response(stdout="out")])
+        sandbox._exec_remote_wait_supported = None
+
+        result = await exec_remote_awaitable(
+            sandbox, ["cmd"], 5, ExecRemoteCommonOptions()
+        )
+
+        assert result.stdout == "out"
+        assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
+
+    @pytest.mark.parametrize(
+        "value,expected", [("12", 12), ("-3", 0), ("lots", None), (None, None)]
+    )
+    def test_held_request_limit_falls_back_on_a_bad_value(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: int | None
+    ) -> None:
+        if value is None:
+            monkeypatch.delenv(exec_remote_module.WAIT_CONCURRENCY_ENV, raising=False)
+        else:
+            monkeypatch.setenv(exec_remote_module.WAIT_CONCURRENCY_ENV, value)
+        default = max(exec_remote_module.effective_cpu_count() * 2, 4)
+        assert exec_remote_module._wait_concurrency() == (
+            default if expected is None else expected
+        )
+
     async def test_server_wait_env_sets_the_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1442,10 +1488,8 @@ class TestAwaitableWaitProtocol:
             result = await exec_remote_awaitable(sandbox, ["cmd"], 5, _WAIT)
 
         assert result.stdout == "done"
-        # the held start is followed by a poll at once; unheld polls by the ramp
-        assert [call.args for call in sleep.await_args_list] == [
-            (exec_remote_module.POLL_RAMP_SECONDS[0],)
-        ]
+        # the held start is followed by a poll at once; past the window, by the interval
+        assert [call.args for call in sleep.await_args_list] == [(5,)]
         assert [params["wait_seconds"] for _, params in sandbox.requests] == [
             5.0,
             0.0,
