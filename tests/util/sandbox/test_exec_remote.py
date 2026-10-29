@@ -1346,6 +1346,18 @@ class TestAwaitableWaitProtocol:
 
         assert result.stdout == "abc"
 
+    async def test_server_wait_env_reaches_a_call_without_options(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(exec_remote_module.SERVER_WAIT_ENV, "1")
+        sandbox = _make_scripted_sandbox([_wait_response(stdout="out")])
+        sandbox._exec_remote_wait_supported = None
+
+        result = await exec_remote_awaitable(sandbox, ["cmd"], 5, None)
+
+        assert result.stdout == "out"
+        assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
+
     async def test_server_wait_env_sets_the_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

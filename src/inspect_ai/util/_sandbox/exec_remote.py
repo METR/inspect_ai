@@ -1050,7 +1050,8 @@ async def exec_remote_awaitable(
     from .._subprocess import ExecResult as ExecResultClass
     from .limits import SandboxEnvironmentLimits
 
-    opts = options or ExecRemoteCommonOptions()
+    # Awaitable defaults, so INSPECT_EXEC_REMOTE_SERVER_WAIT reaches a call without options.
+    opts = options or ExecRemoteAwaitableOptions()
     server_wait = isinstance(opts, ExecRemoteAwaitableOptions) and opts.server_wait
     if server_wait:
         proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
