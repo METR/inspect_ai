@@ -29,7 +29,6 @@ from typing import (
     cast,
     overload,
 )
-from urllib.parse import urlparse
 
 import anyio
 import anyio.to_thread
@@ -2613,11 +2612,26 @@ def s3_exists(s3: Any, bucket: str, key: str) -> bool:
         raise
 
 
+@functools.cache
+def _s3fs() -> Any:
+    """An s3fs filesystem, used only for its path rules (it makes no requests)."""
+    from s3fs import (  # type: ignore[import-untyped]  # s3fs ships no type stubs
+        S3FileSystem,
+    )
+
+    return S3FileSystem(skip_instance_cache=True)
+
+
 def s3_bucket_and_key(filename: str) -> tuple[str, str]:
-    parsed = urlparse(filename)
-    bucket = parsed.netloc
-    key = parsed.path.lstrip("/")
-    return bucket, key
+    """Split an ``s3://`` URL into bucket and key, as s3fs does.
+
+    Key characters are literal (``#`` and ``?`` included), an access point ARN
+    stays whole as the bucket, and a ``?versionId=`` suffix is dropped.
+    """
+    bucket, key, _ = _s3fs().split_path(filename)
+    # older s3fs releases drop a trailing slash
+    trail = filename[len(filename.rstrip("/")) :]
+    return bucket, key.rstrip("/") + trail if key else key
 
 
 def is_s3_filename(filename: str) -> bool:

@@ -1860,6 +1860,26 @@ async def test_s3_clients_apply_fsspec_s3_config(
 
 
 @pytest.mark.parametrize(
+    ("url", "bucket", "key"),
+    [
+        ("s3://bucket/logs/task.eval", "bucket", "logs/task.eval"),
+        ("s3://bucket/logs/task#one.eval", "bucket", "logs/task#one.eval"),
+        ("s3://bucket/logs/task?one.eval", "bucket", "logs/task?one.eval"),
+        ("s3://bucket/logs/task.eval?versionId=v1", "bucket", "logs/task.eval"),
+        (
+            "s3://arn:aws:s3:us-east-1:123456789012:accesspoint/my-ap/logs/task.eval",
+            "arn:aws:s3:us-east-1:123456789012:accesspoint/my-ap",
+            "logs/task.eval",
+        ),
+        ("s3://bucket/logs/", "bucket", "logs/"),
+        ("s3://bucket", "bucket", ""),
+    ],
+)
+def test_s3_bucket_and_key_splits_as_s3fs_does(url: str, bucket: str, key: str) -> None:
+    assert s3_bucket_and_key(url) == (bucket, key)
+
+
+@pytest.mark.parametrize(
     "head",
     [
         {"etag": "other-etag"},

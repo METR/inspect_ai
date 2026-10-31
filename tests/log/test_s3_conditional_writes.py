@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+import boto3
 import pytest
 from test_helpers.utils import skip_if_trio
 
@@ -156,6 +157,18 @@ def test_s3_conditional_write_success(sample_log, mock_s3, format):
     assert result.etag != log.etag
     assert new_log.eval.metadata is not None
     assert new_log.eval.metadata["test"] == f"{format}_format_conditional"
+
+
+def test_s3_eval_log_name_with_hash(sample_log, mock_s3):
+    """A "#" in the name is part of the key for writes, full reads and header rewrites."""
+    log_path = "s3://test-bucket/task#one.eval"
+    write_eval_log(sample_log, log_path)
+    log = read_eval_log(log_path)
+    log.eval.metadata = {"edited": True}
+    write_eval_log(log, log_path, header_only=True, if_match_etag=log.etag)
+    assert read_eval_log(log_path, header_only=True).eval.metadata == {"edited": True}
+    # the object is at the whole name, not at "task" (where "task#two.eval" goes too)
+    boto3.client("s3").head_object(Bucket="test-bucket", Key="task#one.eval")
 
 
 @pytest.mark.parametrize("format", ["json", "eval"])

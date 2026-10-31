@@ -203,7 +203,7 @@
   },
   "src/inspect_ai/_util/asyncfiles.py": {
     "type: ignore[import-untyped]": {
-      "count": 1
+      "count": 2
     }
   },
   "src/inspect_ai/_util/download.py": {
