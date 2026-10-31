@@ -1798,6 +1798,67 @@ async def test_s3_client_pool_fits_the_copy_limit() -> None:
         await client.__aexit__(None, None, None)
 
 
+async def test_s3_clients_apply_fsspec_s3_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Inspect's clients take fsspec's S3 configuration as s3fs does.
+
+    The store, credentials and request parameters apply; ``config_kwargs``
+    does not, as Inspect replaces it for s3fs too.
+    """
+    from botocore import UNSIGNED
+
+    monkeypatch.setitem(
+        fsspec.config.conf,
+        "s3",
+        {
+            "anon": True,
+            "endpoint_url": "http://127.0.0.1:9",
+            "client_kwargs": {"region_name": "eu-west-2"},
+            "requester_pays": True,
+            # HeadObject takes ExpectedBucketOwner but not ACL
+            "s3_additional_kwargs": {"ExpectedBucketOwner": "1111", "ACL": "private"},
+            # aiobotocore-only: boto3's Config would reject it
+            "config_kwargs": {"connector_args": {}},
+        },
+    )
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "unused")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "unused")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-creds"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+
+    class Sent(Exception):
+        pass
+
+    def stop(params: dict[str, Any], **kwargs: Any) -> None:
+        raise Sent(params)
+
+    async_client = await AsyncFilesystem._create_s3_client_async()
+    try:
+        sync_client = AsyncFilesystem._create_s3_client()
+        for client in (async_client, sync_client):
+            assert client.meta.endpoint_url == "http://127.0.0.1:9"
+            assert client.meta.region_name == "eu-west-2"
+            assert client.meta.config.signature_version is UNSIGNED
+            client.meta.events.register("before-parameter-build.s3.HeadObject", stop)
+        with pytest.raises(Sent) as sync_sent:
+            sync_client.head_object(Bucket="bucket", Key="key")
+        with pytest.raises(Sent) as async_sent:
+            await async_client.head_object(
+                Bucket="bucket", Key="key", ExpectedBucketOwner="2222"
+            )
+        assert sync_sent.value.args[0]["ExpectedBucketOwner"] == "1111"
+        assert async_sent.value.args[0]["ExpectedBucketOwner"] == "2222"
+        for sent in (sync_sent, async_sent):
+            assert sent.value.args[0]["RequestPayer"] == "requester"
+            assert "ACL" not in sent.value.args[0]
+    finally:
+        await async_client.__aexit__(None, None, None)
+
+
 @pytest.mark.parametrize(
     "head",
     [

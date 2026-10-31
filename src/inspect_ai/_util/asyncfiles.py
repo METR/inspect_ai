@@ -63,6 +63,7 @@ from inspect_ai._util.file import (
     FileSystem,
     file,
     filesystem,
+    fsspec_config,
     local_path,
     to_uri,
 )
@@ -2033,6 +2034,7 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
         from botocore import UNSIGNED
         from botocore.config import Config
 
+        options = _s3_client_options(anonymous, region_name)
         config = Config(
             max_pool_connections=50,
             retries={"max_attempts": max_attempts, "mode": "adaptive"},
@@ -2042,9 +2044,20 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
             # produces IncompleteBody from S3. See GH-3858.
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
-            **({"signature_version": UNSIGNED} if anonymous else {}),
+            **({"signature_version": UNSIGNED} if options.anonymous else {}),
         )
-        return boto3.client("s3", config=config, region_name=region_name)
+        create_client = (
+            boto3.session.Session(profile_name=options.profile).client
+            if options.profile
+            else boto3.client
+        )
+        client = create_client("s3", config=config, **options.client)
+        if options.params:
+            client.meta.events.register(
+                "provide-client-params.s3",
+                functools.partial(_add_params, options.params),
+            )
+        return client
 
     async def s3_client_async(self) -> Any:
         def expired() -> bool:
@@ -2149,10 +2162,13 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
         anonymous: bool = False, region_name: str | None = None, max_attempts: int = 10
     ) -> Any:
         from aiobotocore.config import AioConfig
-        from aiobotocore.session import get_session
+        from aiobotocore.session import AioSession, get_session
         from botocore import UNSIGNED
 
-        session = get_session()
+        options = _s3_client_options(anonymous, region_name)
+        session = (
+            AioSession(profile=options.profile) if options.profile else get_session()
+        )
         config = AioConfig(
             max_pool_connections=50,
             retries={"max_attempts": max_attempts, "mode": "adaptive"},
@@ -2162,11 +2178,79 @@ class AsyncFilesystem(AbstractAsyncContextManager["AsyncFilesystem"]):
             # produces IncompleteBody from S3. See GH-3858.
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
-            **({"signature_version": UNSIGNED} if anonymous else {}),
+            **({"signature_version": UNSIGNED} if options.anonymous else {}),
         )
-        return await session.create_client(
-            "s3", config=config, region_name=region_name
+        client = await session.create_client(
+            "s3", config=config, **options.client
         ).__aenter__()
+        if options.params:
+            client.meta.events.register(
+                "provide-client-params.s3",
+                functools.partial(_add_params, options.params),
+            )
+        return client
+
+
+class _S3ClientOptions(NamedTuple):
+    anonymous: bool
+    profile: str | None
+    client: dict[str, Any]
+    """``create_client`` arguments."""
+    params: dict[str, Any]
+    """Parameters for each operation that takes them."""
+
+
+def _s3_client_options(anonymous: bool, region_name: str | None) -> _S3ClientOptions:
+    """Arguments for Inspect's S3 clients from fsspec's S3 configuration.
+
+    s3fs applies fsspec's configuration (``FSSPEC_S3_*`` variables, fsspec
+    config files) to its client. Inspect's clients apply the same store,
+    credentials and request parameters (``anon``, ``endpoint_url``,
+    ``key``/``secret``/``token``, ``profile``, ``use_ssl``, ``client_kwargs``,
+    ``requester_pays``, ``s3_additional_kwargs``), for writes as well as reads,
+    so both reach the same objects. ``config_kwargs`` is not applied: Inspect
+    replaces it for s3fs too.
+    """
+    options = {**fsspec_config("s3"), **fsspec_config("s3a")}
+    client = dict(options.get("client_kwargs") or {})
+    for option, argument in (
+        ("endpoint_url", "endpoint_url"),
+        ("key", "aws_access_key_id"),
+        ("username", "aws_access_key_id"),
+        ("secret", "aws_secret_access_key"),
+        ("password", "aws_secret_access_key"),
+        ("token", "aws_session_token"),
+        ("use_ssl", "use_ssl"),
+    ):
+        if options.get(option) is not None:
+            client.setdefault(argument, options[option])
+    if region_name is not None:
+        client["region_name"] = region_name
+    anonymous = anonymous or bool(options.get("anon"))
+    if anonymous:
+        for argument in (
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "aws_session_token",
+        ):
+            client.pop(argument, None)
+    params = dict(options.get("s3_additional_kwargs") or {})
+    if options.get("requester_pays"):
+        params["RequestPayer"] = "requester"
+    return _S3ClientOptions(anonymous, options.get("profile"), client, params)
+
+
+def _add_params(
+    extra: dict[str, Any], params: dict[str, Any], model: Any, **kwargs: Any
+) -> None:
+    """Add ``extra`` to an S3 operation's parameters, as s3fs does.
+
+    Only parameters the operation takes are added, never over the call's own.
+    """
+    if model.input_shape is not None:
+        for name, value in extra.items():
+            if name in model.input_shape.members:
+                params.setdefault(name, value)
 
 
 async def _s3_info_async(client: Any, filename: str) -> FileInfo:

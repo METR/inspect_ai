@@ -575,6 +575,14 @@ def local_path(filename: str) -> str:
     return filename
 
 
+def fsspec_config(protocol: str) -> dict[str, Any]:
+    """Options fsspec's own configuration sets for ``protocol``.
+
+    They come from ``FSSPEC_*`` environment variables and fsspec config files.
+    """
+    return dict(fsspec.config.conf.get(protocol, {}))
+
+
 def default_fs_options(file: str) -> dict[str, Any]:
     scheme = urlparse(file).scheme
     if (
