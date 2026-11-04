@@ -48,6 +48,10 @@ class JSONRPCResponse(RootModel[JSONRPCSuccessResponse | JSONRPCErrorResponse]):
     pass
 
 
+class JSONRPCMethodNotFoundError(RuntimeError):
+    """The server rejected a request because the method is unavailable."""
+
+
 BaseModelT = TypeVar("BaseModelT", bound=BaseModel)
 ScalarT = TypeVar("ScalarT", str, int, float, bool, None)
 
@@ -333,7 +337,8 @@ def exception_for_rpc_response_error(
         #   shouldn't be seen in this flow since we're processing responses, and
         #   this is a request oriented error.
         #
-        return RuntimeError(
+        error_type = JSONRPCMethodNotFoundError if code == -32601 else RuntimeError
+        return error_type(
             f"Error executing tool command{f'  {rpc_call_description(method, params)}' if method and params else ''}: {code=} {message}"
         )
 
