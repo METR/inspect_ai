@@ -42,6 +42,9 @@ TCP_PORT_ENV = "INSPECT_SANDBOX_TOOLS_TCP_PORT"
 
 _DEFAULT_TIMEOUT = 120
 
+SERVER_MS_HEADER = "X-Sandbox-Tools-Ms"
+"""SPIKE: the server's processing time for the request, in milliseconds."""
+
 _session: aiohttp.ClientSession | None = None
 
 
@@ -97,6 +100,7 @@ class HttpJSONRPCTransport:
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as response:
                     status, text = response.status, await response.text()
+                    server_ms = response.headers.get(SERVER_MS_HEADER)
         except aiohttp.ClientConnectorError:
             # nothing reached the server, so the exec path can safely take it
             return await self._fallback(
@@ -112,29 +116,39 @@ class HttpJSONRPCTransport:
             raise RuntimeError(
                 f"sandbox-tools request {method} failed: HTTP {status} {text[:200]}"
             )
-        self._record_event(started, request, text)
+        self._record_event(started, request, text, server_ms)
         return text
 
-    def _record_event(self, started: datetime, request: str, response: str) -> None:
+    def _record_event(
+        self, started: datetime, request: str, response: str, server_ms: str | None
+    ) -> None:
         # Keep the transcript as the exec path writes it (one sandbox event for the
-        # requests exec_remote does not mark as polls), so logs and timing analyses
-        # stay comparable across transports.
-        if not getattr(self.sandbox, "_events", False):
+        # requests exec_remote does not mark as polls, output left out where the
+        # exec path leaves it out), so logs and timing analyses stay comparable.
+        from .events import SandboxEnvironmentProxy, _event_output_off, content_display
+
+        proxy = self.sandbox
+        if (
+            not isinstance(proxy, SandboxEnvironmentProxy)
+            or not proxy._events_enabled()
+        ):
             return
         from inspect_ai.event._sandbox import SandboxEvent
         from inspect_ai.log._transcript import transcript
-
-        from .events import content_display
 
         transcript()._event(
             SandboxEvent(
                 timestamp=started,
                 action="exec",
-                cmd=f"{SANDBOX_CLI} exec",
+                # SPIKE: the server's own time is in the command text too, because
+                # the warehouse keeps `cmd` but not `options`
+                cmd=f"{SANDBOX_CLI} exec [http server_ms={server_ms}]",
                 input=content_display(request),
-                options={"transport": "http"},
+                options={"transport": "http", "server_ms": server_ms},
                 result=0,
-                output=content_display(response),
+                output=None
+                if proxy in _event_output_off.get()
+                else content_display(response),
                 completed=datetime.now(timezone.utc),
             )
         )

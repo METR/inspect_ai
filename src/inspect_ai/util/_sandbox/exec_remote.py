@@ -328,6 +328,10 @@ so a long command does not hold a sandbox exec for its whole life."""
 MIN_WAIT_SECONDS = 1.0
 """The shortest hold sent; a `poll_timeout` that leaves less polls without holds."""
 
+NETWORK_MAX_WAIT_SECONDS = 25.0
+"""SPIKE: longest hold per request on the network transport (the server's own cap
+is 30 s), for the command's whole life rather than WAIT_WINDOW_SECONDS."""
+
 POLL_RAMP_SECONDS = (0.25, 0.5, 1.0, 2.0)
 """Waits after the first polls that find a command still running with no output
 (not used when the caller sets `poll_interval`). They add polls before the one
@@ -484,6 +488,12 @@ class ExecRemoteProcess:
             if tools_http is not None
             else exec_transport
         )
+        # SPIKE: over the network a held request is only an idle socket, so hold
+        # for the command's whole life, longer per request, and without the
+        # held-request cap (which exists because a held exec occupies a thread).
+        self._network = tools_http is not None
+        if self._network:
+            self._wait_seconds = min(NETWORK_MAX_WAIT_SECONDS, rpc_timeout / 4)
 
     @property
     def pid(self) -> int:
@@ -506,7 +516,7 @@ class ExecRemoteProcess:
         """Make an RPC call to the sandbox."""
         held = bool(params.get("wait_seconds"))
         slot: ConcurrencySemaphore | None = None
-        if held:
+        if held and not self._network:
             slot = await get_or_create_semaphore(
                 "exec-remote-wait", _wait_concurrency(), None, False
             )
@@ -648,7 +658,9 @@ class ExecRemoteProcess:
         self._sandbox._exec_remote_wait_supported = True
         self._pid = result.pid
         self._initial_result = result.result
-        self._wait_until = time.monotonic() + WAIT_WINDOW_SECONDS
+        self._wait_until = (
+            float("inf") if self._network else time.monotonic() + WAIT_WINDOW_SECONDS
+        )
 
     # -------------------------------------------------------------------------
     # Async Iterator Protocol
@@ -1106,6 +1118,9 @@ async def exec_remote_awaitable(
     if server_wait is None:
         # read per call: the variable can be set after the options were built
         server_wait = _server_wait_default()
+    server_wait = (
+        server_wait or sandbox._tools_http is not None
+    )  # SPIKE: always hold over the network
     if server_wait:
         proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
     else:

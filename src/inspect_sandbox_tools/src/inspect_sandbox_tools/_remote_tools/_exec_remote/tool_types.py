@@ -32,7 +32,9 @@ class PollParams(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-MAX_WAIT_SECONDS = 5.0
+# SPIKE: 30 s (was 5 s) so the network transport can hold a request much longer;
+# hosts on the exec transport still ask for at most 5 s.
+MAX_WAIT_SECONDS = 30.0
 
 # Longer waits are clamped, not rejected, so hosts need not know the server's limit.
 # The wait RPCs ignore unknown fields, so a newer host can add optional ones; a
