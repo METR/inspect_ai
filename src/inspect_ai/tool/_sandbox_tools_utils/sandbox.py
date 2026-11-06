@@ -1,5 +1,6 @@
 import gzip
 import os
+import secrets
 import stat
 import subprocess
 import sys
@@ -269,6 +270,38 @@ async def _tools_installed_as(sandbox: SandboxEnvironment, user: str | None) -> 
     return st_mode is not None and stat.S_ISREG(st_mode)
 
 
+async def _tools_tcp_listener(
+    sandbox: SandboxEnvironment,
+) -> tuple[dict[str, str], tuple[str, str] | None]:
+    """SPIKE: env that starts the server's TCP listener, and the (url, token) to use.
+
+    Off unless the host sets `INSPECT_SANDBOX_TOOLS_TCP_PORT` and the provider
+    reports an address for the sandbox. A restart keeps the sandbox's token.
+    """
+    from inspect_ai.util._sandbox._http_json_rpc_transport import (
+        TCP_PORT_ENV,
+        tools_tcp_port,
+    )
+
+    port = tools_tcp_port()
+    host = await sandbox.tools_network_host() if port is not None else None
+    if port is None or not host:
+        return {}, None
+    token = sandbox._tools_http[1] if sandbox._tools_http else secrets.token_urlsafe(32)
+    env = {TCP_PORT_ENV: str(port), "INSPECT_SANDBOX_TOOLS_TCP_TOKEN": token}
+    return env, (f"http://{host}:{port}/", token)
+
+
+def _without_events(sandbox: SandboxEnvironment) -> AbstractContextManager[None]:
+    from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
+    return (
+        sandbox.no_events()
+        if isinstance(sandbox, SandboxEnvironmentProxy)
+        else nullcontext()
+    )
+
+
 async def _inject_container_tools_code(sandbox: SandboxEnvironment) -> None:
     try:
         user = await _tools_user_for(sandbox)
@@ -306,9 +339,15 @@ async def _inject_container_tools_code(sandbox: SandboxEnvironment) -> None:
 
         # As root the server can setuid to any user for exec_remote; as the
         # default user, user-switching is disabled (auto-detected by the server).
-        result = await sandbox.exec([SANDBOX_CLI, "start-server"], user=user)
+        tcp_env, tools_http = await _tools_tcp_listener(sandbox)
+        # SPIKE: the exec event would log `env`, and with it the token
+        with _without_events(sandbox) if tcp_env else nullcontext():
+            result = await sandbox.exec(
+                [SANDBOX_CLI, "start-server"], user=user, env=tcp_env or None
+            )
         if not result.success:
             raise RuntimeError(f"Failed to start sandbox tools server: {result.stderr}")
+        sandbox._tools_http = tools_http
     except SandboxInjectionError:
         raise
     except Exception as e:

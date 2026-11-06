@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import asyncio
+import hmac
 import json
 import os
 import signal
 import socket
 import sys
+from typing import Awaitable, Callable
 
-from aiohttp.web import Application, Request, Response, run_app
+from aiohttp.web import Application, Request, Response, middleware, run_app
 from jsonrpcserver import Success, async_dispatch, method
 
 from inspect_sandbox_tools._util.constants import (
@@ -22,6 +24,40 @@ from inspect_sandbox_tools._util.server_dir import (
     read_private_text,
     write_private_text,
 )
+
+# SPIKE: an optional TCP listener next to the Unix socket, so the host can reach the
+# server over the pod network instead of through one `exec` per request. Both are
+# read and removed from the environment at startup so that commands the server
+# spawns (exec_remote, bash_session, MCP) never inherit the token.
+TCP_PORT_ENV = "INSPECT_SANDBOX_TOOLS_TCP_PORT"
+TCP_TOKEN_ENV = "INSPECT_SANDBOX_TOOLS_TCP_TOKEN"
+
+
+def _tcp_auth(
+    token: str,
+) -> Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]:
+    """Require `Authorization: Bearer <token>` on requests that arrive over TCP.
+
+    The Unix socket stays unauthenticated: its 0700 directory already limits it to
+    the server's own user, which is the only principal that could present a token.
+    """
+    expected = f"Bearer {token}".encode()
+
+    @middleware
+    async def auth(
+        request: Request, handler: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        transport = request.transport
+        sockname = transport.get_extra_info("sockname") if transport else None
+        # fail closed: only the Unix socket (a path string) skips the token check
+        if not isinstance(sockname, str) and not hmac.compare_digest(
+            request.headers.get("Authorization", "").encode(), expected
+        ):
+            return Response(status=401, text="unauthorized")
+        return await handler(request)
+
+    return auth
+
 
 _shutdown_errors: list[str] = []
 _shutdown_complete = False
@@ -97,6 +133,8 @@ def main() -> None:
     # The server directory is already resolved at import time. Do not expose the
     # internal location to user commands spawned by remote tools.
     os.environ.pop(SERVER_DIR_ENV, None)
+    tcp_port = os.environ.pop(TCP_PORT_ENV, None)
+    tcp_token = os.environ.pop(TCP_TOKEN_ENV, None)
     load_tools("inspect_sandbox_tools._remote_tools")
 
     ensure_private_server_dir(SERVER_DIR)
@@ -113,7 +151,7 @@ def main() -> None:
             content_type="application/json",
         )
 
-    app = Application()
+    app = Application(middlewares=[_tcp_auth(tcp_token)] if tcp_token else [])
     app.router.add_post("/", handle_request)
     app.on_cleanup.append(_cleanup_remote_resources)
 
@@ -134,8 +172,13 @@ def main() -> None:
     finally:
         os.umask(old_umask)
 
+    socks = [sock]
+    if tcp_port and tcp_token:
+        # every request on this socket must carry the token (see _tcp_auth)
+        socks.append(socket.create_server(("0.0.0.0", int(tcp_port)), backlog=1024))
+
     try:
-        run_app(app, sock=sock, shutdown_timeout=_HTTP_SHUTDOWN_TIMEOUT)
+        run_app(app, sock=socks, shutdown_timeout=_HTTP_SHUTDOWN_TIMEOUT)
     finally:
         SOCKET_PATH.unlink(missing_ok=True)
         # Publish completion before removing the PID file so stop-server cannot

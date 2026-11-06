@@ -219,6 +219,10 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
     def default_polling_interval(self) -> float:
         return self._sandbox.default_polling_interval()
 
+    @override
+    async def tools_network_host(self) -> str | None:
+        return await self._sandbox.tools_network_host()
+
     @contextlib.contextmanager
     def no_events(self) -> Iterator[None]:
         self._events = False
