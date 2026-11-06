@@ -128,6 +128,7 @@ class OpenAIAPI(ModelAPI):
         client_timeout: float | None = None,
         background: bool | None = None,
         streaming: bool | Literal["auto"] = "auto",
+        explicit_prompt_cache: bool | None = None,
         **model_args: Any,
     ) -> None:
         # record streaming preference (unset/"auto" streams when the caller
@@ -141,6 +142,20 @@ class OpenAIAPI(ModelAPI):
             self.service: str | None = parts[0]
         else:
             self.service = None
+
+        if explicit_prompt_cache is not None and not isinstance(
+            explicit_prompt_cache, bool
+        ):
+            raise ValueError("explicit_prompt_cache must be a bool")
+        # True opts a custom base URL in to explicit prompt caching. Azure and
+        # Bedrock implement the API themselves and their support is unverified,
+        # so True is rejected for them rather than ignored.
+        if explicit_prompt_cache and (self.is_azure() or self.is_bedrock()):
+            raise ValueError(
+                f"explicit_prompt_cache=True is not supported for {self.service} "
+                "models: explicit prompt caching is unverified on that service."
+            )
+        self.explicit_prompt_cache = explicit_prompt_cache
 
         # extract prompt_cache_key model arg if provided
         self.prompt_cache_key: str | NotGiven = model_args.pop(
@@ -589,11 +604,16 @@ class OpenAIAPI(ModelAPI):
         # direct OpenAI endpoint; Azure, Bedrock, and any custom base URL
         # (explicit base_url, OPENAI_BASE_URL, or INSPECT_EVAL_MODEL_BASE_URL)
         # are unverified — a resolved base_url means the request is going
-        # somewhere other than api.openai.com
+        # somewhere other than api.openai.com. The explicit_prompt_cache model
+        # arg opts a custom base URL in (True) or disables the feature (False)
         supports_explicit_prompt_cache = (
             not self.is_azure()
             and not self.is_bedrock()
-            and model_base_url(self.base_url, "OPENAI_BASE_URL") is None
+            and self.explicit_prompt_cache is not False
+            and (
+                self.explicit_prompt_cache is True
+                or model_base_url(self.base_url, "OPENAI_BASE_URL") is None
+            )
         )
 
         async def generate_once(
