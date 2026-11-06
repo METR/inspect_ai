@@ -332,6 +332,10 @@ class ModelRetry:
     """The type name of the exception that triggered the retry (e.g. "RateLimitError"), if known."""
     status_code: int | None = None
     """The HTTP status code of the failure that triggered the retry (e.g. 429 or 503), if any."""
+    qualified_model_name: str | None = None
+    """The full model name including the provider (e.g. "openai/gpt-4o"), the form
+    `ModelUsageData.model_name` and `ModelEvent.model` use, if known. `model_name`
+    is the provider's own name for the model, without the provider prefix."""
 
 
 @dataclass(frozen=True)
@@ -1078,6 +1082,7 @@ async def emit_model_retry(
     wait_time: float,
     exception_type: str | None = None,
     status_code: int | None = None,
+    qualified_model_name: str | None = None,
 ) -> None:
     # Read eval context from the active sample contextvar (if available).
     active = sample_active()
@@ -1104,6 +1109,7 @@ async def emit_model_retry(
         task_name=task_name,
         exception_type=exception_type,
         status_code=status_code,
+        qualified_model_name=qualified_model_name,
     )
     await _emit_to_all(lambda hook: hook.on_model_retry(data))
 
