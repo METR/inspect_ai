@@ -16,11 +16,17 @@ command twice.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-import httpx
+# SPIKE: aiohttp, not httpx. One httpx pool serving hundreds of sandboxes spent a
+# quarter of the runner's GIL time in httpcore's per-request scan of every pooled
+# connection (`_assign_requests_to_connections`); aiohttp keys its pool by host and
+# parses HTTP in C. aiohttp is not a declared inspect_ai dependency (Hawk's runner
+# has it through s3fs).
+import aiohttp
 
 from inspect_ai._util._json_rpc import JSONRPCParamsType, create_json_rpc_request
 from inspect_ai._util.working import sandbox_exec_work
@@ -36,7 +42,7 @@ TCP_PORT_ENV = "INSPECT_SANDBOX_TOOLS_TCP_PORT"
 
 _DEFAULT_TIMEOUT = 120
 
-_client: httpx.AsyncClient | None = None
+_session: aiohttp.ClientSession | None = None
 
 
 def tools_tcp_port() -> int | None:
@@ -44,16 +50,14 @@ def tools_tcp_port() -> int | None:
     return int(port) if port else None
 
 
-def _http_client() -> httpx.AsyncClient:
-    # One pool for every sandbox in the process: each sandbox keeps its own
-    # connections alive, so the pool must not cap them at httpx's default of 100.
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=None, max_keepalive_connections=4096),
-            timeout=_DEFAULT_TIMEOUT,
-        )
-    return _client
+def _http_session() -> aiohttp.ClientSession:
+    # One session for every sandbox in the process (created on first use, inside
+    # the event loop); limit=0 so the connector never queues a request behind
+    # another sandbox's.
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0))
+    return _session
 
 
 class HttpJSONRPCTransport:
@@ -86,27 +90,30 @@ class HttpJSONRPCTransport:
         started = datetime.now(timezone.utc)
         try:
             with sandbox_exec_work():
-                response = await _http_client().post(
-                    self._url, content=request, headers=self._headers, timeout=timeout
-                )
-        except httpx.ConnectError:
+                async with _http_session().post(
+                    self._url,
+                    data=request,
+                    headers=self._headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as response:
+                    status, text = response.status, await response.text()
+        except aiohttp.ClientConnectorError:
             # nothing reached the server, so the exec path can safely take it
             return await self._fallback(
                 method, params, is_notification, **transport_extra_args
             )
-        except httpx.TimeoutException as ex:
+        except asyncio.TimeoutError as ex:
             raise TimeoutError(
                 f"sandbox-tools request {method} timed out after {timeout}s"
             ) from ex
-        except httpx.HTTPError as ex:
+        except aiohttp.ClientError as ex:
             raise RuntimeError(f"sandbox-tools request {method} failed: {ex}") from ex
-        if response.status_code != 200:
+        if status != 200:
             raise RuntimeError(
-                f"sandbox-tools request {method} failed: HTTP {response.status_code} "
-                f"{response.text[:200]}"
+                f"sandbox-tools request {method} failed: HTTP {status} {text[:200]}"
             )
-        self._record_event(started, request, response.text)
-        return response.text
+        self._record_event(started, request, text)
+        return text
 
     def _record_event(self, started: datetime, request: str, response: str) -> None:
         # Keep the transcript as the exec path writes it (one sandbox event for the
