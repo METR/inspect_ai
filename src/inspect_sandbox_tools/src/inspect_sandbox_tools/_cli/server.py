@@ -6,6 +6,7 @@ import os
 import signal
 import socket
 import sys
+import time
 from typing import Awaitable, Callable
 
 from aiohttp.web import Application, Request, Response, middleware, run_app
@@ -32,6 +33,7 @@ from inspect_sandbox_tools._util.server_dir import (
 # spawns (exec_remote, bash_session, MCP) never inherit the token.
 TCP_PORT_ENV = "INSPECT_SANDBOX_TOOLS_TCP_PORT"
 TCP_TOKEN_ENV = "INSPECT_SANDBOX_TOOLS_TCP_TOKEN"
+SERVER_MS_HEADER = "X-Sandbox-Tools-Ms"
 
 
 def _tcp_auth(
@@ -55,7 +57,14 @@ def _tcp_auth(
             request.headers.get("Authorization", "").encode(), expected
         ):
             return Response(status=401, text="unauthorized")
-        return await handler(request)
+        # SPIKE: report the server's own time per request (a held request includes
+        # its hold), so the host can split latency into server and runner parts.
+        started = time.monotonic()
+        response = await handler(request)
+        response.headers[SERVER_MS_HEADER] = (
+            f"{(time.monotonic() - started) * 1000:.1f}"
+        )
+        return response
 
     return auth
 
