@@ -44,6 +44,7 @@ The `openai` provider supports the following custom model args (other model args
 | `streaming` | Whether to use streaming responses. The default ("auto") streams when the caller passes an `on_stream` callback to `generate()` — except Azure chat-completions requests, which never auto-stream (accumulated streamed responses would lose content-filter stop details); pass `true` or `false` to override. If the server rejects the streaming request itself (a 400 naming the `stream` param — e.g. reasoning models on organizations that haven't completed verification), auto mode retries the request non-streamed. |
 | `prompt_cache_key` | Used by OpenAI to cache responses for similar requests. |
 | `prompt_cache_retention` | Retention policy for the prompt cache. |
+| `explicit_prompt_cache` | Send explicit prompt-cache fields for `ContentText(cache_breakpoint=True)` marks even when a base URL is configured. By default they are sent only to the direct OpenAI endpoint. Set `true` if your base URL forwards them to OpenAI, or `false` to never send them. `true` is not supported for Azure or Bedrock models. See [Provider Caching](caching.qmd#sec-provider-caching). |
 | `http_client` | Custom instance of `httpx2.AsyncClient` (or legacy `httpx.AsyncClient`) for handling requests. |
 
 : {tbl-colwidths=\[35,65\]}
