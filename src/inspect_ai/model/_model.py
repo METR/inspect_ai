@@ -2952,6 +2952,7 @@ async def log_model_retry(
         wait_time=retry_state.upcoming_sleep,
         exception_type=exception_type,
         status_code=status_code,
+        qualified_model_name=qualified_model_name,
     )
 
 
