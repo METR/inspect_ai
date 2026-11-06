@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import pytest
+from test_helpers.openai_request import sent_request
 
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._model_call import ModelCall
@@ -765,7 +766,7 @@ async def test_openrouter_responses_api_does_not_send_explicit_cache_fields(
         config=GenerateConfig(),
     )
 
-    request = dict(mock_create.call_args.kwargs)
+    request = sent_request(mock_create.call_args.kwargs)
     assert "prompt_cache_options" not in request
     for item in request["input"]:
         content = item.get("content")
