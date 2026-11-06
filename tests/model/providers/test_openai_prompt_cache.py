@@ -1015,12 +1015,14 @@ async def test_base_url_without_explicit_prompt_cache_sends_no_explicit_fields(
 @pytest.mark.parametrize(
     "use_responses", [False, True], ids=["completions", "responses"]
 )
+# gpt-5.5 predates explicit prompt caching; glm-5.3 is a non-OpenAI model
+# served behind an OpenAI-compatible base URL, with no gpt version at all
+@pytest.mark.parametrize("model_name", ["gpt-5.5", "glm-5.3"])
 async def test_explicit_prompt_cache_true_keeps_model_eligibility(
-    use_responses: bool,
+    use_responses: bool, model_name: str
 ) -> None:
-    # gpt-5.5 predates explicit prompt caching, so the arg can't enable it
     sent = await _generate_and_capture_request(
-        "gpt-5.5",
+        model_name,
         responses_api=use_responses,
         base_url=_GATEWAY_URL,
         explicit_prompt_cache=True,
