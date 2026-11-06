@@ -41,6 +41,7 @@ from inspect_ai.util._concurrency import (
 )
 
 from ._cli import SANDBOX_CLI, tools_user_param
+from ._http_json_rpc_transport import HttpJSONRPCTransport
 from ._json_rpc_transport import SandboxJSONRPCTransport
 
 if TYPE_CHECKING:
@@ -475,7 +476,14 @@ class ExecRemoteProcess:
         hold = min(MAX_WAIT_SECONDS, max(0.0, rpc_timeout / 4))
         # A hold under MIN_WAIT_SECONDS would only make more requests: poll instead.
         self._wait_seconds = hold if hold >= MIN_WAIT_SECONDS else 0.0
-        self._transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+        exec_transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+        # SPIKE: prefer the tools server's TCP listener when injection set one up
+        tools_http = sandbox._tools_http
+        self._transport: SandboxJSONRPCTransport | HttpJSONRPCTransport = (
+            HttpJSONRPCTransport(sandbox, *tools_http, fallback=exec_transport)
+            if tools_http is not None
+            else exec_transport
+        )
 
     @property
     def pid(self) -> int:

@@ -191,6 +191,11 @@ class SandboxEnvironment(abc.ABC):
     _exec_remote_wait_supported: bool | None = None
     _exec_remote_acks: tuple[str, ...] = ()
 
+    # SPIKE: (url, token) of the tools server's TCP listener, set at injection when
+    # the provider offers `tools_network_host()`. Class-level for the same reason
+    # as `_root_access`.
+    _tools_http: tuple[str, str] | None = None
+
     def __init__(self) -> None:
         self._inject_lock = anyio.Lock()
         self._tools_injected: bool = False
@@ -474,6 +479,17 @@ class SandboxEnvironment(abc.ABC):
     def default_polling_interval(self) -> float:
         """Polling interval for sandbox service requests."""
         return 2
+
+    async def tools_network_host(self) -> str | None:
+        """Address at which the host can reach this sandbox's tools server directly.
+
+        SPIKE. When a provider returns an address (and the host sets
+        `INSPECT_SANDBOX_TOOLS_TCP_PORT`), the sandbox-tools server also listens on
+        that port behind a per-sandbox bearer token, and `exec_remote` sends its
+        JSON-RPC requests there instead of through one `exec` per request.
+        `None` (the default) keeps everything on `exec`.
+        """
+        return None
 
     @classmethod
     def default_concurrency(cls) -> int | None:

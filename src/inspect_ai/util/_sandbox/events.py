@@ -230,6 +230,10 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
     def _events_enabled(self) -> bool:
         return self not in _no_events_proxies.get()
 
+    @override
+    async def tools_network_host(self) -> str | None:
+        return await self._sandbox.tools_network_host()
+
     @contextlib.contextmanager
     def no_events(self) -> Iterator[None]:
         """Record no events for calls made inside the block.
