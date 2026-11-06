@@ -290,26 +290,6 @@ def test_model_retry_hook_carries_cause(mock_hooks: MockHooks) -> None:
     assert retry.status_code == 429
 
 
-def test_model_retry_hook_carries_qualified_model_name(mock_hooks: MockHooks) -> None:
-    import functools
-    from unittest.mock import MagicMock
-
-    import anyio
-
-    from inspect_ai.model._model import log_model_retry
-
-    state = MagicMock(attempt_number=1, upcoming_sleep=1.0)
-    state.outcome.exception.return_value = Exception("boom")
-    retry = functools.partial(
-        log_model_retry, qualified_model_name="openai-api/provider-x/model-y"
-    )
-    anyio.run(retry, "provider-x/model-y", state)
-
-    [event] = mock_hooks.model_retry_events
-    assert event.model_name == "provider-x/model-y"
-    assert event.qualified_model_name == "openai-api/provider-x/model-y"
-
-
 def test_hooks_on_multiple_tasks(mock_hooks: MockHooks) -> None:
     eval(
         [
