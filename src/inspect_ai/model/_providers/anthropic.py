@@ -43,7 +43,6 @@ from anthropic.types import (
     CitationsConfigParam,
     CodeExecutionToolResultBlock,
     CodeExecutionToolResultBlockParam,
-    Container,
     ContentBlock,
     ContentBlockParam,
     ContentBlockSourceParam,
@@ -5421,9 +5420,6 @@ async def _capture_compaction_from_stream(
     streaming events, captures any compaction_delta content, and returns the
     final message with the compaction content properly set.
 
-    It also captures the code execution `container` from the message_delta
-    event, which the SDK likewise drops (see the WORKAROUND comment below).
-
     It accumulates raw events with the SDK's own accumulator because
     `messages.stream()` also builds an unused wrapper object per delta, which
     roughly doubles the stream's CPU cost.
@@ -5437,7 +5433,6 @@ async def _capture_compaction_from_stream(
         is the raw content captured from compaction_delta events (or None).
     """
     compaction_content: str | None = None
-    container: Container | None = None
     # tool_use blocks by content index, so input_json_delta fragments can be
     # attributed to their call id / function when reported as stream deltas
     tool_blocks: dict[int, Any] = {}
@@ -5448,18 +5443,11 @@ async def _capture_compaction_from_stream(
 
     # Iterate through all streaming events to capture compaction_delta content
     async for event in stream:
-        snapshot = accumulate_event(
-            event=event, current_snapshot=snapshot, json_bufs=json_bufs
-        )
-        # WORKAROUND for an Anthropic python SDK bug: the non-beta stream
-        # accumulator drops `message_delta.container`, so the final snapshot
-        # always reports container=None even though the wire delivered the id
-        # (breaking code execution container continuations). Capture it from
-        # the raw event and patch the snapshot below. Remove this (and the
-        # patch below) once the upstream fix lands:
-        # https://github.com/anthropics/anthropic-sdk-python/pull/1776
-        if event.type == "message_delta":
-            container = getattr(event.delta, "container", None) or container
+        # as messages.stream() does: events before message_start aren't accumulated
+        if snapshot is not None or event.type == "message_start":
+            snapshot = accumulate_event(
+                event=event, current_snapshot=snapshot, json_bufs=json_bufs
+            )
         if (
             hasattr(event, "delta")
             and getattr(event.delta, "type", None) == "compaction_delta"
@@ -5512,9 +5500,6 @@ async def _capture_compaction_from_stream(
     if snapshot is None:
         raise RuntimeError("Anthropic stream ended before message_start")
     message = snapshot
-    # WORKAROUND (see above): patch the container the SDK snapshot dropped
-    if message.container is None and container is not None:
-        message.container = container
 
     # Fix up compaction blocks with captured content
     if compaction_content is not None:

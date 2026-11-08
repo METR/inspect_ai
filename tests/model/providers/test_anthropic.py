@@ -3199,13 +3199,7 @@ def _raw_stream(*events: dict[str, Any]) -> Any:
 
 
 async def test_anthropic_stream_capture_restores_container() -> None:
-    """The container must survive streaming despite the SDK dropping it.
-
-    The SDK's non-beta stream accumulator drops `message_delta.container`, so
-    the final snapshot reports `container=None` even though the wire carried
-    the id (anthropics/anthropic-sdk-python#1776). Inspect's stream capture
-    must restore it from the raw message_delta event.
-    """
+    """The container id from message_delta survives streaming."""
     from datetime import datetime, timezone
 
     from anthropic._models import construct_type
@@ -3215,7 +3209,6 @@ async def test_anthropic_stream_capture_restores_container() -> None:
         _capture_compaction_from_stream,
     )
 
-    # snapshot as the SDK produces it today: container missing
     snapshot = cast(
         Message,
         construct_type(
@@ -3251,6 +3244,50 @@ async def test_anthropic_stream_capture_restores_container() -> None:
     )
     assert message.container is not None
     assert message.container.id == "container_from_delta"
+
+
+async def test_anthropic_stream_capture_skips_events_before_message_start() -> None:
+    """An event before message_start is passed over, as messages.stream() did."""
+    from inspect_ai.model._providers.anthropic import (
+        _capture_compaction_from_stream,
+    )
+
+    message, _ = await _capture_compaction_from_stream(
+        _raw_stream(
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_x",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-haiku-5-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 0},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "ok"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 1},
+            },
+            {"type": "message_stop"},
+        )
+    )
+    assert message.content[0].type == "text"
+    assert message.content[0].text == "ok"
 
 
 async def test_anthropic_stream_capture_tolerates_compaction_delta() -> None:
