@@ -417,7 +417,9 @@ class TestPollDeliversOutputAfterLeaderExits:
         assert elapsed < 1.5
 
     @pytest.mark.asyncio
-    async def test_cancelling_poll_waiting_for_readers_raises_in_caller(self) -> None:
+    async def test_cancelling_poll_waiting_for_readers_raises_in_caller(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         controller = Controller()
         pid = await controller.submit(
             "(while true; do printf x; sleep 0.01; done) & printf early"
@@ -428,8 +430,9 @@ class TestPollDeliversOutputAfterLeaderExits:
                 while job._process.returncode is None:
                     await anyio.sleep(0.01)
 
+            waiting = _signal_waits_for_readers(monkeypatch)
             task = asyncio.create_task(controller.poll(pid, ack_seq=0))
-            await anyio.sleep(0.1)
+            await waiting.wait()
             assert not task.done()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -439,7 +442,7 @@ class TestPollDeliversOutputAfterLeaderExits:
 
     @pytest.mark.asyncio
     async def test_output_survives_a_poll_cancelled_while_waiting(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A poll cancelled while draining the readers must not lose output.
 
@@ -460,8 +463,9 @@ class TestPollDeliversOutputAfterLeaderExits:
                 while job._process.returncode is None:
                     await anyio.sleep(0.01)
 
+            waiting = _signal_waits_for_readers(monkeypatch)
             task = asyncio.create_task(controller.poll(pid, ack_seq=0))
-            await anyio.sleep(0.1)
+            await waiting.wait()
             assert not task.done()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -474,6 +478,19 @@ class TestPollDeliversOutputAfterLeaderExits:
             assert result.exit_code == 0
         finally:
             _kill_group(pid)
+
+
+def _signal_waits_for_readers(monkeypatch: pytest.MonkeyPatch) -> anyio.Event:
+    """Return an event set as a poll starts waiting for a job's readers."""
+    waiting = anyio.Event()
+    wait_for_readers = Job._wait_for_readers
+
+    async def signal_then_wait(job: Job, *, reply_full: bool = False) -> None:
+        waiting.set()
+        await wait_for_readers(job, reply_full=reply_full)
+
+    monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
+    return waiting
 
 
 def _kill_group(pid: int) -> None:

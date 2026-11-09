@@ -41,6 +41,19 @@ def _params(command: str, **kwargs: Any) -> StartWaitParams:
     )
 
 
+def _signal_waits_for_update(monkeypatch: pytest.MonkeyPatch) -> anyio.Event:
+    """Return an event set as a request starts waiting on its job."""
+    waiting = anyio.Event()
+    wait_for_update = Job.wait_for_update
+
+    async def signal_then_wait(job: Job, seconds: float) -> None:
+        waiting.set()
+        await wait_for_update(job, seconds)
+
+    monkeypatch.setattr(Job, "wait_for_update", signal_then_wait)
+    return waiting
+
+
 @pytest.fixture
 async def controller() -> AsyncIterator[WaitController]:
     value = WaitController()
@@ -259,19 +272,30 @@ async def test_poll_wait_coalesces_output_until_the_deadline(
 
 
 async def test_poll_wait_returns_once_a_reply_is_full(
-    controller: WaitController, monkeypatch: pytest.MonkeyPatch
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 8)
+    gate = tmp_path / "gate"
     params = _params(
-        _python("import time; print('x' * 16, flush=True); time.sleep(60)")
+        f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.01; done; "
+        f"printf {'x' * 16}; sleep 60"
     )
     params.wait_seconds = 0.0
     first = await controller.start(params)
-    with anyio.fail_after(2):
-        reply = await controller.poll(params.request_id, first.result.seq, 5.0)
+    waiting = _signal_waits_for_update(monkeypatch)
+    replies: list[WaitResult] = []
 
-    assert reply.result.state == "running"
-    assert first.result.stdout + reply.result.stdout == "x" * 8
+    async def poll() -> None:
+        replies.append(await controller.poll(params.request_id, first.result.seq, 5.0))
+
+    with anyio.fail_after(2):  # well within the 5 s wait
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(poll)
+            await waiting.wait()
+            gate.touch()
+
+    assert replies[0].result.state == "running"
+    assert first.result.stdout + replies[0].result.stdout == "x" * 8
 
 
 async def test_output_from_a_child_after_exit_is_kept(
@@ -679,21 +703,22 @@ async def test_kill_after_completion_keeps_the_completed_reply(
     assert replay.result.stdout == "done"
 
 
-async def test_kill_wakes_an_inflight_long_poll(controller: WaitController) -> None:
+async def test_kill_wakes_an_inflight_long_poll(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch
+) -> None:
     params = _params("sleep 60")
     params.wait_seconds = 0.0
     first = await controller.start(params)
-    polling = anyio.Event()
+    waiting = _signal_waits_for_update(monkeypatch)
     replies: list[WaitResult] = []
 
     async def poll() -> None:
-        polling.set()
         replies.append(await controller.poll(params.request_id, first.result.seq, 5.0))
 
-    with anyio.fail_after(2):
+    with anyio.fail_after(2):  # well within the 5 s wait
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(poll)
-            await polling.wait()
+            await waiting.wait()
             await controller.kill(params.request_id, first.result.seq)
 
     assert replies[0].result.state == "killed"
