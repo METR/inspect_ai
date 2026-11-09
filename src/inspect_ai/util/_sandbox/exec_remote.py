@@ -798,7 +798,7 @@ class ExecRemoteProcess:
 
         def retryable(ex: BaseException) -> bool:
             nonlocal retried_repoll_error
-            if not isinstance(ex, RuntimeError):
+            if not isinstance(ex, RuntimeError) or isinstance(ex, _ServerReplyError):
                 return False
             if recovery_deadline is not None:
                 # a re-issued poll is not retried once kill() has been called
@@ -839,6 +839,7 @@ class ExecRemoteProcess:
                             "wait_seconds": self._wait_seconds if holding else 0.0,
                         },
                         _WaitResult,
+                        _ServerReplyErrorMapper,
                     )
                     result = reply.result
                 else:

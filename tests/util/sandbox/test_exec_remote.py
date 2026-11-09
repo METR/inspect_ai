@@ -1631,6 +1631,31 @@ class TestAwaitableWaitProtocol:
         assert str(raised.value) == legacy
         assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
 
+    async def test_lost_result_reply_to_a_held_poll_is_raised_without_retries(
+        self,
+    ) -> None:
+        lost = "exec_remote request r result lost: the command exited with code 0."
+        sandbox = _make_scripted_sandbox(
+            [_wait_response(state="running", exit_code=None), _rpc_error(lost)]
+        )
+        sandbox._exec_remote_wait_supported = None
+
+        with (
+            patch.object(
+                exec_remote_module,
+                "wait_exponential_jitter",
+                new=lambda *a, **k: wait_none(),
+            ),
+            pytest.raises(RuntimeError, match="result lost"),
+        ):
+            await exec_remote_awaitable(sandbox, ["cmd"], 5, _WAIT)
+
+        assert [method for method, _ in sandbox.requests] == [
+            "exec_remote_start_wait",
+            "exec_remote_poll_wait",
+            "exec_remote_kill_wait",
+        ]
+
     async def test_timed_out_start_is_not_resent_without_timeout_retries(
         self,
     ) -> None:
