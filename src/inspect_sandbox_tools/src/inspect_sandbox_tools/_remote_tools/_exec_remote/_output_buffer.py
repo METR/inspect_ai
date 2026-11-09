@@ -25,6 +25,8 @@ class BoundedByteBuffer:
         self._has_space.set()
         self.blocked_since: float | None = None
         """Event loop time a put() began waiting for space; None while none waits."""
+        self.total = 0
+        """Bytes put in all, including those drained since."""
 
     @property
     def size(self) -> int:
@@ -44,6 +46,7 @@ class BoundedByteBuffer:
         finally:
             self.blocked_since = None
         self._buf.extend(data)
+        self.total += len(data)
 
     def drain(self, max_bytes: int | None = None) -> bytes:
         """Return buffered data and remove it from the buffer.

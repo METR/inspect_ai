@@ -36,6 +36,7 @@ class OutputChunk(NamedTuple):
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
 _MAX_POLL_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB per poll response
 _READER_GRACE_SECONDS = 1.0  # after exit, for a child still holding the pipes
+_MAX_TAIL_BYTES = 4 * 1024 * 1024  # read after exit, past which blocked time counts
 
 
 def _leader_handle(process: AsyncIOProcess) -> psutil.Process | None:
@@ -159,6 +160,7 @@ class Job:
         self._exit_task: asyncio.Task[int] | None = None
         self._readers_deadline: float | None = None
         self._readers_checked = 0.0
+        self._read_at_first_wait = 0
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -496,8 +498,12 @@ class Job:
         blocked on a full buffer needs, so output larger than the buffer is not
         cut off, and the readers keep what is left of their time. Time a reader
         spends blocked on a full buffer, waiting for the host to drain it, does
-        not count, however slowly the host polls; a child that writes forever
-        still uses the time the readers spend reading.
+        not count, however slowly the host polls, until the readers have taken
+        `_MAX_TAIL_BYTES` since the first call. That is more than a leader
+        leaves in its pipe and the stream reader when it exits (a pipe holds
+        64 KiB by default, at most 1 MiB unless a privileged process enlarges
+        it), so output past it comes from a child still writing, which then
+        gets only the time left.
 
         Only the tasks still running when called are awaited, so a repeated
         call does not re-raise an error an earlier call already handled. The
@@ -509,15 +515,17 @@ class Job:
         if not readers:
             return
         now = asyncio.get_running_loop().time()
+        read = self._stdout_buffer.total + self._stderr_buffer.total
         if self._readers_deadline is None:
             self._readers_deadline = now + _READER_GRACE_SECONDS
             self._readers_checked = now
+            self._read_at_first_wait = read
         blocked = [
             buffer.blocked_since
             for buffer in (self._stdout_buffer, self._stderr_buffer)
             if buffer.blocked_since is not None
         ]
-        if blocked:
+        if blocked and read - self._read_at_first_wait < _MAX_TAIL_BYTES:
             self._readers_deadline += now - max(min(blocked), self._readers_checked)
         self._readers_checked = now
         remaining = self._readers_deadline - now

@@ -394,20 +394,24 @@ async def test_output_from_a_child_after_exit_is_kept(
 async def test_a_child_flooding_the_pipe_does_not_block_completion(
     controller: WaitController, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Waiting for the host to drain does not use the grace, only reading does:
-    # about 1 ms per reply here.
-    monkeypatch.setattr(job_module, "_READER_GRACE_SECONDS", 0.02)
+    # Waiting for the host to drain stops extending the grace once more has been
+    # read after exit than the leader can leave unread, so the 0.5 s grace runs
+    # out in about 10 polls, not in 0.5 s of reading (hundreds of polls).
+    monkeypatch.setattr(job_module, "_READER_GRACE_SECONDS", 0.5)
     monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 4 * 1024 * 1024)
     params = _params("yes & sleep 0.3; exit 3")  # the pipe is full before exit
     reply = await controller.start(params)
+    polls = 1
     with anyio.fail_after(10):
         while reply.result.state == "running":
             assert len(reply.result.stdout) <= job_module._MAX_POLL_OUTPUT_BYTES
             await anyio.sleep(0.05)  # a host round trip, while the child refills
             reply = await controller.poll(params.request_id, reply.result.seq, 5.0)
+            polls += 1
 
     assert reply.result.state == "completed"
     assert reply.result.exit_code == 3
+    assert polls < 50
 
 
 async def test_running_output_is_replayed_until_acknowledged(
