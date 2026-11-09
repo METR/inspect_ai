@@ -370,18 +370,20 @@ T = TypeVar("T", bound=BaseModel)
 
 def _wait_concurrency() -> int:
     """Held `server_wait` requests allowed in flight, sized like the Docker CLI limit."""
-    default = max(effective_cpu_count() * 2, 4)
+    # Read the override first: counting CPUs reads cgroup files on every held request.
     value = os.environ.get(WAIT_CONCURRENCY_ENV)
-    if value is None:
-        return default
-    try:
-        return max(int(value), 0)
-    except ValueError:
+    if value is not None:
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            pass
+    default = max(effective_cpu_count() * 2, 4)
+    if value is not None:
         warn_once(
             logger,
             f"{WAIT_CONCURRENCY_ENV}={value!r} is not an integer; using {default}.",
         )
-        return default
+    return default
 
 
 class ExecRemoteProcess:
@@ -557,8 +559,13 @@ class ExecRemoteProcess:
             params["user"] = user
 
         # Even without a hold (a short poll_timeout), the request ID keeps a
-        # resent start from launching the command twice.
-        if wait and self._sandbox._exec_remote_wait_supported is not False:
+        # resent start from launching the command twice. The server holds no
+        # request that keeps stdin open, so such a command starts the old way.
+        if (
+            wait
+            and "stdin_open" not in params
+            and self._sandbox._exec_remote_wait_supported is not False
+        ):
             from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 
             self._request_id = uuid4().hex

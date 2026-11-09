@@ -11,7 +11,7 @@ import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Literal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import anyio
 import anyio.lowlevel
@@ -1402,6 +1402,36 @@ class TestAwaitableWaitProtocol:
 
         assert result.stdout == "out"
         assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
+
+    async def test_stdin_open_starts_without_a_hold(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The server holds no request that keeps stdin open, so it starts the old way."""
+        monkeypatch.setenv(exec_remote_module.SERVER_WAIT_ENV, "1")
+        sandbox = _make_scripted_sandbox([_start_response(), _poll_response()])
+        sandbox._exec_remote_wait_supported = None
+
+        await exec_remote_awaitable(
+            sandbox, ["cmd"], 5, ExecRemoteStreamingOptions(stdin_open=True)
+        )
+
+        assert [method for method, _ in sandbox.requests] == [
+            "exec_remote_start",
+            "exec_remote_poll",
+        ]
+        start = sandbox.requests[0][1]
+        assert start["stdin_open"] is True and "request_id" not in start
+
+    def test_held_request_limit_reads_the_override_before_counting_cpus(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(exec_remote_module.WAIT_CONCURRENCY_ENV, "12")
+        monkeypatch.setattr(
+            exec_remote_module,
+            "effective_cpu_count",
+            Mock(side_effect=AssertionError("counted CPUs")),
+        )
+        assert exec_remote_module._wait_concurrency() == 12
 
     @pytest.mark.parametrize(
         "value,expected", [("12", 12), ("-3", 0), ("lots", None), (None, None)]
