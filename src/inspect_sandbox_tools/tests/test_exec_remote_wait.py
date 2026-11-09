@@ -1095,6 +1095,28 @@ def test_invalid_wait_duration_is_rejected(value: float) -> None:
         PollWaitParams(request_id=uuid4().hex, ack_seq=0, wait_seconds=value)
 
 
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "",
+        "a" * 31,
+        "a" * 33,
+        "A" * 32,
+        "g" * 32,
+        "a" * 32 + "\n",
+        "a" * 16 + " " + "a" * 15,
+    ],
+)
+def test_malformed_request_ids_are_rejected(request_id: str) -> None:
+    """IDs are kept one per line in the journal and read back split on whitespace."""
+    with pytest.raises(ValidationError):
+        StartWaitParams(request_id=request_id, command="true", wait_seconds=0)
+    with pytest.raises(ValidationError):
+        PollWaitParams(request_id=request_id, ack_seq=0, wait_seconds=0)
+    with pytest.raises(ValidationError):
+        KillWaitParams(request_id=request_id, ack_seq=0)
+
+
 def test_wait_params_ignore_fields_from_a_newer_host() -> None:
     request_id = uuid4().hex
     newer = {"acks": [uuid4().hex], "added_later": {"x": 1}}
