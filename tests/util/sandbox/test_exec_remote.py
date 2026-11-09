@@ -23,6 +23,7 @@ from test_helpers.utils import skip_if_no_docker
 import inspect_ai
 import inspect_ai.util._sandbox.exec_remote as exec_remote_module
 from inspect_ai import Task, eval
+from inspect_ai._util.cpu import effective_cpu_count
 from inspect_ai.analysis import events_df
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SandboxEvent
@@ -1399,7 +1400,7 @@ class TestAwaitableWaitProtocol:
             monkeypatch.delenv(exec_remote_module.WAIT_CONCURRENCY_ENV, raising=False)
         else:
             monkeypatch.setenv(exec_remote_module.WAIT_CONCURRENCY_ENV, value)
-        default = max(exec_remote_module.effective_cpu_count() * 2, 4)
+        default = max(effective_cpu_count() * 2, 4)
         assert exec_remote_module._wait_concurrency() == (
             default if expected is None else expected
         )
