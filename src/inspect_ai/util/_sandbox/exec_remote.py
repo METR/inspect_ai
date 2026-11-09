@@ -222,6 +222,11 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     an ordinary command, and a command still running with no output is polled
     again as usual. The first time this happens, a warning is logged.
 
+    With holds, a request is almost always in flight, so on sandboxes that run
+    each request as a local subprocess (such as Docker and local), a `timeout`
+    or cancellation takes effect about 2 seconds late, while that subprocess is
+    stopped.
+
     A start that fails without an answer from the server (a lost connection, or
     a timeout unless `poll_timeout_retry` is False) is resent once with the same
     request ID, within 60 seconds of the first attempt. The server then reports
