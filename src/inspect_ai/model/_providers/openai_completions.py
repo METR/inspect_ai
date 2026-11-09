@@ -15,6 +15,7 @@ from openai.types.chat import ChatCompletion
 from inspect_ai._util.logger import warn_once
 from inspect_ai.log._samples import set_active_model_event_call
 from inspect_ai.model._providers._openai_batch import OpenAIBatcher
+from inspect_ai.model._providers._openai_unwalked import unwalked
 from inspect_ai.tool import ToolChoice, ToolInfo
 
 from .._chat_message import ChatMessage
@@ -134,10 +135,12 @@ async def generate_completions(
             if batcher:
                 completion = await batcher.generate_for_request(request)
             elif streaming:
-                async with await client.chat.completions.create(**request) as stream:
+                async with await client.chat.completions.create(
+                    **unwalked(request)
+                ) as stream:
                     completion = await openai_chat_completion_stream_final(stream)
             else:
-                completion = await client.chat.completions.create(**request)
+                completion = await client.chat.completions.create(**unwalked(request))
             # completion is `CharCompletion | Any`. The lazy type inference engine
             # threw up its hands because of the `**request`.
             assert isinstance(completion, ChatCompletion)
