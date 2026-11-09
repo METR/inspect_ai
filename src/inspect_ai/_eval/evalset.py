@@ -116,6 +116,7 @@ from .eval import eval, eval_init, eval_resolve_tasks
 from .eval_set_manifest import (
     INSPECT_EVAL_SET_CAPTURE,
     EvalSetCaptureScan,
+    TaskLogVerdict,
     build_eval_set_capture,
     eval_set_capture_requested,
     samples_selected,
@@ -698,7 +699,7 @@ def eval_set(
         max_tasks=max_tasks,
         # error handling as the definition asked for it, so a runner can see
         # what selection mode honours (retry_on_error) and what it overrides
-        # (fail_on_error) rather than guessing.
+        # under `completion="runner"` (fail_on_error) rather than guessing.
         fail_on_error=fail_on_error,
         continue_on_fail=continue_on_fail,
         retry_on_error=retry_on_error,
@@ -801,6 +802,15 @@ def eval_set(
         log_refusals=log_refusals,
         **kwargs,
     )
+    # resolve log_dir, matching eval(). below `definition_options`, so a capture
+    # manifest records the options *the definition passed*: a definition that
+    # named no directory is reported as having named none rather than as
+    # having named this default. absolute_file_path() is likewise not applied
+    # -- eval() does it, but doing it here would change the recorded location
+    # of every relative log_dir an eval set already uses
+    if log_dir is None:
+        log_dir = os.environ.get("INSPECT_LOG_DIR", "./logs")
+
     # capture mode: resolve tasks, write the manifest, and exit the process
     # without running anything. deliberately placed before any log_dir side
     # effects (mkdir, .eval-set-id, eval-set.json) and before eval-set hooks.
@@ -838,18 +848,19 @@ def eval_set(
             if captured is not None
             else None
         )
+        capture_args = EvalSetArgsInTaskIdentifier(
+            config=capture_config,
+            solver=solver,
+            message_limit=message_limit,
+            token_limit=token_limit,
+            turn_limit=turn_limit,
+            time_limit=time_limit,
+            working_limit=working_limit,
+            cost_limit=cost_limit,
+        )
         capture = build_eval_set_capture(
             capture_tasks,
-            EvalSetArgsInTaskIdentifier(
-                config=capture_config,
-                solver=solver,
-                message_limit=message_limit,
-                token_limit=token_limit,
-                turn_limit=turn_limit,
-                time_limit=time_limit,
-                working_limit=working_limit,
-                cost_limit=cost_limit,
-            ),
+            capture_args,
             epochs=epochs,
             limit=limit,
             sample_id=sample_id,
@@ -857,20 +868,19 @@ def eval_set(
             options=definition_options,
             overrides=overrides,
             scan=capture_scan,
+            task_logs=_captured_task_logs(
+                capture_tasks,
+                capture_args,
+                log_dir,
+                epochs=epochs,
+                limit=limit,
+                sample_id=sample_id,
+                sample_shuffle=sample_shuffle,
+            ),
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
         raise SystemExit(0)
-
-    # resolve log_dir, matching eval(). deliberately below the capture branch,
-    # which exits before any log_dir side effect: a capture manifest records
-    # the options *the definition passed*, so a definition that named no
-    # directory must be reported as having named none rather than as having
-    # named this default. absolute_file_path() is likewise not applied -- eval()
-    # does it, but doing it here would change the recorded location of every
-    # relative log_dir an eval set already uses
-    if log_dir is None:
-        log_dir = os.environ.get("INSPECT_LOG_DIR", "./logs")
 
     # ensure log_dir
     fs = filesystem(log_dir)
@@ -1672,7 +1682,8 @@ def _run_eval_set_selection(
     Reads the selection, narrows the eval set's resolved tasks to it, and runs
     just those through the ordinary `eval()` path. No eval-set orchestration is
     performed: the external runner that wrote the selection owns the log
-    directory, its metadata, and every retry decision.
+    directory, its metadata, and every retry decision, except that under
+    `completion="definition"` the worker performs the definition's task retries.
 
     Args:
         selection: The selection document read from `INSPECT_EVAL_SET_SELECTION` (any operational overrides it carries have already been applied by the caller).
@@ -1982,6 +1993,52 @@ def log_samples_complete(
     if log.header.results.total_samples < planned:
         return False
     return True
+
+
+def _captured_task_logs(
+    resolved_tasks: list[ResolvedTask],
+    eval_set_args: EvalSetArgsInTaskIdentifier,
+    log_dir: str,
+    *,
+    epochs: int | Epochs | None,
+    limit: int | tuple[int, int] | None,
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None,
+    sample_shuffle: bool | int | None,
+) -> dict[str, TaskLogVerdict]:
+    """Each task's log in `log_dir`, with the completion verdict the eval-set path reaches on it.
+
+    Lists and classifies logs as the eval-set path does, from headers only, but never cleans up or recovers a log, since both write to the log directory. So a crashed (`started`) log is incomplete whatever `incomplete_action` says. Logs of tasks outside the eval set are skipped rather than refused: refusing them is the eval-set path's or the runner's decision.
+
+    A task can have a latest log per task id (two runs that did not resume each other). The eval-set path reruns the task if any of them is incomplete, resuming from that log, so the verdict here does the same.
+
+    Returns:
+        The log and verdict of every task that has a usable log, by task identifier.
+    """
+    all_tasks = [
+        (task_identifier(task, eval_set_args), task) for task in resolved_tasks
+    ]
+    identifiers = {identifier for identifier, _ in all_tasks}
+    logs = [
+        log
+        for log in list_all_eval_logs(log_dir)
+        if log.task_identifier in identifiers
+        and not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
+    ]
+    complete_logs, incomplete_logs = list_latest_eval_logs(
+        all_tasks,
+        logs,
+        epochs=epochs,
+        limit=limit,
+        sample_id=sample_id,
+        cleanup_older=False,
+    )
+
+    # later entries win: an incomplete log over a complete one, then the newest
+    task_logs: dict[str, TaskLogVerdict] = {}
+    for complete, group in ((True, complete_logs), (False, incomplete_logs)):
+        for log in sorted(group, key=lambda log: log.info.mtime or 0):
+            task_logs[log.task_identifier] = TaskLogVerdict(log.info.name, complete)
+    return task_logs
 
 
 def shuffle_changed(

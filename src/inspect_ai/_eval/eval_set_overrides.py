@@ -450,7 +450,7 @@ NOT_OVERRIDABLE: dict[str, str] = {
     "continue_on_fail": "decided by the selection's `completion`: moot, or the definition's",
     "acp_server": "forced on for a worker, which is detached and cannot prompt",
     "ctl_server": "demoted to eval-set's own on/off, which owns the keep-alive park",
-    "retry_attempts": 'the definition\'s own task retry count, used only under `completion="definition"`',
+    "retry_attempts": "decided by the selection's `completion`: unused, or the definition's",
     "retry_wait": "eval-set retry orchestration, which a worker never performs",
     "retry_connections": "eval-set retry orchestration, which a worker never performs",
     "retry_cleanup": "eval-set retry orchestration, which a worker never performs",

@@ -214,7 +214,7 @@ class EvalSetSelection(BaseModel):
 
     `"runner"` (the default): the worker forces `fail_on_error=False` and does no task retry, so sample errors never fail a task, and the runner decides from the log what to rerun.
 
-    `"definition"`: the worker keeps the definition's `fail_on_error` and `continue_on_fail` and retries a failed task up to `retry_attempts` times (10 when unset), resuming each failed attempt's completed samples. Retries run in the worker and are always immediate, even with `retry_immediate=False`, since batch retry is eval-set orchestration. Each failed attempt's `error` log stays in the log directory for the runner to clean up.
+    `"definition"`: the worker keeps the definition's `fail_on_error` and `continue_on_fail` and retries a failed task up to `retry_attempts` times (10 when unset), resuming each failed attempt's completed samples. Retries run in the worker and are always immediate, even with `retry_immediate=False`, since batch retry is eval-set orchestration. Each failed attempt's `error` log stays in the log directory for the runner to clean up. The definition's `incomplete_action` is not applied: a task's `resume` of a crashed (`started`) log recovers it with the default disposition, so samples in progress at the crash re-run.
     """
 
 
@@ -229,9 +229,10 @@ class EvalSetSelection(BaseModel):
 # older inspect ignores usually costs nothing, but an ignored `limit` means a
 # worker asked for two samples runs five thousand.
 #
-# A field counts as used when the document names it with a non-null value:
-# `completion` is used even at its default, which an older inspect would still
-# refuse as an unknown field.
+# A field counts as used when the document names it, even at its default:
+# an older inspect refuses `completion` as an unknown field whatever its
+# value. An explicit null is exempt for backward compatibility with writers
+# that dump None fields (`overrides` and `scanners` default to None).
 _FIELD_MIN_VERSION: dict[str, int] = {"overrides": 3, "scanners": 7, "completion": 8}
 
 # the same rule for fields of a *task* entry. It needs its own dict rather than

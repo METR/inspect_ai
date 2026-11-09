@@ -1,8 +1,10 @@
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,8 +20,14 @@ from inspect_ai._eval.eval_set_manifest import (
 from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai.dataset import Sample
+from inspect_ai.log import (
+    ProvenanceData,
+    invalidate_samples,
+    read_eval_log,
+    write_eval_log,
+)
 from inspect_ai.scorer import exact
-from inspect_ai.solver import generate
+from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
 
 
 @task
@@ -103,6 +111,9 @@ def test_eval_set_capture_manifest(
     task_two = next(t for t in capture.tasks if t.name == "capture_task_two")
     assert task_two.samples == 1
     assert task_two.epochs == 3
+
+    # no log directory, so no task has a log
+    assert all(t.log is None and t.complete is None for t in capture.tasks)
 
 
 def test_eval_set_capture_limit_and_epochs(
@@ -257,6 +268,227 @@ def test_eval_set_capture_subprocess_protocol(tmp_path: Path) -> None:
     assert not (tmp_path / "logs").exists()
 
 
+@solver
+def capture_failing_solver() -> Solver:
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        raise ValueError("capture_failing_solver always fails")
+
+    return solve
+
+
+@task
+def capture_failing_task() -> Task:
+    return Task(
+        dataset=[Sample(input="1+1", target="2")],
+        solver=[capture_failing_solver()],
+        scorer=exact(),
+    )
+
+
+def run_eval_set(log_dir: Path, tasks: list[Task], **kwargs: Any) -> list[str]:
+    """Run an eval set for real, returning its logs' locations as a log listing names them."""
+    _, logs = eval_set(
+        tasks=tasks,
+        model="mockllm/model",
+        log_dir=str(log_dir),
+        retry_attempts=0,
+        display="plain",
+        **kwargs,
+    )
+    return [Path(log.location).as_uri() for log in logs]
+
+
+def capture_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    log_dir: Path,
+    tasks: list[Task],
+    **kwargs: Any,
+) -> dict[str, EvalSetCaptureTask]:
+    """Capture an eval set over an existing log directory, by task name."""
+    manifest_path = tmp_path / "manifest.json"
+    before = sorted(log_dir.rglob("*")) if log_dir.exists() else None
+    monkeypatch.setenv(INSPECT_EVAL_SET_CAPTURE, str(manifest_path))
+    with pytest.raises(SystemExit) as exc_info:
+        eval_set(
+            tasks=tasks,
+            model="mockllm/model",
+            log_dir=str(log_dir),
+            display="plain",
+            **kwargs,
+        )
+    assert exc_info.value.code == 0
+    # capture reads the log directory and never writes to or removes from it
+    after = sorted(log_dir.rglob("*")) if log_dir.exists() else None
+    assert after == before
+    capture = EvalSetCapture.model_validate_json(manifest_path.read_bytes())
+    return {t.name: t for t in capture.tasks}
+
+
+def test_eval_set_capture_verdict_complete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [capture_task_one(), capture_task_two()]
+    )
+
+    assert tasks["capture_task_one"].log == location
+    assert tasks["capture_task_one"].complete is True
+    # a task with no log of its own
+    assert tasks["capture_task_two"].log is None
+    assert tasks["capture_task_two"].complete is None
+
+
+def test_eval_set_capture_verdict_error_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_failing_task()])
+    assert read_eval_log(location, header_only=True).status == "error"
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_failing_task()])
+
+    assert tasks["capture_failing_task"].log == location
+    assert tasks["capture_failing_task"].complete is False
+
+
+def test_eval_set_capture_verdict_invalidated_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    log = read_eval_log(location)
+    assert log.samples is not None and log.samples[0].uuid is not None
+    log = invalidate_samples(
+        log,
+        sample_uuids=[log.samples[0].uuid],
+        provenance=ProvenanceData(author="test", reason="test"),
+    )
+    write_eval_log(log, location=location)
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
+
+    assert tasks["capture_task_one"].log == location
+    assert tasks["capture_task_one"].complete is False
+
+
+@pytest.mark.parametrize(
+    "run_kwargs,capture_kwargs",
+    [
+        pytest.param({}, {"epochs": 2}, id="epochs-changed"),
+        pytest.param({"limit": 1}, {"limit": 2}, id="limit-raised"),
+    ],
+)
+def test_eval_set_capture_verdict_short_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    run_kwargs: dict[str, Any],
+    capture_kwargs: dict[str, Any],
+) -> None:
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()], **run_kwargs)
+
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [capture_task_one()], **capture_kwargs
+    )
+
+    assert tasks["capture_task_one"].log == location
+    assert tasks["capture_task_one"].complete is False
+
+
+def test_eval_set_capture_verdict_no_samples_planned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # `bar` is named by no `task:id` selector, so it plans no samples and its
+    # success log (with no results) is complete
+    foo = Task(name="foo", dataset=[Sample(id=i, input="hi") for i in (1, 2)])
+    bar = Task(name="bar", dataset=[Sample(id=i, input="hi") for i in (1, 2)])
+    log_dir = tmp_path / "logs"
+    run_eval_set(log_dir, [foo, bar], sample_id=["foo:1"])
+
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [foo, bar], sample_id=["foo:1"]
+    )
+
+    assert tasks["bar"].log is not None
+    assert tasks["bar"].complete is True
+    assert tasks["foo"].complete is True
+
+
+def test_eval_set_capture_verdict_shuffle_changed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a different shuffle under a limit selects different samples, so the
+    # eval-set path runs the task fresh rather than resuming the log
+    log_dir = tmp_path / "logs"
+    run_eval_set(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
+
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2, sample_shuffle=2
+    )
+
+    assert tasks["capture_task_one"].log is None
+    assert tasks["capture_task_one"].complete is None
+
+
+def test_eval_set_capture_verdict_ignores_other_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a log of a task outside the eval set is neither refused nor matched
+    log_dir = tmp_path / "logs"
+    run_eval_set(log_dir, [capture_task_one(difficulty="easy")])
+
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [capture_task_one(difficulty="hard")]
+    )
+
+    assert tasks["capture_task_one"].log is None
+    assert tasks["capture_task_one"].complete is None
+
+
+def test_eval_set_capture_verdict_newest_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # the second run resumes the first (same task id) and both logs are kept
+    log_dir = tmp_path / "logs"
+    [short] = run_eval_set(log_dir, [capture_task_one()], limit=1, retry_cleanup=False)
+    [full] = run_eval_set(log_dir, [capture_task_one()], limit=2, retry_cleanup=False)
+    assert short != full
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2)
+
+    assert tasks["capture_task_one"].log == full
+    assert tasks["capture_task_one"].complete is True
+
+
+@pytest.mark.parametrize(
+    "first_limit,complete",
+    [
+        # the eval-set path reruns the task from the incomplete log even though
+        # a newer complete one exists, so the verdict does too
+        pytest.param(1, False, id="incomplete-wins"),
+        pytest.param(2, True, id="newest-wins"),
+    ],
+)
+def test_eval_set_capture_verdict_logs_of_two_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first_limit: int, complete: bool
+) -> None:
+    # two runs of one task that did not resume each other (two task ids); the
+    # second, complete one is newer
+    log_dir = tmp_path / "logs"
+    [first] = run_eval_set(log_dir, [capture_task_one()], limit=first_limit)
+    [other] = run_eval_set(tmp_path / "other", [capture_task_one()], limit=2)
+    second = Path(shutil.copy(other.removeprefix("file://"), log_dir)).as_uri()
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2)
+
+    assert tasks["capture_task_one"].log == (second if complete else first)
+    assert tasks["capture_task_one"].complete is complete
+
+
 def test_samples_for_limit() -> None:
     cases: list[tuple[int, int | tuple[int, int] | None, int]] = [
         (10, None, 10),
@@ -322,6 +554,14 @@ _EXPECTED_CAPTURE_TASK_FIELDS: dict[int, set[str]] = {
 # selection mode. `options["scanners"]` remains the quick boolean beside it.
 _EXPECTED_CAPTURE_TASK_FIELDS[3] = _EXPECTED_CAPTURE_TASK_FIELDS[2]
 
+# v4 added each task's newest usable log in the log directory (`log`) and
+# Inspect's completion verdict on it (`complete`), so a runner can plan from
+# the capture without re-deriving completion from log headers.
+_EXPECTED_CAPTURE_TASK_FIELDS[4] = _EXPECTED_CAPTURE_TASK_FIELDS[3] | {
+    "log",
+    "complete",
+}
+
 _EXPECTED_CAPTURE_FIELDS: dict[int, set[str]] = {
     1: {"version", "identifier_version", "eval_set_id", "options", "tasks"},
     2: {
@@ -342,6 +582,7 @@ _EXPECTED_CAPTURE_FIELDS: dict[int, set[str]] = {
         "tasks",
     },
 }
+_EXPECTED_CAPTURE_FIELDS[4] = _EXPECTED_CAPTURE_FIELDS[3]
 
 
 def test_eval_set_capture_schema_stability() -> None:
