@@ -46,7 +46,7 @@ def _pr_repo(repo: Path, base: dict[str, str], pr: dict[str, str]) -> Path:
             (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_text(text)
         _git(repo, "add", ".")
-        _git(repo, "commit", "-qm", "commit")
+        _git(repo, "commit", "-qm", "commit", "--allow-empty")
         if files is base:
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     return repo
@@ -91,3 +91,20 @@ def test_detect_slow_classifies_a_change_with_injectable_paths(
         0,
         {"injectable_src": injectable},
     )
+
+
+@pytest.mark.parametrize(
+    "version,bumped", [("9037", True), ("9036", True), ("9035", False), ("9034", False)]
+)
+def test_version_gate_accepts_any_increase(
+    tmp_path: Path, version: str, bumped: bool
+) -> None:
+    """An injectable change needs a version above the base's, not exactly N+1."""
+    version_path = f"{UTILS}/sandbox_tools_version.txt"
+    repo = _pr_repo(
+        tmp_path / "repo", {version_path: "9035\n"}, {version_path: f"{version}\n"}
+    )
+
+    assert _run_step(
+        repo, "check-version-bump", "bump", INJECTABLE_SRC_CHANGED="true"
+    ) == ((0, {"correctly_bumped": "true"}) if bumped else (1, {}))

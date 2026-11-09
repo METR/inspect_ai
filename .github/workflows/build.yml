@@ -481,7 +481,7 @@ jobs:
               - "src/inspect_ai/util/_restic/**"
               - "tests/checkpoint/**"
 
-  # Fast gate: confirm sandbox_tools_version.txt is bumped to exactly N+1
+  # Fast gate: confirm sandbox_tools_version.txt is bumped above N
   # when the injectable source changed. Blocks downstream slow jobs on
   # failure so PR contributors don't wait on a Docker build to learn they
   # forgot the bump.
@@ -507,13 +507,14 @@ jobs:
           VERSION_PATH="src/inspect_ai/tool/_sandbox_tools_utils/sandbox_tools_version.txt"
           BASE_VERSION=$(git show "origin/${BASE_REF}:${VERSION_PATH}" | tr -d '[:space:]')
           PR_VERSION=$(tr -d '[:space:]' < "${VERSION_PATH}")
-          EXPECTED=$((BASE_VERSION + 1))
-          echo "Base (${BASE_REF}): v${BASE_VERSION}; PR: v${PR_VERSION}; expected on bump: v${EXPECTED}; injectable_src_changed=${INJECTABLE_SRC_CHANGED}"
+          echo "Base (${BASE_REF}): v${BASE_VERSION}; PR: v${PR_VERSION}; expected on bump: above v${BASE_VERSION}; injectable_src_changed=${INJECTABLE_SRC_CHANGED}"
           if [ "$INJECTABLE_SRC_CHANGED" = "true" ]; then
-            if [ "$PR_VERSION" = "$EXPECTED" ]; then
+            # Any increase, not only N+1: this fork numbers its builds by its
+            # own scheme (9035, then 9037).
+            if [ "$PR_VERSION" -gt "$BASE_VERSION" ]; then
               echo "correctly_bumped=true" >> "$GITHUB_OUTPUT"
             else
-              echo "::error::An injectable build input changed (see src/inspect_ai/tool/_sandbox_tools_utils/injectable_paths.txt) but ${VERSION_PATH} is v${PR_VERSION}; bump it to v${EXPECTED}."
+              echo "::error::An injectable build input changed (see src/inspect_ai/tool/_sandbox_tools_utils/injectable_paths.txt) but ${VERSION_PATH} is v${PR_VERSION}; bump it above v${BASE_VERSION}."
               exit 1
             fi
           else
@@ -599,8 +600,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: uv cache prune --ci
 
-  # Release gate: runs only when the version bumped to N+1. Verifies the
-  # new v{N+1} artifact is published to S3 (fails fast with upload_to_s3.py
+  # Release gate: runs only when the version was bumped. Verifies the bumped
+  # version's artifact is published to S3 (fails fast with upload_to_s3.py
   # hint if not), then re-runs the slow tests against it. Maintainer reruns
   # from the Actions UI after uploading. Runs in parallel with
   # slow-tool-tests-dev: it consumes only the published S3 artifacts,
