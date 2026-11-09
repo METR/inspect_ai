@@ -622,6 +622,25 @@ async def test_killed_output_is_replayed_after_a_lost_kill_reply(
     assert acknowledged.result.state == "killed"
 
 
+async def test_a_repeated_kill_does_not_resend_output_the_host_has(
+    controller: WaitController,
+) -> None:
+    params = _params(_python("import time; print('ready', flush=True); time.sleep(60)"))
+    params.wait_seconds = 0.0
+    await controller.start(params)
+    job = controller._requests[params.request_id].job
+    assert job is not None
+    with anyio.fail_after(5):
+        while job._stdout_buffer.size == 0:
+            await anyio.sleep(0.05)
+
+    killed = await controller.kill(params.request_id, 0)
+    again = await controller.kill(params.request_id, killed.seq)
+
+    assert killed.stdout == "ready\n"
+    assert (again.seq, again.stdout, again.stderr) == (killed.seq, "", "")
+
+
 async def test_kill_after_completion_keeps_the_completed_reply(
     controller: WaitController,
 ) -> None:
