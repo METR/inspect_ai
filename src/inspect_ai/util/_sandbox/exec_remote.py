@@ -202,11 +202,10 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     """Maximum execution time in seconds. On timeout, the process is killed and
     TimeoutError is raised. With `server_wait`, this includes starting the command."""
 
-    server_wait: bool = field(
-        default_factory=lambda: _server_wait_default(), kw_only=True
-    )
-    """Wait for output in the sandbox instead of polling. Defaults to `False`, or
-    to `True` when `INSPECT_EXEC_REMOTE_SERVER_WAIT` is `1` or `true`.
+    server_wait: bool | None = field(default=None, kw_only=True)
+    """Wait for output in the sandbox instead of polling. Unset (`None`), it is
+    `True` when `INSPECT_EXEC_REMOTE_SERVER_WAIT` is `1` or `true` at the time
+    of the call, and `False` otherwise.
 
     When `True` and the sandbox tools server supports it, the server holds each
     request until the command exits or a full reply of output is ready, for at
@@ -1073,13 +1072,13 @@ async def exec_remote_awaitable(
     from .._subprocess import ExecResult as ExecResultClass
     from .limits import SandboxEnvironmentLimits
 
-    # Awaitable defaults, so INSPECT_EXEC_REMOTE_SERVER_WAIT reaches a call without options.
     opts = options or ExecRemoteAwaitableOptions()
     server_wait = (
-        opts.server_wait
-        if isinstance(opts, ExecRemoteAwaitableOptions)
-        else _server_wait_default()
+        opts.server_wait if isinstance(opts, ExecRemoteAwaitableOptions) else None
     )
+    if server_wait is None:
+        # read per call: the variable can be set after the options were built
+        server_wait = _server_wait_default()
     if server_wait:
         proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
     else:

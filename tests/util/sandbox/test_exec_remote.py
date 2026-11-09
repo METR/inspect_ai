@@ -1404,16 +1404,27 @@ class TestAwaitableWaitProtocol:
             default if expected is None else expected
         )
 
-    async def test_server_wait_env_sets_the_default(
+    async def test_server_wait_env_is_read_when_the_command_runs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Options built before the variable is set hold once it is; `False` stays off."""
+        monkeypatch.delenv(exec_remote_module.SERVER_WAIT_ENV, raising=False)
+        unset = ExecRemoteAwaitableOptions()
+        off = ExecRemoteAwaitableOptions(server_wait=False)
         monkeypatch.setenv(exec_remote_module.SERVER_WAIT_ENV, "true")
-        assert ExecRemoteAwaitableOptions().server_wait
-        assert not ExecRemoteAwaitableOptions(server_wait=False).server_wait
-        monkeypatch.setenv(exec_remote_module.SERVER_WAIT_ENV, "0")
-        assert not ExecRemoteAwaitableOptions().server_wait
-        monkeypatch.delenv(exec_remote_module.SERVER_WAIT_ENV)
-        assert not ExecRemoteAwaitableOptions().server_wait
+        sandbox = _make_scripted_sandbox(
+            [_wait_response(), _start_response(), _poll_response()]
+        )
+        sandbox._exec_remote_wait_supported = None
+
+        await exec_remote_awaitable(sandbox, ["cmd"], 5, unset)
+        await exec_remote_awaitable(sandbox, ["cmd"], 5, off)
+
+        assert [method for method, _ in sandbox.requests] == [
+            "exec_remote_start_wait",
+            "exec_remote_start",
+            "exec_remote_poll",
+        ]
 
     @pytest.mark.parametrize("concurrency", [True, False])
     async def test_no_free_held_slot_sends_requests_at_once_without_a_hold(
