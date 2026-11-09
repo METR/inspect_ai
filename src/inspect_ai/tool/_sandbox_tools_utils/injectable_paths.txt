@@ -18,16 +18,13 @@ src/inspect_sandbox_tools
 :(exclude,glob)src/inspect_sandbox_tools/**/*.md
 #
 # The build files under _sandbox_tools_utils that the builders read: the two
-# builder images, their pinned conda and Python inputs, and the build scripts
-# that run inside/around the containers (plus their same-directory imports).
+# builder images and the build scripts that run inside/around the containers
+# (plus their same-directory imports).
 # Host-side runtime/release files in this directory (sandbox.py, upload_to_s3.py,
-# _digests.py, requirements.in, SHA256SUMS, sandbox_tools_version.txt) are
-# deliberately NOT listed: they do not change the built bytes.
+# _digests.py, SHA256SUMS, sandbox_tools_version.txt) are deliberately NOT
+# listed: they do not change the built bytes.
 src/inspect_ai/tool/_sandbox_tools_utils/Dockerfile.pyinstaller
 src/inspect_ai/tool/_sandbox_tools_utils/Dockerfile.pyinstaller.musl
-src/inspect_ai/tool/_sandbox_tools_utils/conda-amd64.lock
-src/inspect_ai/tool/_sandbox_tools_utils/conda-arm64.lock
-src/inspect_ai/tool/_sandbox_tools_utils/requirements.txt
 src/inspect_ai/tool/_sandbox_tools_utils/build_within_container.py
 src/inspect_ai/tool/_sandbox_tools_utils/build_executable.py
 src/inspect_ai/tool/_sandbox_tools_utils/_build_bundled_executable.py
