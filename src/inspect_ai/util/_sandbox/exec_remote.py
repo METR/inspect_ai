@@ -220,7 +220,7 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     is. A request never waits
     for that limit: when it is reached, the request is sent without a hold, as
     an ordinary command, and a command still running with no output is polled
-    again as usual.
+    again as usual. The first time this happens, a warning is logged.
 
     A start that fails without an answer from the server (a lost connection, or
     a timeout unless `poll_timeout_retry` is False) is resent once with the same
@@ -496,6 +496,12 @@ class ExecRemoteProcess:
                 "exec-remote-wait", _wait_concurrency(), None, False
             )
             if slot.value < 1:
+                warn_once(
+                    logger,
+                    f"Held exec_remote requests reached the {WAIT_CONCURRENCY_ENV} "
+                    f"limit ({slot.concurrency}): more are sent without a hold and "
+                    "polled as usual.",
+                )
                 # Never wait for a free slot: send the request without a hold.
                 params, held, slot = {**params, "wait_seconds": 0.0}, False, None
         self._held = held

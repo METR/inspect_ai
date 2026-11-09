@@ -1434,10 +1434,12 @@ class TestAwaitableWaitProtocol:
         """Other commands' holds never delay a start or poll; it is sent unheld.
 
         The held-request limit applies whether or not the caller asks for
-        `concurrency`.
+        `concurrency`. Reaching it logs one warning.
         """
         options = ExecRemoteAwaitableOptions(server_wait=True, concurrency=concurrency)
         monkeypatch.setenv("INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY", "1")
+        warned: list[str] = []
+        monkeypatch.setattr("inspect_ai._util.logger._warned", warned)
         sandbox = _mock_sandbox()
         sandbox._exec_remote_wait_supported = None
         held, release = anyio.Event(), anyio.Event()
@@ -1487,6 +1489,10 @@ class TestAwaitableWaitProtocol:
         # an unheld reply of a running command is followed by the poll ramp
         assert [call.args for call in sleep.await_args_list] == [
             (exec_remote_module.POLL_RAMP_SECONDS[0],)
+        ]
+        assert warned == [
+            "Held exec_remote requests reached the INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY "
+            "limit (1): more are sent without a hold and polled as usual."
         ]
 
     async def test_waits_stop_after_the_wait_window(self) -> None:
