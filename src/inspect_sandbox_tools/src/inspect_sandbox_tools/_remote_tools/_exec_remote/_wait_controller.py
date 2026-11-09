@@ -140,7 +140,8 @@ class WaitController:
         entry = _Request(seen_at=monotonic())
         self._requests[params.request_id] = entry
         entry.launch = asyncio.create_task(self._launch(entry, params, can_switch_user))
-        await asyncio.shield(entry.launch)
+        # Not the launch itself: writing the input waits for the command to read it.
+        await entry.ready.wait()
         job = self._job(entry, params.request_id)
         await job.wait_for_update(params.wait_seconds)
         return await self._poll(entry, params.request_id, 0)
@@ -194,6 +195,14 @@ class WaitController:
                 result = entry.response
             else:
                 result = await job.poll(ack_seq, terminal_output=True)
+                if (
+                    result.state == "killed"
+                    and not entry.cancelled
+                    and entry.launch is not None
+                ):
+                    # Killed but not cancelled: Job.create failed to write the input.
+                    await asyncio.shield(entry.launch)
+                    self._job(entry, request_id)
                 entry.response = result
             if result.state != "running" and entry.finished_at is None:
                 entry.finished_at = monotonic()

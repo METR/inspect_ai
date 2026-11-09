@@ -187,6 +187,39 @@ async def test_an_untrusted_journal_is_refused(
     assert not target.exists()
 
 
+async def test_start_returns_within_its_hold_while_input_waits_for_a_reader(
+    controller: WaitController, tmp_path: Path
+) -> None:
+    gate = tmp_path / "gate"
+    params = _params(
+        f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.01; done; wc -c",
+        input="x" * 1_000_000,  # more than the pipe holds
+    )
+    params.wait_seconds = 0.2
+    with anyio.fail_after(5):
+        reply = await controller.start(params)
+    assert reply.result.state == "running"
+
+    gate.touch()
+    output = reply.result.stdout
+    with anyio.fail_after(10):
+        while reply.result.state == "running":
+            reply = await controller.poll(params.request_id, reply.result.seq, 5.0)
+            output += reply.result.stdout
+    assert (reply.result.state, int(output)) == ("completed", 1_000_000)
+
+
+async def test_input_that_cannot_be_written_is_raised_as_the_start_error(
+    controller: WaitController,
+) -> None:
+    # the command closes stdin and keeps running, so the write fails after spawn
+    params = _params("exec 0<&-; sleep 0.2", input="x" * 1_000_000)
+    with pytest.raises(ConnectionError):
+        await controller.start(params)
+    with pytest.raises(ConnectionError):
+        await controller.poll(params.request_id, 0, 0.0)
+
+
 async def test_start_returns_output_and_exit_together_within_the_wait(
     controller: WaitController,
 ) -> None:
