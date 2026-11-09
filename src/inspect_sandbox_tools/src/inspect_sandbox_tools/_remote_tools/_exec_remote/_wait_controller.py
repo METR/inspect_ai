@@ -95,6 +95,9 @@ class WaitController:
         self._retired_jobs: list[Job] = []
         self._launched_path: Path | None = None
         self._unrecorded: set[str] = set()  # cancelled, but not in the journal yet
+        # launched or cancelled IDs, kept for the server's lifetime (~80 bytes each)
+        self._seen: set[str] = set()  # by this server
+        self._restarted: set[str] = set()  # by an earlier one, from the journal
 
     def persist_launches(self, path: Path) -> None:
         """Record each request ID in `path` before launching it, and load earlier ones.
@@ -108,9 +111,7 @@ class WaitController:
             launched = read_private_text(path).split()
         except FileNotFoundError:
             launched = []
-        now = monotonic()
-        for request_id in launched[-_MAX_EXPIRED_IDS:]:
-            self._expired[request_id] = _Expired(now, _RESTARTED)
+        self._restarted.update(launched)
         self._launched_path = path
 
     def _record_launch(self, request_id: str, action: str = "started") -> None:
@@ -132,7 +133,7 @@ class WaitController:
         """Register a unique request before launching and wait briefly for completion."""
         self._acknowledge(params.acks)
         self._prune()
-        if params.request_id in self._requests or params.request_id in self._expired:
+        if params.request_id in self._seen or params.request_id in self._restarted:
             # A retried start (e.g. after a dropped connection) acts as a poll; a
             # cancelled or expired request raises instead of launching late.
             return await self.poll(params.request_id, 0, params.wait_seconds)
@@ -141,6 +142,7 @@ class WaitController:
         self._record_launch(params.request_id)
         entry = _Request(seen_at=monotonic())
         self._requests[params.request_id] = entry
+        self._seen.add(params.request_id)
         entry.launch = asyncio.create_task(self._launch(entry, params, can_switch_user))
         # Not the launch itself: writing the input waits for the command to read it.
         await entry.ready.wait()
@@ -228,20 +230,20 @@ class WaitController:
         self._prune()
         entry = self._requests.get(request_id)
         if entry is None:
-            expired = self._expired.get(request_id)
-            if expired is None:
-                # stored even if the journal write fails, so a late start is refused
-                self._requests[request_id] = _Request(
-                    cancelled=True, finished_at=monotonic()
-                )
-                self._unrecorded.add(request_id)
-                self._prune()
-            elif expired.outcome == _RESTARTED:
+            if request_id in self._restarted:
                 # its process is unknown here, so nothing can be signalled
                 raise ToolException(
                     f"exec_remote request {request_id} was not killed: the sandbox "
                     "tools server restarted, and the command may still be running."
                 )
+            if request_id not in self._seen:
+                # stored even if the journal write fails, so a late start is refused
+                self._requests[request_id] = _Request(
+                    cancelled=True, finished_at=monotonic()
+                )
+                self._seen.add(request_id)
+                self._unrecorded.add(request_id)
+                self._prune()
         if request_id in self._unrecorded:
             # as if launched, so a restarted server does not launch a late start
             self._record_launch(request_id, "cancelled")
@@ -302,12 +304,19 @@ class WaitController:
                 outcome = expired.outcome
                 if isinstance(outcome, int):
                     outcome = f"ran and exited with code {outcome}"
+            elif request_id in self._restarted:
+                outcome = _RESTARTED
+            elif request_id in self._seen:
+                outcome = "may have run"  # how it ended is no longer kept
+            else:
                 raise ToolException(
-                    f"exec_remote request {request_id} result lost: the command "
-                    f"{outcome}. Its output is no longer kept, and the command is "
-                    "not run again."
+                    f"Unknown or expired exec_remote request {request_id}"
                 )
-            raise ToolException(f"Unknown or expired exec_remote request {request_id}")
+            raise ToolException(
+                f"exec_remote request {request_id} result lost: the command "
+                f"{outcome}. Its output is no longer kept, and the command is "
+                "not run again."
+            )
         return entry
 
     @staticmethod
@@ -352,10 +361,10 @@ class WaitController:
         acknowledge terminal replies on a later start; acknowledged entries hold
         no output and only stop a late duplicate start, and the oldest beyond
         `_MAX_ACKNOWLEDGED_ENTRIES` are dropped early.
-        A dropped request's ID is kept, with how the command ended but without
-        output, for `_EXPIRED_ID_TTL` (at most `_MAX_EXPIRED_IDS` of them), so a
-        late repeated start or replay of it fails, saying the result was lost
-        and how the command ended, instead of launching it again.
+        A dropped request's ID is kept for the server's lifetime, so a late
+        repeated start or replay of it fails, saying the result was lost,
+        instead of launching it again; for `_EXPIRED_ID_TTL` (at most
+        `_MAX_EXPIRED_IDS` of them) the error also says how the command ended.
         """
         now = monotonic()
         acknowledged: list[tuple[str, _Request]] = []

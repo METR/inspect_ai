@@ -179,17 +179,41 @@ async def test_a_record_after_a_write_that_failed_partway_is_kept(
         await after.start(params)
 
 
+@pytest.mark.parametrize("elapsed", [0.0, wait_module._EXPIRED_ID_TTL])
 async def test_a_kill_after_a_server_restart_is_not_reported_done(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, elapsed: float
 ) -> None:
     """The command, in its own session, can outlive a server that exited uncleanly."""
+    clock = [0.0]
+    monkeypatch.setattr(wait_module, "monotonic", lambda: clock[0])
     journal, request_id = tmp_path / "launched", uuid4().hex
     journal.write_text(f"{request_id}\n")
     controller = WaitController()
     controller.persist_launches(journal)
+    clock[0] = elapsed
 
     with pytest.raises(ToolException, match="restarted, and the command may still"):
         await controller.kill(request_id, 0)
+
+
+async def test_a_restarted_server_knows_every_journal_id(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(wait_module, "monotonic", lambda: clock[0])
+    journal, marker = tmp_path / "launched", tmp_path / "launches"
+    command = f"printf x >> {shlex.quote(str(marker))}"
+    first, last = _params(command), _params(command)
+    # one more ID than `_expired` holds
+    others = "".join(f"{i:032x}\n" for i in range(wait_module._MAX_EXPIRED_IDS - 1))
+    journal.write_text(f"{first.request_id}\n{others}{last.request_id}\n")
+    controller.persist_launches(journal)
+    clock[0] = wait_module._EXPIRED_ID_TTL
+
+    for params in (first, last):
+        with pytest.raises(ToolException, match="may have run before the sandbox"):
+            await controller.start(params)
+    assert not marker.exists()
 
 
 async def test_a_launch_that_cannot_be_recorded_is_refused(
@@ -992,6 +1016,31 @@ async def test_start_after_the_reply_expired_does_not_relaunch(
     ):
         await controller.poll(params.request_id, 0, 0.0)
     assert marker.read_text() == "x"
+
+
+@pytest.mark.parametrize("first", ["start", "kill"])
+async def test_a_start_after_its_outcome_expired_is_refused(
+    controller: WaitController,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    first: str,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(wait_module, "monotonic", lambda: clock[0])
+    marker = tmp_path / "launches"
+    marker.touch()
+    params = _params(f"printf x >> {shlex.quote(str(marker))}")
+    if first == "start":
+        assert (await controller.start(params)).result.state == "completed"
+    else:
+        await controller.kill(params.request_id, 0)
+    clock[0] = wait_module._TERMINAL_TTL
+    controller._prune()  # drops the request, keeping how it ended
+    clock[0] += wait_module._EXPIRED_ID_TTL
+
+    with pytest.raises(ToolException, match="result lost: the command may have run"):
+        await controller.start(params)
+    assert marker.read_text() == ("x" if first == "start" else "")
 
 
 async def test_expired_ids_are_forgotten_beyond_their_bounds(

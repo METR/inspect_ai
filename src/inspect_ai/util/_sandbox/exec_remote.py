@@ -233,11 +233,11 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     the command it already launched, or its final result while the server
     keeps it, instead of launching it again. Once that result is no longer
     kept, the resent start fails with an error that says the result was lost
-    and how the command ended (for example its exit code). It remembers request
-    IDs for an hour after their results are dropped, and the IDs it launched
-    across a restart of the sandbox tools server: a start resent after one fails
-    with an error that the command may have run, and is not run again. Servers
-    without support are polled as usual.
+    and, for an hour, how the command ended (for example its exit code). It
+    remembers every request ID, including those it launched before a restart
+    of the sandbox tools server: a start resent after one fails with an error
+    that the command may have run, and is not run again. Servers without
+    support are polled as usual.
     """
 
 
