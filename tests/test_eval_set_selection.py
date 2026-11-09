@@ -4,13 +4,15 @@ import socket
 import subprocess
 import sys
 import textwrap
+import zipfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
+from test_helpers.buffer import simulate_crashed_buffer_db
 
-from inspect_ai import Task, TaskSource, eval_set, task
+from inspect_ai import Task, TaskSource, eval, eval_set, task
 from inspect_ai._control.eval_state import get_eval_states
 from inspect_ai._eval.eval_set_manifest import (
     INSPECT_EVAL_SET_CAPTURE,
@@ -29,8 +31,15 @@ from inspect_ai._eval.eval_set_selection import (
 )
 from inspect_ai._eval.evalset import task_identifier
 from inspect_ai._util.error import PrerequisiteError
+from inspect_ai._util.file import local_path
+from inspect_ai._util.json import to_json_str_safe
 from inspect_ai.dataset import Sample
+from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import EvalLog, list_eval_logs, read_eval_log
+from inspect_ai.log._log import EvalSampleSummary
+from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
+from inspect_ai.log._recorders.eval import LogStart
+from inspect_ai.log._recorders.types import SampleEvent
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.scorer import Score, Scorer, Target, exact, scorer
 from inspect_ai.scorer._metrics import accuracy
@@ -545,9 +554,16 @@ def test_eval_set_selection_definition_completion_fails_the_task(
     assert [log.status for log in logs_written] == ["error", "error"]
 
 
-@pytest.mark.parametrize("retry_immediate", [None, False])
+@pytest.mark.parametrize(
+    "retry_immediate,retry_attempts",
+    # with batch retry, `retry_attempts` counts the first attempt
+    [(None, 1), (False, 2)],
+)
 def test_eval_set_selection_definition_completion_retries_in_process(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_immediate: bool | None
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    retry_immediate: bool | None,
+    retry_attempts: int,
 ) -> None:
     """The definition's task retry runs in the worker, resuming the failed attempt.
 
@@ -568,7 +584,7 @@ def test_eval_set_selection_definition_completion_retries_in_process(
         monkeypatch,
         tmp_path,
         flaky,
-        retry_attempts=1,
+        retry_attempts=retry_attempts,
         retry_immediate=retry_immediate,
         max_samples=1,
     )
@@ -604,6 +620,243 @@ def test_eval_set_selection_definition_completion_honours_a_task_threshold(
     assert attempts.count("0") == 1
     assert logs[0].results is not None
     assert logs[0].results.completed_samples == 3
+
+
+@pytest.mark.parametrize("retry_immediate", [True, False])
+@pytest.mark.parametrize("retry_attempts", [1, 2, 3])
+def test_eval_set_selection_definition_completion_attempts_match_eval_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    retry_attempts: int,
+    retry_immediate: bool,
+) -> None:
+    """A failing task gets as many attempts under `completion="definition"` as under `eval_set()`.
+
+    That is `retry_attempts` retries after the first attempt when retries are
+    immediate, and `retry_attempts` attempts in all when they are batched.
+    """
+    attempts: list[str] = []
+
+    def failing() -> Task:
+        return Task(
+            dataset=[Sample(id="bad", input="bad")],
+            solver=fail_attempts(attempts, {"bad": -1}),
+            scorer=exact(),
+            name="failing",
+        )
+
+    kwargs: dict[str, Any] = dict(
+        retry_attempts=retry_attempts,
+        retry_immediate=retry_immediate,
+        retry_wait=0.01,
+    )
+    success, _ = eval_set(
+        tasks=[failing()],
+        model="mockllm/model",
+        log_dir=str(tmp_path / "stock"),
+        display="plain",
+        **kwargs,
+    )
+    assert not success
+    stock_attempts = len(attempts)
+    attempts.clear()
+
+    success, _ = run_with_completion(
+        monkeypatch, _mkdir(tmp_path / "selection"), failing, **kwargs
+    )
+
+    assert not success
+    assert len(attempts) == stock_attempts
+    assert stock_attempts == retry_attempts + (1 if retry_immediate else 0)
+
+
+def test_eval_set_selection_definition_completion_runs_a_resumed_complete_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only a log completed by recovery stands in for a run: a `resume` of a complete log still runs the task."""
+    success, [first] = run_with_completion(monkeypatch, tmp_path, selection_task_two)
+    assert success
+    selection = EvalSetSelection(
+        version=EVAL_SET_SELECTION_VERSION,
+        eval_set_id="worker-test",
+        tasks=[
+            EvalSetSelectionTask(
+                identifier=task_identifier(first, None), resume=first.location
+            )
+        ],
+        completion="definition",
+    )
+    selection_path = tmp_path / "resume.json"
+    selection_path.write_text(selection.model_dump_json())
+    monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(selection_path))
+    try:
+        success, logs = eval_set(
+            tasks=[selection_task_two()],
+            model="mockllm/model",
+            log_dir=str(tmp_path / "logs"),
+            display="plain",
+        )
+    finally:
+        monkeypatch.delenv(INSPECT_EVAL_SET_SELECTION)
+
+    assert success
+    # the run wrote a log of its own beside the resumed one
+    assert len(list((tmp_path / "logs").glob("*.eval"))) == 2
+
+
+@solver
+def record_generate(calls: list[str]) -> Solver:
+    """Record each sample that reaches inference, then generate."""
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        calls.append(str(state.sample_id))
+        return await generate(state)
+
+    return solve
+
+
+def crash_log(task: Task, log_dir: Path) -> SampleBufferDatabase:
+    """Leave a crashed (`started`) log of a two-sample `task` in `log_dir`.
+
+    Sample 1 completed and sample 2 was in progress at the crash, both only in
+    the sample buffer, which the caller cleans up.
+    """
+    started_log = eval(
+        task, model="mockllm/model", log_dir=str(log_dir), run_samples=False
+    )[0]
+    with zipfile.ZipFile(local_path(started_log.location), "w") as zf:
+        zf.writestr(
+            "_journal/start.json",
+            to_json_str_safe(
+                LogStart(
+                    version=started_log.version,
+                    eval=started_log.eval,
+                    plan=started_log.plan,
+                )
+            ),
+        )
+    buffer = SampleBufferDatabase(started_log.location)
+    now = "2026-01-01T00:00:00+00:00"
+    completed = EvalSampleSummary(
+        id=1,
+        epoch=1,
+        input="Say hello",
+        target="hello",
+        scores={"accuracy": Score(value="C", answer="hello")},
+        started_at=now,
+        completed_at=now,
+    )
+    in_progress = EvalSampleSummary(
+        id=2, epoch=1, input="Say hello", target="hello", started_at=now
+    )
+    for summary in (completed, in_progress):
+        buffer.start_sample(summary)
+        buffer.log_events(
+            [
+                SampleEvent(
+                    id=summary.id,
+                    epoch=1,
+                    event=SampleInitEvent(
+                        sample=Sample(id=summary.id, input="Say hello"), state={}
+                    ),
+                )
+            ]
+        )
+    buffer.complete_sample(completed, sample_metadata=None)
+    simulate_crashed_buffer_db(buffer)
+    return buffer
+
+
+@pytest.mark.parametrize("completion", ["definition", "runner"])
+def test_eval_set_selection_resume_of_a_crashed_log_applies_incomplete_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    completion: Literal["runner", "definition"],
+) -> None:
+    """Under `completion="definition"` a resumed crashed log is recovered as `eval_set()` recovers it.
+
+    With `incomplete_action="error"` both resolve the sample in progress at the
+    crash as an error and finalize the recovered log, so nothing reruns. Under
+    `completion="runner"` recovery keeps the default disposition and the
+    sample reruns.
+    """
+    calls: list[str] = []
+
+    def crashed() -> Task:
+        return Task(
+            dataset=[
+                Sample(id=1, input="Say hello", target="hello"),
+                Sample(id=2, input="Say hello", target="hello"),
+            ],
+            solver=record_generate(calls),
+            name="crashed",
+        )
+
+    kwargs: dict[str, Any] = dict(
+        model="mockllm/model",
+        display="plain",
+        retry_attempts=1,
+        incomplete_action="error",
+    )
+    buffers: list[SampleBufferDatabase] = []
+    try:
+        stock_dir = tmp_path / "stock"
+        buffers.append(crash_log(crashed(), stock_dir))
+        stock_success, stock_logs = eval_set(
+            tasks=[crashed()], log_dir=str(stock_dir), **kwargs
+        )
+        stock_calls = calls.copy()
+        calls.clear()
+
+        selection_dir = tmp_path / "selection"
+        buffers.append(crash_log(crashed(), selection_dir))
+        manifest_path = tmp_path / "manifest.json"
+        monkeypatch.setenv(INSPECT_EVAL_SET_CAPTURE, str(manifest_path))
+        try:
+            with pytest.raises(SystemExit):
+                eval_set(tasks=[crashed()], log_dir=str(selection_dir), **kwargs)
+        finally:
+            monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
+        [captured] = EvalSetCapture.model_validate_json(
+            manifest_path.read_bytes()
+        ).tasks
+        assert captured.complete is False
+        selection = EvalSetSelection(
+            version=EVAL_SET_SELECTION_VERSION,
+            eval_set_id="worker-test",
+            tasks=[
+                EvalSetSelectionTask(
+                    identifier=captured.identifier, resume=captured.log
+                )
+            ],
+            completion=completion,
+        )
+        selection_path = tmp_path / "selection.json"
+        selection_path.write_text(selection.model_dump_json())
+        monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(selection_path))
+        try:
+            success, logs = eval_set(
+                tasks=[crashed()], log_dir=str(selection_dir), **kwargs
+            )
+        finally:
+            monkeypatch.delenv(INSPECT_EVAL_SET_SELECTION)
+    finally:
+        for buffer in buffers:
+            buffer.cleanup()
+
+    # the stock eval set finalizes the recovered log without rerunning anything
+    assert stock_success
+    assert [log.status for log in stock_logs] == ["success"]
+    assert "-recovered" in (stock_logs[0].location or "")
+    assert stock_calls == []
+
+    assert success
+    assert [log.status for log in logs] == ["success"]
+    if completion == "definition":
+        assert "-recovered" in (logs[0].location or "")
+        assert calls == stock_calls
+    else:
+        assert calls == ["2"]
 
 
 def _acp_probe_tasks(

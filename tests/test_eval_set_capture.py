@@ -437,20 +437,73 @@ def test_eval_set_capture_verdict_no_samples_planned(
     assert tasks["foo"].complete is True
 
 
-def test_eval_set_capture_verdict_shuffle_changed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # a different shuffle under a limit selects different samples, so the
-    # eval-set path runs the task fresh rather than resuming the log
-    log_dir = tmp_path / "logs"
-    run_eval_set(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
+def eval_set_verdict(
+    log_dir: Path, tasks: list[Task], **kwargs: Any
+) -> tuple[str | None, bool | None]:
+    """What `eval_set()` does with a copy of a one-task log directory, as capture reports it.
 
-    tasks = capture_logs(
-        monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2, sample_shuffle=2
+    Returns the name of the log it resumes from and `False`, or `(None, None)`
+    when it runs the task fresh, or the name of the log it keeps and `True`
+    when it runs nothing.
+    """
+    stock_dir = log_dir.with_name(f"{log_dir.name}-stock")
+    shutil.copytree(log_dir, stock_dir)
+    by_task_id = {
+        read_eval_log(str(path), header_only=True).eval.task_id: path.name
+        for path in stock_dir.glob("*.eval")
+    }
+    _, logs = eval_set(
+        tasks=tasks,
+        model="mockllm/model",
+        log_dir=str(stock_dir),
+        retry_attempts=0,
+        display="plain",
+        **kwargs,
+    )
+    ran = [log for log in logs if Path(log.location).name not in by_task_id.values()]
+    if not ran:
+        [kept] = logs
+        return Path(kept.location).name, True
+    [run] = ran
+    resumed = by_task_id.get(run.eval.task_id)
+    return (resumed, False) if resumed else (None, None)
+
+
+@pytest.mark.parametrize("earlier_log", [False, True])
+def test_eval_set_capture_verdict_shuffle_changed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, earlier_log: bool
+) -> None:
+    # under a limit a log of another shuffle holds other samples. eval_set runs
+    # the task fresh when it has only such logs, but once it has a log of the
+    # current shuffle it classifies every log of the task, so an incomplete log
+    # of another shuffle makes it resume from that log
+    log_dir = tmp_path / "logs"
+    if earlier_log:
+        run_eval_set(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
+    [other] = run_eval_set(
+        tmp_path / "other", [capture_task_one()], limit=2, sample_shuffle=2
+    )
+    other_log = read_eval_log(other)
+    other_log.status = "error"
+    log_dir.mkdir(exist_ok=True)
+    other_location = log_dir / Path(local_path(other)).name
+    write_eval_log(other_log, location=str(other_location))
+
+    expected = (other_location.name, False) if earlier_log else (None, None)
+    assert (
+        eval_set_verdict(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
+        == expected
     )
 
-    assert tasks["capture_task_one"].log is None
-    assert tasks["capture_task_one"].complete is None
+    tasks = capture_logs(
+        monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2, sample_shuffle=1
+    )
+    verdict = tasks["capture_task_one"]
+
+    assert (
+        Path(local_path(verdict.log)).name if verdict.log else None,
+        verdict.complete,
+    ) == expected
 
 
 def test_eval_set_capture_verdict_ignores_other_logs(

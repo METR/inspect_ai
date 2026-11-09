@@ -87,13 +87,14 @@ overridden.
 
 A runner that would rather not adjudicate completion itself sets
 `completion="definition"` (introduced in version 8): the worker then keeps the
-definition's `fail_on_error` and `continue_on_fail` and retries a failed task
-up to `retry_attempts` times, as an unsharded `eval_set()` would, and its
-result says whether every selected task succeeded under that policy. The
-retries run in the worker and are always immediate, even with
-`retry_immediate=False`, since batch retry is eval-set orchestration. Each
-failed attempt leaves its `error` log in the directory beside the retry's, and
-removing it is the runner's job, as is all other log cleanup.
+definition's `fail_on_error` and `continue_on_fail`, makes as many attempts at
+a failed task as an unsharded `eval_set()` would, and recovers a crashed
+`resume` log with the definition's `incomplete_action`. Its result says
+whether every selected task succeeded under that policy. The retries run in
+the worker and are always immediate, even with `retry_immediate=False`, since
+batch retry is eval-set orchestration. Each failed attempt leaves its `error`
+log in the directory beside the retry's, and removing it is the runner's job,
+as is all other log cleanup.
 
 Scanning in selection mode is **record-only**: a worker dispatches scanners
 per settled sample and writes scout's per-transcript buffer, but never touches
@@ -212,9 +213,9 @@ class EvalSetSelection(BaseModel):
     completion: Literal["runner", "definition"] = "runner"
     """Who decides whether a selected task is complete.
 
-    `"runner"` (the default): the worker forces `fail_on_error=False` and does no task retry, so sample errors never fail a task, and the runner decides from the log what to rerun.
+    `"runner"` (the default): the worker forces `fail_on_error=False` and does no task retry, so sample errors never fail a task, and the runner decides from the log what to rerun. A crashed (`started`) `resume` log is recovered with the default disposition, so samples in progress at the crash re-run.
 
-    `"definition"`: the worker keeps the definition's `fail_on_error` and `continue_on_fail` and retries a failed task up to `retry_attempts` times (10 when unset), resuming each failed attempt's completed samples. Retries run in the worker and are always immediate, even with `retry_immediate=False`, since batch retry is eval-set orchestration. Each failed attempt's `error` log stays in the log directory for the runner to clean up. The definition's `incomplete_action` is not applied: a task's `resume` of a crashed (`started`) log recovers it with the default disposition, so samples in progress at the crash re-run.
+    `"definition"`: the worker keeps the definition's `fail_on_error` and `continue_on_fail` and makes as many attempts at a failed task as an unsharded `eval_set()` would: the first attempt and up to `retry_attempts` retries (10 when unset), or `retry_attempts` attempts in all with `retry_immediate=False`. Each retry resumes the failed attempt's completed samples. Retries run in the worker and are always immediate, since batch retry is eval-set orchestration. Each failed attempt's `error` log stays in the log directory for the runner to clean up. A crashed (`started`) `resume` log is recovered as `eval_set()` recovers a task's latest log, with the definition's `incomplete_action` and `incomplete_max`; when that leaves the log complete (as `incomplete_action="error"` can), the task is not run again and the recovered log is its result.
     """
 
 

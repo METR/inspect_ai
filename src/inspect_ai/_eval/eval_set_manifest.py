@@ -114,9 +114,9 @@ class EvalSetCaptureTask(BaseModel):
     complete: bool | None = None
     """Inspect's completion verdict on the task's logs, as an unsharded `eval_set` over the same log directory reaches it. Added in version 4.
 
-    `True` means it would not rerun the task, `False` means it would resume the task from `log`, and `None` means there is no log it would use (none at all, or only logs whose `sample_shuffle` no longer matches under a `limit`), so it would run the task fresh.
+    `True` means it would not rerun the task, `False` means it would resume the task from `log`, and `None` means there is no log it would use (none at all, or under a `limit` only logs of another `sample_shuffle`), so it would run the task fresh.
 
-    Logs whose `sample_shuffle` no longer matches under a `limit` are excluded, as the eval-set path's pending check excludes them (its classification still sees them, so an incomplete log of an earlier shuffle can make it rerun a task reported complete here). A crashed (`started`) log is incomplete whatever the definition's `incomplete_action`: recovering it writes a log, which capture never does.
+    A task that has a log of the current `sample_shuffle` is classified on all of its logs, other shuffles included, as `eval_set` classifies it. A crashed (`started`) log is incomplete whatever the definition's `incomplete_action`, because recovering it writes a log, which capture never does; a `completion="definition"` selection that resumes the task from it applies the disposition, as `eval_set` would.
     """
 
 
