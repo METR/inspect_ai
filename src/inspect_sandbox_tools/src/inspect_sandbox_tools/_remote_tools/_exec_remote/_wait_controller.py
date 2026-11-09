@@ -85,7 +85,8 @@ class WaitController:
     ID reports that request instead of launching again. Retention is described
     in `_prune`; a missing entry is an explicit error, never an implicit new launch.
     With `persist_launches`, a restarted server also knows the IDs the previous one
-    launched, so a start repeated across a restart is reported lost, not run again.
+    launched or cancelled before their start arrived, so a start repeated (or
+    delayed) across a restart is reported lost, not run.
     """
 
     def __init__(self) -> None:
@@ -213,6 +214,8 @@ class WaitController:
                     cancelled=True, finished_at=monotonic()
                 )
                 self._prune()
+                # as if launched, so a restarted server does not launch a late start
+                self._record_launch(request_id)
             return KillResult(seq=0, stdout="", stderr="")
         entry.cancelled = True
         if entry.stop is None:

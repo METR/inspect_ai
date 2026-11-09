@@ -417,16 +417,28 @@ async def test_a_lost_result_says_how_the_command_ended(
         await controller.start(killed)
 
 
-async def test_kill_before_start_prevents_a_late_launch(
-    controller: WaitController, tmp_path: Path
-) -> None:
-    marker = tmp_path / "should-not-exist"
+async def test_kill_before_start_prevents_a_late_launch(tmp_path: Path) -> None:
+    journal, marker = tmp_path / "launched", tmp_path / "should-not-exist"
     params = _params(f"printf unexpected > {shlex.quote(str(marker))}")
+    before = WaitController()
+    before.persist_launches(journal)
+    try:
+        await before.kill(params.request_id, 0)
+        with pytest.raises(ToolException, match="cancelled before it started"):
+            await before.start(params)
+    finally:
+        with anyio.fail_after(10):
+            await before.shutdown()
 
-    await controller.kill(params.request_id, 0)
-    with pytest.raises(ToolException, match="cancelled before it started"):
-        await controller.start(params)
-
+    # nor does a restarted server launch it
+    after = WaitController()
+    after.persist_launches(journal)
+    try:
+        with pytest.raises(ToolException, match="may have run before the sandbox"):
+            await after.start(params)
+    finally:
+        with anyio.fail_after(10):
+            await after.shutdown()
     assert not marker.exists()
 
 
