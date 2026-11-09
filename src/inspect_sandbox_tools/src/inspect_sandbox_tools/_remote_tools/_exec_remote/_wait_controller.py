@@ -95,7 +95,8 @@ class WaitController:
 
         A client resends a start whose reply was lost (and the sandbox transport
         retries a dropped call), so a server restarted in between must know which
-        IDs the previous one already launched.
+        IDs the previous one already launched. A start whose ID cannot be
+        recorded is refused rather than launched.
         """
         try:
             launched = path.read_text().split()
@@ -113,11 +114,10 @@ class WaitController:
             with self._launched_path.open("a") as launched:
                 launched.write(f"{request_id}\n")
         except OSError as ex:
-            # Best effort: a full disk must not stop commands (such as cleanup) running.
-            print(
-                f"exec_remote: could not record request {request_id}: {ex}",
-                file=sys.stderr,
-            )
+            raise ToolException(
+                f"exec_remote request {request_id} was not started because it "
+                f"could not be recorded: {ex}"
+            ) from ex
 
     async def start(
         self, params: StartWaitParams, can_switch_user: bool = False
@@ -131,9 +131,9 @@ class WaitController:
             return await self.poll(params.request_id, 0, params.wait_seconds)
         if params.stdin_open:
             raise ToolException("Awaitable exec_remote requests cannot keep stdin open")
+        self._record_launch(params.request_id)
         entry = _Request(seen_at=monotonic())
         self._requests[params.request_id] = entry
-        self._record_launch(params.request_id)
         entry.launch = asyncio.create_task(self._launch(entry, params, can_switch_user))
         await asyncio.shield(entry.launch)
         job = self._job(entry, params.request_id)

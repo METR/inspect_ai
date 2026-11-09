@@ -149,11 +149,21 @@ async def test_a_restarted_server_does_not_relaunch_a_request(tmp_path: Path) ->
     assert marker.read_text() == "x"
 
 
-async def test_a_launch_that_cannot_be_recorded_still_runs(
+async def test_a_launch_that_cannot_be_recorded_is_refused(
     controller: WaitController, tmp_path: Path
 ) -> None:
+    marker = tmp_path / "launches"
     controller.persist_launches(tmp_path / "missing" / "launched")
-    assert (await controller.start(_params("printf ran"))).result.stdout == "ran"
+    params = _params(f"printf x >> {shlex.quote(str(marker))}")
+
+    with pytest.raises(ToolException, match="not started because it could not be"):
+        await controller.start(params)
+    assert params.request_id not in controller._requests
+    assert not marker.exists()
+    # nothing is left behind: once recording works, a resent start runs it
+    (tmp_path / "missing").mkdir()
+    assert (await controller.start(params)).result.state == "completed"
+    assert marker.read_text() == "x"
 
 
 async def test_start_returns_output_and_exit_together_within_the_wait(
