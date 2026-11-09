@@ -155,6 +155,8 @@ class WaitController:
             entry.ready.set()
 
         try:
+            if entry.cancelled:  # killed before this task first ran
+                return
             await Job.create(
                 params.command,
                 input=params.input,

@@ -499,6 +499,37 @@ async def test_kill_while_launch_is_pending_cleans_up_the_created_process(
     assert all(job._process.returncode is not None for job in jobs)
 
 
+async def test_a_kill_that_arrives_with_its_start_spawns_nothing(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[Job] = []
+    original_create = Job.create
+
+    async def record_create(*args: Any, **kwargs: Any) -> Job:
+        created.append(job := await original_create(*args, **kwargs))
+        return job
+
+    monkeypatch.setattr(Job, "create", record_create)
+    params = _params("true")
+
+    async def start() -> None:
+        with pytest.raises(ToolException, match="cancelled before it started"):
+            await controller.start(params)
+
+    async def kill() -> None:
+        # the start registered the request; its launch has not run yet
+        launch = controller._requests[params.request_id].launch
+        assert launch is not None and not launch.done()
+        assert (await controller.kill(params.request_id, 0)).seq == 0
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(start)
+            tasks.start_soon(kill)
+
+    assert not created
+
+
 async def test_launch_error_is_raised_as_a_legacy_start_raises_it(
     controller: WaitController, tmp_path: Path
 ) -> None:
