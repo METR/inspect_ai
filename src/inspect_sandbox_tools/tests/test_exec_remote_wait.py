@@ -179,6 +179,19 @@ async def test_a_record_after_a_write_that_failed_partway_is_kept(
         await after.start(params)
 
 
+async def test_a_kill_after_a_server_restart_is_not_reported_done(
+    tmp_path: Path,
+) -> None:
+    """The command, in its own session, can outlive a server that exited uncleanly."""
+    journal, request_id = tmp_path / "launched", uuid4().hex
+    journal.write_text(f"{request_id}\n")
+    controller = WaitController()
+    controller.persist_launches(journal)
+
+    with pytest.raises(ToolException, match="restarted, and the command may still"):
+        await controller.kill(request_id, 0)
+
+
 async def test_a_launch_that_cannot_be_recorded_is_refused(
     controller: WaitController, tmp_path: Path
 ) -> None:

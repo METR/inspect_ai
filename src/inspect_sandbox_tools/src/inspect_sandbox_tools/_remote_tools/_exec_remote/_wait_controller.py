@@ -219,13 +219,20 @@ class WaitController:
         self._prune()
         entry = self._requests.get(request_id)
         if entry is None:
-            if request_id not in self._expired:
+            expired = self._expired.get(request_id)
+            if expired is None:
                 # as if launched, so a restarted server does not launch a late start
                 self._record_launch(request_id, "cancelled")
                 self._requests[request_id] = _Request(
                     cancelled=True, finished_at=monotonic()
                 )
                 self._prune()
+            elif expired.outcome == _RESTARTED:
+                # its process is unknown here, so nothing can be signalled
+                raise ToolException(
+                    f"exec_remote request {request_id} was not killed: the sandbox "
+                    "tools server restarted, and the command may still be running."
+                )
             return KillResult(seq=0, stdout="", stderr="")
         entry.cancelled = True
         if entry.stop is None:
