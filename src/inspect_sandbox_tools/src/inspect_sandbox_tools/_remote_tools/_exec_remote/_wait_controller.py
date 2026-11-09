@@ -112,7 +112,7 @@ class WaitController:
             self._expired[request_id] = _Expired(now, _RESTARTED)
         self._launched_path = path
 
-    def _record_launch(self, request_id: str) -> None:
+    def _record_launch(self, request_id: str, action: str = "started") -> None:
         if self._launched_path is None:
             return
         try:
@@ -120,7 +120,7 @@ class WaitController:
                 launched.write(f"{request_id}\n")
         except (OSError, RuntimeError) as ex:  # RuntimeError: an untrusted entry
             raise ToolException(
-                f"exec_remote request {request_id} was not started because it "
+                f"exec_remote request {request_id} was not {action} because it "
                 f"could not be recorded: {ex}"
             ) from ex
 
@@ -219,12 +219,12 @@ class WaitController:
         entry = self._requests.get(request_id)
         if entry is None:
             if request_id not in self._expired:
+                # as if launched, so a restarted server does not launch a late start
+                self._record_launch(request_id, "cancelled")
                 self._requests[request_id] = _Request(
                     cancelled=True, finished_at=monotonic()
                 )
                 self._prune()
-                # as if launched, so a restarted server does not launch a late start
-                self._record_launch(request_id)
             return KillResult(seq=0, stdout="", stderr="")
         entry.cancelled = True
         if entry.stop is None:

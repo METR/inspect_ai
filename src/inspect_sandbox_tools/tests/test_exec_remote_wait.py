@@ -180,6 +180,19 @@ async def test_a_launch_that_cannot_be_recorded_is_refused(
     assert marker.read_text() == "x"
 
 
+async def test_a_kill_that_cannot_be_recorded_is_refused(
+    controller: WaitController, tmp_path: Path
+) -> None:
+    controller.persist_launches(tmp_path / "missing" / "launched")
+    request_id = uuid4().hex
+
+    # a repeated kill is refused too, not taken as a recorded cancellation
+    for _ in range(2):
+        with pytest.raises(ToolException, match="because it could not be recorded"):
+            await controller.kill(request_id, 0)
+    assert request_id not in controller._requests
+
+
 @pytest.mark.parametrize("planted", ["symlink", "fifo"])
 async def test_an_untrusted_journal_is_refused(
     controller: WaitController, tmp_path: Path, planted: str
