@@ -3,12 +3,15 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import zipfile
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_helpers.buffer import simulate_crashed_buffer_db
+from test_helpers.utils import identity_solver
 
-from inspect_ai import Task, TaskSource, eval_set, task
+from inspect_ai import Task, TaskSource, eval, eval_set, task
 from inspect_ai._eval.eval_set_manifest import (
     EVAL_SET_CAPTURE_VERSION,
     INSPECT_EVAL_SET_CAPTURE,
@@ -19,14 +22,21 @@ from inspect_ai._eval.eval_set_manifest import (
 )
 from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
 from inspect_ai._util.error import PrerequisiteError
+from inspect_ai._util.file import local_path
+from inspect_ai._util.json import to_json_str_safe
 from inspect_ai.dataset import Sample
+from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import (
     ProvenanceData,
     invalidate_samples,
     read_eval_log,
     write_eval_log,
 )
-from inspect_ai.scorer import exact
+from inspect_ai.log._log import EvalSampleSummary
+from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
+from inspect_ai.log._recorders.eval import LogStart
+from inspect_ai.log._recorders.types import SampleEvent
+from inspect_ai.scorer import Score, exact
 from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
 
 
@@ -298,6 +308,16 @@ def run_eval_set(log_dir: Path, tasks: list[Task], **kwargs: Any) -> list[str]:
     return [Path(log.location).as_uri() for log in logs]
 
 
+def log_dir_state(log_dir: Path) -> list[tuple[Path, int, int]] | None:
+    """Every path under a log directory with its mtime and size, or `None` if it doesn't exist."""
+    if not log_dir.exists():
+        return None
+    return sorted(
+        (path, path.stat().st_mtime_ns, path.stat().st_size)
+        for path in log_dir.rglob("*")
+    )
+
+
 def capture_logs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -307,7 +327,7 @@ def capture_logs(
 ) -> dict[str, EvalSetCaptureTask]:
     """Capture an eval set over an existing log directory, by task name."""
     manifest_path = tmp_path / "manifest.json"
-    before = sorted(log_dir.rglob("*")) if log_dir.exists() else None
+    before = log_dir_state(log_dir)
     monkeypatch.setenv(INSPECT_EVAL_SET_CAPTURE, str(manifest_path))
     with pytest.raises(SystemExit) as exc_info:
         eval_set(
@@ -318,9 +338,8 @@ def capture_logs(
             **kwargs,
         )
     assert exc_info.value.code == 0
-    # capture reads the log directory and never writes to or removes from it
-    after = sorted(log_dir.rglob("*")) if log_dir.exists() else None
-    assert after == before
+    # capture reads the log directory and never writes to it
+    assert log_dir_state(log_dir) == before
     capture = EvalSetCapture.model_validate_json(manifest_path.read_bytes())
     return {t.name: t for t in capture.tasks}
 
@@ -489,6 +508,104 @@ def test_eval_set_capture_verdict_logs_of_two_runs(
     assert tasks["capture_task_one"].complete is complete
 
 
+def test_eval_set_capture_verdict_default_log_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a definition that names no log_dir is recorded as naming none, while the
+    # verdicts come from the directory eval_set() would use
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    before = log_dir_state(log_dir)
+    manifest_path = tmp_path / "manifest.json"
+    monkeypatch.setenv("INSPECT_LOG_DIR", str(log_dir))
+    monkeypatch.setenv(INSPECT_EVAL_SET_CAPTURE, str(manifest_path))
+    with pytest.raises(SystemExit):
+        eval_set(tasks=[capture_task_one()], model="mockllm/model", display="plain")
+
+    capture = EvalSetCapture.model_validate_json(manifest_path.read_bytes())
+    assert capture.options["log_dir"] is None
+    assert capture.tasks[0].log == location
+    assert capture.tasks[0].complete is True
+    assert log_dir_state(log_dir) == before
+
+
+def test_eval_set_capture_verdict_crashed_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a crashed log whose buffer an eval_set with incomplete_action="error"
+    # would recover and finalize (see test_eval_set_incomplete_action_error_
+    # finalizes): capture recovers nothing, so the log stays incomplete
+    samples = [
+        Sample(id=1, input="Say hello", target="hello"),
+        Sample(id=2, input="Say hello", target="hello"),
+    ]
+    crashed_task = Task(
+        dataset=samples, solver=[identity_solver()], name="capture_crashed"
+    )
+    log_dir = tmp_path / "logs"
+    started_log = eval(
+        crashed_task, model="mockllm/model", log_dir=str(log_dir), run_samples=False
+    )[0]
+    location = local_path(started_log.location)
+    with zipfile.ZipFile(location, "w") as zf:
+        zf.writestr(
+            "_journal/start.json",
+            to_json_str_safe(
+                LogStart(
+                    version=started_log.version,
+                    eval=started_log.eval,
+                    plan=started_log.plan,
+                )
+            ),
+        )
+
+    buffer = SampleBufferDatabase(started_log.location)
+    try:
+        now = "2026-01-01T00:00:00+00:00"
+        completed = EvalSampleSummary(
+            id=1,
+            epoch=1,
+            input="Say hello",
+            target="hello",
+            scores={"accuracy": Score(value="C", answer="hello")},
+            started_at=now,
+            completed_at=now,
+        )
+        buffer.start_sample(completed)
+        buffer.log_events(
+            [
+                SampleEvent(
+                    id=1, epoch=1, event=SampleInitEvent(sample=samples[0], state={})
+                )
+            ]
+        )
+        buffer.complete_sample(completed, sample_metadata=None)
+        in_progress = EvalSampleSummary(
+            id=2, epoch=1, input="Say hello", target="hello", started_at=now
+        )
+        buffer.start_sample(in_progress)
+        buffer.log_events(
+            [
+                SampleEvent(
+                    id=2, epoch=1, event=SampleInitEvent(sample=samples[1], state={})
+                )
+            ]
+        )
+        db_path = simulate_crashed_buffer_db(buffer)
+
+        tasks = capture_logs(
+            monkeypatch, tmp_path, log_dir, [crashed_task], incomplete_action="error"
+        )
+
+        assert tasks["capture_crashed"].log == Path(location).as_uri()
+        assert tasks["capture_crashed"].complete is False
+        # no recovered log was written (checked by capture_logs) and the
+        # buffer a recovery would sweep is still there
+        assert db_path.exists()
+    finally:
+        buffer.cleanup()
+
+
 def test_samples_for_limit() -> None:
     cases: list[tuple[int, int | tuple[int, int] | None, int]] = [
         (10, None, 10),
@@ -554,8 +671,9 @@ _EXPECTED_CAPTURE_TASK_FIELDS: dict[int, set[str]] = {
 # selection mode. `options["scanners"]` remains the quick boolean beside it.
 _EXPECTED_CAPTURE_TASK_FIELDS[3] = _EXPECTED_CAPTURE_TASK_FIELDS[2]
 
-# v4 added each task's newest usable log in the log directory (`log`) and
-# Inspect's completion verdict on it (`complete`), so a runner can plan from
+# v4 added Inspect's completion verdict on each task's logs (`complete`) and
+# the log it applies to (`log`): the newest log, or the newest incomplete one
+# when any of the task's latest logs is incomplete. A runner can then plan from
 # the capture without re-deriving completion from log headers.
 _EXPECTED_CAPTURE_TASK_FIELDS[4] = _EXPECTED_CAPTURE_TASK_FIELDS[3] | {
     "log",

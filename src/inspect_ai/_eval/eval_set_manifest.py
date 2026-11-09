@@ -106,14 +106,17 @@ class EvalSetCaptureTask(BaseModel):
     """Effective number of epochs."""
 
     log: str | None = None
-    """Location of this task's log in the log directory: its newest log, or when `complete` is `False` its newest incomplete log, which is the one an unsharded `eval_set` resumes from. Added in version 4."""
+    """Location of this task's log in the log directory: its newest log, or when `complete` is `False` its newest incomplete log, which is the one an unsharded `eval_set` resumes from. Added in version 4.
+
+    The location is as the log directory's listing names it, which for a local directory is a `file://` URI.
+    """
 
     complete: bool | None = None
     """Inspect's completion verdict on the task's logs, as an unsharded `eval_set` over the same log directory reaches it. Added in version 4.
 
     `True` means it would not rerun the task, `False` means it would resume the task from `log`, and `None` means there is no log it would use (none at all, or only logs whose `sample_shuffle` no longer matches under a `limit`), so it would run the task fresh.
 
-    A crashed (`started`) log is incomplete whatever the definition's `incomplete_action`: recovering it writes a log, which capture never does.
+    Logs whose `sample_shuffle` no longer matches under a `limit` are excluded, as the eval-set path's pending check excludes them (its classification still sees them, so an incomplete log of an earlier shuffle can make it rerun a task reported complete here). A crashed (`started`) log is incomplete whatever the definition's `incomplete_action`: recovering it writes a log, which capture never does.
     """
 
 

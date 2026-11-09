@@ -2007,7 +2007,7 @@ def _captured_task_logs(
 ) -> dict[str, TaskLogVerdict]:
     """Each task's log in `log_dir`, with the completion verdict the eval-set path reaches on it.
 
-    Lists and classifies logs as the eval-set path does, from headers only, but never cleans up or recovers a log, since both write to the log directory. So a crashed (`started`) log is incomplete whatever `incomplete_action` says. Logs of tasks outside the eval set are skipped rather than refused: refusing them is the eval-set path's or the runner's decision.
+    Lists and classifies logs as the eval-set path does, from headers only, but never cleans up or recovers a log, since both write to the log directory. So a crashed (`started`) log is incomplete whatever `incomplete_action` says. Logs of tasks outside the eval set are skipped rather than refused: refusing them is the eval-set path's or the runner's decision. Logs whose sample shuffle no longer matches are excluded, as the eval-set path's pending check excludes them, although its classification below that check still sees them.
 
     A task can have a latest log per task id (two runs that did not resume each other). The eval-set path reruns the task if any of them is incomplete, resuming from that log, so the verdict here does the same.
 
