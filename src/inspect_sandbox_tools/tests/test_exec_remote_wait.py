@@ -163,6 +163,22 @@ async def test_a_restarted_server_does_not_relaunch_a_request(tmp_path: Path) ->
     assert marker.read_text() == "x"
 
 
+async def test_a_record_after_a_write_that_failed_partway_is_kept(
+    tmp_path: Path,
+) -> None:
+    journal = tmp_path / "launched"
+    journal.write_text(uuid4().hex[:5])  # the start of a record, cut off
+    params = _params("true")
+    before = WaitController()
+    before.persist_launches(journal)
+    await before.kill(params.request_id, 0)
+
+    after = WaitController()
+    after.persist_launches(journal)
+    with pytest.raises(ToolException, match="may have run before the sandbox"):
+        await after.start(params)
+
+
 async def test_a_launch_that_cannot_be_recorded_is_refused(
     controller: WaitController, tmp_path: Path
 ) -> None:

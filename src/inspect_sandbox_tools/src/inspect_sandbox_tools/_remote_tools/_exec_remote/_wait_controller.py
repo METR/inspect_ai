@@ -117,7 +117,8 @@ class WaitController:
             return
         try:
             with open_private_append(self._launched_path) as launched:
-                launched.write(f"{request_id}\n")
+                # on its own line even after a write that failed partway
+                launched.write(f"\n{request_id}\n")
         except (OSError, RuntimeError) as ex:  # RuntimeError: an untrusted entry
             raise ToolException(
                 f"exec_remote request {request_id} was not {action} because it "
