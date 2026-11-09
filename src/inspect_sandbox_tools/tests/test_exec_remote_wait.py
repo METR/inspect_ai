@@ -1024,6 +1024,7 @@ async def test_retention_limits_do_not_evict_running_jobs(
     controller: WaitController, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
+    monkeypatch.setattr(wait_module, "_MAX_RETAINED_BYTES", 0)
     running = _params("sleep 60")
     running.wait_seconds = 0.0
     started = await controller.start(running)
