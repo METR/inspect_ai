@@ -34,6 +34,7 @@ from inspect_ai._util._json_rpc import (
 )
 from inspect_ai._util.cpu import effective_cpu_count
 from inspect_ai._util.logger import warn_once
+from inspect_ai._util.working import untracked_sandbox_execs
 from inspect_ai.util._concurrency import (
     ConcurrencySemaphore,
     get_or_create_semaphore,
@@ -566,7 +567,8 @@ class ExecRemoteProcess:
             try:
                 # Like exec_remote_start, the start is the command's one sandbox
                 # event; its reply carries command output, which is logged elsewhere.
-                with sandbox_proxy.no_event_output():
+                # Held like a poll, it is not known work either.
+                with sandbox_proxy.no_event_output(), untracked_sandbox_execs():
                     try:
                         initial = await self._rpc(
                             "exec_remote_start_wait",
