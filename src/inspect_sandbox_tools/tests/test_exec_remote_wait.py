@@ -641,6 +641,29 @@ async def test_a_repeated_kill_does_not_resend_output_the_host_has(
     assert (again.seq, again.stdout, again.stderr) == (killed.seq, "", "")
 
 
+async def test_kill_after_exit_returns_output_still_buffered(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 8)
+    output = "0123456789abcdefghijklmnopqrstuv"
+    params = _params(f"printf {output}")
+    params.wait_seconds = 0.0
+    first = await controller.start(params)
+    job = controller._requests[params.request_id].job
+    assert job is not None
+    with anyio.fail_after(5):
+        while not job.exited:
+            await anyio.sleep(0.05)
+    # sees the exit, with more output left than one reply holds
+    polled = await controller.poll(params.request_id, first.result.seq, 0.0)
+    assert polled.result.state == "running"
+
+    killed = await controller.kill(params.request_id, polled.result.seq)
+
+    delivered = len(first.result.stdout + polled.result.stdout)
+    assert killed.stdout == output[delivered : delivered + 8]
+
+
 async def test_kill_after_completion_keeps_the_completed_reply(
     controller: WaitController,
 ) -> None:
