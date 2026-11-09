@@ -210,16 +210,26 @@ async def test_a_launch_that_cannot_be_recorded_is_refused(
 
 
 async def test_a_kill_that_cannot_be_recorded_is_refused(
-    controller: WaitController, tmp_path: Path
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    controller.persist_launches(tmp_path / "missing" / "launched")
-    request_id = uuid4().hex
+    clock = [0.0]
+    monkeypatch.setattr(wait_module, "monotonic", lambda: clock[0])
+    journal, marker = tmp_path / "missing" / "launched", tmp_path / "launches"
+    controller.persist_launches(journal)
+    params = _params(f"printf x >> {shlex.quote(str(marker))}")
 
-    # a repeated kill is refused too, not taken as a recorded cancellation
-    for _ in range(2):
-        with pytest.raises(ToolException, match="because it could not be recorded"):
-            await controller.kill(request_id, 0)
-    assert request_id not in controller._requests
+    # a kill, its repeat, and a repeat once the marker has expired
+    for now in (0.0, 0.0, wait_module._TERMINAL_TTL):
+        clock[0] = now
+        with pytest.raises(ToolException, match="not cancelled because it could not"):
+            await controller.kill(params.request_id, 0)
+    journal.parent.mkdir()
+    # a late start that could now be recorded is refused all the same
+    with pytest.raises(ToolException, match="cancelled before it started"):
+        await controller.start(params)
+    assert (await controller.kill(params.request_id, 0)).seq == 0
+    assert params.request_id in journal.read_text().split()
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("planted", ["symlink", "fifo"])

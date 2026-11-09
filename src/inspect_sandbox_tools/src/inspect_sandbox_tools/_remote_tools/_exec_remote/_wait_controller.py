@@ -94,6 +94,7 @@ class WaitController:
         self._expired: OrderedDict[str, _Expired] = OrderedDict()
         self._retired_jobs: list[Job] = []
         self._launched_path: Path | None = None
+        self._unrecorded: set[str] = set()  # cancelled, but not in the journal yet
 
     def persist_launches(self, path: Path) -> None:
         """Record each request ID in `path` before launching it, and load earlier ones.
@@ -229,11 +230,11 @@ class WaitController:
         if entry is None:
             expired = self._expired.get(request_id)
             if expired is None:
-                # as if launched, so a restarted server does not launch a late start
-                self._record_launch(request_id, "cancelled")
+                # stored even if the journal write fails, so a late start is refused
                 self._requests[request_id] = _Request(
                     cancelled=True, finished_at=monotonic()
                 )
+                self._unrecorded.add(request_id)
                 self._prune()
             elif expired.outcome == _RESTARTED:
                 # its process is unknown here, so nothing can be signalled
@@ -241,6 +242,11 @@ class WaitController:
                     f"exec_remote request {request_id} was not killed: the sandbox "
                     "tools server restarted, and the command may still be running."
                 )
+        if request_id in self._unrecorded:
+            # as if launched, so a restarted server does not launch a late start
+            self._record_launch(request_id, "cancelled")
+            self._unrecorded.discard(request_id)
+        if entry is None:
             return KillResult(seq=0, stdout="", stderr="")
         entry.cancelled = True
         if entry.stop is None:
