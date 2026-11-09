@@ -273,7 +273,9 @@ async def test_output_from_a_child_after_exit_is_kept(
 async def test_a_child_flooding_the_pipe_does_not_block_completion(
     controller: WaitController, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(job_module, "_READER_GRACE_SECONDS", 0.2)
+    # Waiting for the host to drain does not use the grace, only reading does:
+    # about 1 ms per reply here.
+    monkeypatch.setattr(job_module, "_READER_GRACE_SECONDS", 0.02)
     monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 4 * 1024 * 1024)
     params = _params("yes & sleep 0.3; exit 3")  # the pipe is full before exit
     reply = await controller.start(params)

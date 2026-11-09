@@ -158,6 +158,7 @@ class Job:
         self._changed = asyncio.Event()
         self._exit_task: asyncio.Task[int] | None = None
         self._readers_deadline: float | None = None
+        self._readers_checked = 0.0
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -493,7 +494,10 @@ class Job:
         call, for a child that still holds the pipes. A poll with a full reply
         buffered does not wait: sending that reply frees the space a reader
         blocked on a full buffer needs, so output larger than the buffer is not
-        cut off, and the readers keep what is left of their time.
+        cut off, and the readers keep what is left of their time. Time a reader
+        spends blocked on a full buffer, waiting for the host to drain it, does
+        not count, however slowly the host polls; a child that writes forever
+        still uses the time the readers spend reading.
 
         Only the tasks still running when called are awaited, so a repeated
         call does not re-raise an error an earlier call already handled. The
@@ -504,10 +508,19 @@ class Job:
         readers = [t for t in (self._stdout_task, self._stderr_task) if not t.done()]
         if not readers:
             return
-        loop = asyncio.get_running_loop()
+        now = asyncio.get_running_loop().time()
         if self._readers_deadline is None:
-            self._readers_deadline = loop.time() + _READER_GRACE_SECONDS
-        remaining = self._readers_deadline - loop.time()
+            self._readers_deadline = now + _READER_GRACE_SECONDS
+            self._readers_checked = now
+        blocked = [
+            buffer.blocked_since
+            for buffer in (self._stdout_buffer, self._stderr_buffer)
+            if buffer.blocked_since is not None
+        ]
+        if blocked:
+            self._readers_deadline += now - max(min(blocked), self._readers_checked)
+        self._readers_checked = now
+        remaining = self._readers_deadline - now
         if reply_full and remaining > 0:
             return
         _, pending = await asyncio.wait(readers, timeout=max(remaining, 0.0))

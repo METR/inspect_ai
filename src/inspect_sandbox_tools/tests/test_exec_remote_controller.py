@@ -345,6 +345,25 @@ class TestPollDeliversOutputAfterLeaderExits:
         assert (result.state, len(stdout)) == ("completed", 77824)
 
     @pytest.mark.asyncio
+    async def test_output_larger_than_the_buffer_survives_a_slow_poll_after_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # At exit 64 KiB is buffered and the rest is still in the pipe, so with
+        # 16 KiB replies the drain takes many polls, one of them late.
+        monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 64 * 1024)
+        monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 16 * 1024)
+        controller = Controller()
+        pid = await controller.submit("head -c 262144 /dev/zero | tr '\\0' x")
+        job = controller._jobs[pid]
+        with anyio.fail_after(5):
+            while not job.exited:
+                await anyio.sleep(0.01)
+        await controller.poll(pid, 0)
+        await anyio.sleep(1.1)  # longer than the readers' grace after exit
+        result, stdout, _ = await self._poll_to_completion(controller, pid, 0.01)
+        assert (result.state, len(stdout)) == ("completed", 262144)
+
+    @pytest.mark.asyncio
     async def test_late_stdout_from_background_child_is_delivered(self) -> None:
         controller = Controller()
         pid = await controller.submit("(sleep 0.3; printf late) & printf early")

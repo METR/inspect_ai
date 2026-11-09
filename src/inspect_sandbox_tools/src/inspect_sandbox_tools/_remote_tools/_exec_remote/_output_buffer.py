@@ -23,6 +23,8 @@ class BoundedByteBuffer:
         self._buf = bytearray()
         self._has_space = asyncio.Event()
         self._has_space.set()
+        self.blocked_since: float | None = None
+        """Event loop time a put() began waiting for space; None while none waits."""
 
     @property
     def size(self) -> int:
@@ -33,9 +35,14 @@ class BoundedByteBuffer:
         """Append data, awaiting if the buffer is full."""
         if not data:
             return
-        while len(self._buf) >= self._max_bytes:
-            self._has_space.clear()
-            await self._has_space.wait()
+        try:
+            while len(self._buf) >= self._max_bytes:
+                if self.blocked_since is None:
+                    self.blocked_since = asyncio.get_running_loop().time()
+                self._has_space.clear()
+                await self._has_space.wait()
+        finally:
+            self.blocked_since = None
         self._buf.extend(data)
 
     def drain(self, max_bytes: int | None = None) -> bytes:
