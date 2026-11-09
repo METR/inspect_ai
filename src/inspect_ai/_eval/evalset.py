@@ -556,8 +556,19 @@ def eval_set(
         | list[PreviousTask]
         | list[ResolvedTask | PreviousTask],
         eval_set_tasks: list[str],
-        selection_mode: bool = False,
+        selection_completion: Literal["runner", "definition"] | None = None,
     ) -> list[EvalLog]:
+        # a worker's completion policy (see eval_set_selection.py); None outside
+        # selection mode
+        if selection_completion is None:
+            retries = task_retry_attempts
+        elif selection_completion == "runner":
+            retries = 0
+        else:
+            # immediate whatever `retry_immediate` says: batch retry is eval-set
+            # orchestration, which a worker skips
+            retries = num_retry_attempts
+
         # run evals
         results = eval(
             tasks=tasks,
@@ -589,7 +600,7 @@ def eval_set(
             sample_id=sample_id,
             sample_shuffle=sample_shuffle,
             epochs=epochs,
-            fail_on_error=False if selection_mode else fail_on_error,
+            fail_on_error=False if selection_completion == "runner" else fail_on_error,
             continue_on_fail=continue_on_fail,
             retry_on_error=retry_on_error,
             score_on_error=score_on_error,
@@ -617,7 +628,7 @@ def eval_set(
             score=score,
             score_display=score_display,
             eval_set_id=eval_set_id,
-            task_retry_attempts=0 if selection_mode else task_retry_attempts,
+            task_retry_attempts=retries,
             # On in selection mode, and not an override a definition can
             # decline. A selection-mode worker is detached: human input
             # dispatches ACP -> Textual panel -> console, and with no display
@@ -630,7 +641,7 @@ def eval_set(
             # only some can pass the flag at all. A failed bind fails the
             # worker (see `acp_server`) rather than degrading, because the
             # channel it would degrade to is the dead end above.
-            acp_server=True if selection_mode else acp_server,
+            acp_server=True if selection_completion is not None else acp_server,
             # Demoted to a plain on/off: eval-set owns the keep-alive park
             # itself (after the display closes), so the inner eval() must
             # not park inside the task display. See the park below.
@@ -936,7 +947,7 @@ def eval_set(
                     worker_eval_set_id,
                     worker_tasks,
                     resolved_task_names(resolved),
-                    selection_mode=True,
+                    selection_completion=selection.completion,
                 ),
                 log_dir,
             )

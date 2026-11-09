@@ -4,7 +4,7 @@ import socket
 import subprocess
 import sys
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -388,7 +388,8 @@ def test_eval_set_selection_forces_fail_on_error_off(
 
     `fail_on_error=True` (the default) would mark the log `error` on the first
     sample error. Worker mode overrides it so the errored sample becomes an
-    entry in the runner's adjudication queue rather than a failed task.
+    entry in the runner's adjudication queue rather than a failed task. This is
+    the default `completion="runner"`, so the selection omits the field.
     """
 
     @solver
@@ -444,8 +445,9 @@ def test_eval_set_selection_forces_fail_on_error_off(
 
     selection_path = tmp_path / "selection.json"
     selection_path.write_text(
-        selection_for(capture.tasks[0].identifier).model_dump_json()
+        selection_for(capture.tasks[0].identifier).model_dump_json(exclude_unset=True)
     )
+    assert "completion" not in selection_path.read_text()
     monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(selection_path))
     try:
         success, logs = eval_set(tasks=tasks(), **kwargs)
@@ -457,6 +459,151 @@ def test_eval_set_selection_forces_fail_on_error_off(
     assert logs[0].results is not None
     assert logs[0].results.total_samples == 2
     assert logs[0].results.completed_samples == 1
+
+
+def run_with_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task: Callable[[], Task],
+    **kwargs: Any,
+) -> tuple[bool, list[EvalLog]]:
+    """Capture a one-task eval set, then run its task as a worker with `completion="definition"`."""
+    manifest_path = tmp_path / "manifest.json"
+    eval_set_kwargs: dict[str, Any] = dict(
+        model="mockllm/model",
+        log_dir=str(tmp_path / "logs"),
+        display="plain",
+        **kwargs,
+    )
+    monkeypatch.setenv(INSPECT_EVAL_SET_CAPTURE, str(manifest_path))
+    try:
+        with pytest.raises(SystemExit):
+            eval_set(tasks=[task()], **eval_set_kwargs)
+    finally:
+        monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
+    capture = EvalSetCapture.model_validate_json(manifest_path.read_bytes())
+
+    selection = EvalSetSelection(
+        version=EVAL_SET_SELECTION_VERSION,
+        eval_set_id="worker-test",
+        tasks=[EvalSetSelectionTask(identifier=capture.tasks[0].identifier)],
+        completion="definition",
+    )
+    selection_path = tmp_path / "selection.json"
+    selection_path.write_text(selection.model_dump_json())
+    monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(selection_path))
+    try:
+        return eval_set(tasks=[task()], **eval_set_kwargs)
+    finally:
+        monkeypatch.delenv(INSPECT_EVAL_SET_SELECTION)
+
+
+@solver
+def fail_attempts(attempts: list[str], failures: dict[str, int]) -> Solver:
+    """Record each sample attempt, raising until the sample has failed `failures[id]` times (`-1`: always)."""
+
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        sample_id = str(state.sample_id)
+        attempts.append(sample_id)
+        limit = failures.get(sample_id, 0)
+        if limit < 0 or attempts.count(sample_id) <= limit:
+            raise ValueError(f"sample {sample_id} errors")
+        return state
+
+    return solve
+
+
+def test_eval_set_selection_definition_completion_fails_the_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With the definition's policy, an error beyond its tolerance fails the task after its retries.
+
+    The default `fail_on_error` tolerates no error, so the always-erroring
+    sample fails the first attempt and the one retry `retry_attempts=1` allows.
+    Each attempt leaves its own `error` log: the worker does no retry cleanup.
+    """
+    attempts: list[str] = []
+
+    def failing() -> Task:
+        return Task(
+            dataset=[Sample(id="ok", input="ok"), Sample(id="bad", input="bad")],
+            solver=fail_attempts(attempts, {"bad": -1}),
+            scorer=exact(),
+            name="failing",
+        )
+
+    success, logs = run_with_completion(
+        monkeypatch, tmp_path, failing, retry_attempts=1
+    )
+
+    assert not success
+    assert logs[0].status == "error"
+    assert attempts.count("bad") == 2
+    logs_written = [
+        read_eval_log(info) for info in list_eval_logs(str(tmp_path / "logs"))
+    ]
+    assert [log.status for log in logs_written] == ["error", "error"]
+
+
+@pytest.mark.parametrize("retry_immediate", [None, False])
+def test_eval_set_selection_definition_completion_retries_in_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_immediate: bool | None
+) -> None:
+    """The definition's task retry runs in the worker, resuming the failed attempt.
+
+    Always immediate: batch retry (`retry_immediate=False`) is eval-set
+    orchestration, which a worker does not perform.
+    """
+    attempts: list[str] = []
+
+    def flaky() -> Task:
+        return Task(
+            dataset=[Sample(id="one", input="one"), Sample(id="two", input="two")],
+            solver=fail_attempts(attempts, {"two": 1}),
+            scorer=exact(),
+            name="flaky",
+        )
+
+    success, logs = run_with_completion(
+        monkeypatch,
+        tmp_path,
+        flaky,
+        retry_attempts=1,
+        retry_immediate=retry_immediate,
+        max_samples=1,
+    )
+
+    assert success
+    assert logs[0].status == "success"
+    # "one" completed on the first attempt and was reused by the retry
+    assert attempts.count("one") == 1
+    assert attempts.count("two") == 2
+    assert logs[0].results is not None
+    assert logs[0].results.completed_samples == 2
+
+
+def test_eval_set_selection_definition_completion_honours_a_task_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A task's own `fail_on_error` threshold decides, and an error within it consumes no retry."""
+    attempts: list[str] = []
+
+    def tolerant() -> Task:
+        return Task(
+            dataset=[Sample(id=str(i), input=str(i)) for i in range(4)],
+            solver=fail_attempts(attempts, {"0": -1}),
+            scorer=exact(),
+            name="tolerant",
+            fail_on_error=0.5,
+        )
+
+    success, logs = run_with_completion(monkeypatch, tmp_path, tolerant)
+
+    assert success
+    assert logs[0].status == "success"
+    assert attempts.count("0") == 1
+    assert logs[0].results is not None
+    assert logs[0].results.completed_samples == 3
 
 
 def _acp_probe_tasks(
@@ -1165,6 +1312,17 @@ def test_eval_set_selection_resume_log_missing(
             ),
             "runner_notes",
         ),
+        (
+            json.dumps(
+                {
+                    "version": 8,
+                    "eval_set_id": "x",
+                    "tasks": [{"identifier": "y"}],
+                    "completion": "definiton",
+                }
+            ),
+            "completion",
+        ),
         # a version this inspect doesn't understand is reported as a version
         # mismatch even when the newer schema's fields are what fail validation
         (
@@ -1424,6 +1582,16 @@ _EXPECTED_SELECTION_FIELDS[7] = {
 }
 
 
+# v8 added `completion`, letting a selection keep the definition's own
+# `fail_on_error`, `continue_on_fail` and task retries instead of the runner
+# adjudicating completion from the log. Defaults to "runner", the v7 behaviour.
+_EXPECTED_SELECTION_FIELDS[8] = {
+    "selection": _EXPECTED_SELECTION_FIELDS[7]["selection"] | {"completion"},
+    "task": _EXPECTED_SELECTION_FIELDS[7]["task"],
+    "overrides": _EXPECTED_SELECTION_FIELDS[7]["overrides"],
+}
+
+
 def test_eval_set_selection_schema_stability() -> None:
     assert EVAL_SET_SELECTION_VERSION in _EXPECTED_SELECTION_FIELDS
     expected = _EXPECTED_SELECTION_FIELDS[EVAL_SET_SELECTION_VERSION]
@@ -1531,6 +1699,40 @@ def test_selection_scanners_are_gated_at_version_7(
         assert read_eval_set_selection(str(path)) is not None
     else:
         with pytest.raises(PrerequisiteError, match="schema version"):
+            read_eval_set_selection(str(path))
+
+
+@pytest.mark.parametrize(
+    ("version", "completion", "accepted"),
+    [(7, "definition", False), (7, "runner", False), (8, "definition", True)],
+    ids=[
+        "definition under version 7",
+        "an explicit runner under version 7",
+        "definition under version 8",
+    ],
+)
+def test_selection_completion_is_gated_at_version_8(
+    version: int, completion: str, accepted: bool, tmp_path: Path
+) -> None:
+    """`completion` is refused under an older version even at its default, which an older inspect would refuse as an unknown field."""
+    path = tmp_path / "selection.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "eval_set_id": "probe",
+                "tasks": [{"identifier": "a"}],
+                "completion": completion,
+            }
+        )
+    )
+
+    if accepted:
+        assert read_eval_set_selection(str(path)).completion == completion
+    else:
+        with pytest.raises(
+            PrerequisiteError, match="schema version 7 but sets completion"
+        ):
             read_eval_set_selection(str(path))
 
 
