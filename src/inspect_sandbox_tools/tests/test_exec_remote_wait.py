@@ -275,6 +275,47 @@ async def test_input_that_cannot_be_written_is_raised_as_the_start_error(
         await controller.poll(params.request_id, 0, 0.0)
 
 
+@pytest.mark.parametrize("fails_after,expected", [(0.05, "raised"), (1.0, "completed")])
+async def test_start_and_replay_agree_when_input_fails_after_the_command_exits(
+    controller: WaitController,
+    monkeypatch: pytest.MonkeyPatch,
+    fails_after: float,
+    expected: str,
+) -> None:
+    """On Linux, writing input a command did not read fails once it exits.
+
+    A write that fails within the grace is the start's error, as for a legacy
+    start; one that fails later leaves the completed reply in place.
+    """
+    monkeypatch.setattr(wait_module, "_LAUNCH_GRACE", 0.3)
+    original_create = Job.create
+
+    async def input_fails_after_exit(*args: Any, **kwargs: Any) -> Job:
+        job = await original_create(*args, **kwargs)
+        await job._process.wait()
+        await anyio.sleep(fails_after)
+        raise BrokenPipeError("input")
+
+    monkeypatch.setattr(Job, "create", input_fails_after_exit)
+    params = _params("echo hi")
+    outcomes: list[str] = []
+    try:
+        outcomes.append((await controller.start(params)).result.state)
+    except BrokenPipeError:
+        outcomes.append("raised")
+    launch = controller._requests[params.request_id].launch
+    assert launch is not None
+    with anyio.fail_after(5):
+        await launch  # the write has failed
+    try:
+        replay = await controller.poll(params.request_id, 0, 0.0)
+        outcomes.append(replay.result.state)
+    except BrokenPipeError:
+        outcomes.append("raised")
+
+    assert outcomes == [expected, expected]
+
+
 async def test_start_returns_output_and_exit_together_within_the_wait(
     controller: WaitController,
 ) -> None:

@@ -22,7 +22,7 @@ _MAX_ACKNOWLEDGED_ENTRIES = 256
 _MAX_RETAINED_BYTES = 64 * 1024 * 1024
 _EXPIRED_ID_TTL = 3600.0
 _MAX_EXPIRED_IDS = 50_000  # about 13 MB
-_LAUNCH_SHUTDOWN_GRACE = 1.0
+_LAUNCH_GRACE = 1.0  # for a launch still writing input after its command ended
 _RESTARTED = "may have run before the sandbox tools server restarted"
 
 
@@ -168,7 +168,8 @@ class WaitController:
                 on_create=register,
             )
         except Exception as ex:
-            if not entry.cancelled:
+            # not once a final reply is stored: the host may already have it
+            if not entry.cancelled and entry.finished_at is None:
                 entry.error = ex
                 entry.finished_at = monotonic()
         finally:
@@ -199,12 +200,17 @@ class WaitController:
             else:
                 result = await job.poll(ack_seq, terminal_output=True)
                 if (
-                    result.state == "killed"
+                    result.state != "running"
                     and not entry.cancelled
                     and entry.launch is not None
                 ):
                     # Killed but not cancelled: Job.create failed to write the input.
-                    await asyncio.shield(entry.launch)
+                    # Completed: writing it can still fail, since the command did not
+                    # read it all; that is the request's error, as for a legacy start.
+                    if result.state == "killed":
+                        await asyncio.shield(entry.launch)
+                    else:  # bounded: a child can hold stdin open without reading it
+                        await asyncio.wait({entry.launch}, timeout=_LAUNCH_GRACE)
                     self._job(entry, request_id)
                 entry.response = result
             if result.state != "running" and entry.finished_at is None:
@@ -409,7 +415,7 @@ class WaitController:
         launches = [entry.launch for entry in entries if entry.launch is not None]
         if launches:
             # A process that left the job's process group can still hold stdin.
-            _, blocked = await asyncio.wait(launches, timeout=_LAUNCH_SHUTDOWN_GRACE)
+            _, blocked = await asyncio.wait(launches, timeout=_LAUNCH_GRACE)
             for launch in blocked:
                 launch.cancel()
             await asyncio.gather(*launches, return_exceptions=True)
