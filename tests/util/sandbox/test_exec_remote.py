@@ -1359,10 +1359,18 @@ class TestAwaitableWaitProtocol:
         assert result.stdout == "out"
         assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
 
-    async def test_a_short_poll_timeout_polls_without_holds(self) -> None:
-        """A quarter of a 2 s poll_timeout is under a second: holding it only adds requests."""
+    async def test_a_short_poll_timeout_keeps_request_ids_without_holds(self) -> None:
+        """A quarter of a 2 s poll_timeout is under a second: holding it only adds requests.
+
+        Requests still carry the request ID, so a start resent after its reply
+        was lost is reported by the server, not launched again.
+        """
         sandbox = _make_scripted_sandbox(
-            [_start_response(), _poll_response(stdout="done", seq=1)]
+            [
+                SandboxTimeoutError("lost reply"),
+                _wait_response(state="running", exit_code=None, seq=1),
+                _wait_response(stdout="done", seq=2),
+            ]
         )
         sandbox._exec_remote_wait_supported = None
         options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=2)
@@ -1372,9 +1380,14 @@ class TestAwaitableWaitProtocol:
 
         assert result.stdout == "done"
         assert [method for method, _ in sandbox.requests] == [
-            "exec_remote_start",
-            "exec_remote_poll",
+            "exec_remote_start_wait",
+            "exec_remote_start_wait",
+            "exec_remote_poll_wait",
         ]
+        start, resent, poll = (params for _, params in sandbox.requests)
+        assert resent == start
+        assert poll["request_id"] == start["request_id"]
+        assert start["wait_seconds"] == poll["wait_seconds"] == 0.0
 
     async def test_server_wait_env_reaches_explicit_common_options(
         self, monkeypatch: pytest.MonkeyPatch

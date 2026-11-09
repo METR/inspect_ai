@@ -556,11 +556,9 @@ class ExecRemoteProcess:
         if (user := tools_user_param(self._sandbox, self._options.user)) is not None:
             params["user"] = user
 
-        if (
-            wait
-            and self._wait_seconds > 0
-            and self._sandbox._exec_remote_wait_supported is not False
-        ):
+        # Even without a hold (a short poll_timeout), the request ID keeps a
+        # resent start from launching the command twice.
+        if wait and self._sandbox._exec_remote_wait_supported is not False:
             from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 
             self._request_id = uuid4().hex
