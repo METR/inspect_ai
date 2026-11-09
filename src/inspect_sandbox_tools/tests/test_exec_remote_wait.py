@@ -230,6 +230,20 @@ async def test_start_returns_output_and_exit_together_within_the_wait(
     assert reply.result.stdout == "firstsecond"
 
 
+async def test_the_hold_ends_when_the_command_exits(
+    controller: WaitController,
+) -> None:
+    params = _params("sleep 0.2")
+    params.wait_seconds = 0.0
+    await controller.start(params)
+    job = controller._requests[params.request_id].job
+    assert job is not None
+
+    with anyio.fail_after(30):
+        await job.wait_for_update(3600)
+    assert job.exited
+
+
 async def test_poll_wait_coalesces_output_until_the_deadline(
     controller: WaitController,
 ) -> None:
