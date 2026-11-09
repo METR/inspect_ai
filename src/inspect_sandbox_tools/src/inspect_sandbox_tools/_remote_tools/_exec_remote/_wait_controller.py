@@ -9,6 +9,10 @@ from time import monotonic
 from typing import NamedTuple
 
 from inspect_sandbox_tools._util.common_types import ToolException
+from inspect_sandbox_tools._util.server_dir import (
+    open_private_append,
+    read_private_text,
+)
 
 from ._job import Job
 from .tool_types import KillResult, PollResult, StartWaitParams, WaitResult
@@ -99,7 +103,7 @@ class WaitController:
         recorded is refused rather than launched.
         """
         try:
-            launched = path.read_text().split()
+            launched = read_private_text(path).split()
         except FileNotFoundError:
             launched = []
         now = monotonic()
@@ -111,9 +115,9 @@ class WaitController:
         if self._launched_path is None:
             return
         try:
-            with self._launched_path.open("a") as launched:
+            with open_private_append(self._launched_path) as launched:
                 launched.write(f"{request_id}\n")
-        except OSError as ex:
+        except (OSError, RuntimeError) as ex:  # RuntimeError: an untrusted entry
             raise ToolException(
                 f"exec_remote request {request_id} was not started because it "
                 f"could not be recorded: {ex}"

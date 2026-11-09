@@ -1,5 +1,6 @@
 """Awaitable exec tests own their controller and never start the shared server."""
 
+import os
 import shlex
 import shutil
 import sys
@@ -164,6 +165,26 @@ async def test_a_launch_that_cannot_be_recorded_is_refused(
     (tmp_path / "missing").mkdir()
     assert (await controller.start(params)).result.state == "completed"
     assert marker.read_text() == "x"
+
+
+@pytest.mark.parametrize("planted", ["symlink", "fifo"])
+async def test_an_untrusted_journal_is_refused(
+    controller: WaitController, tmp_path: Path, planted: str
+) -> None:
+    journal, target = tmp_path / "launched", tmp_path / "target"
+    marker = tmp_path / "launches"
+    controller.persist_launches(journal)
+    if planted == "symlink":
+        journal.symlink_to(target)
+    else:
+        os.mkfifo(journal)
+
+    with pytest.raises(ToolException, match="not started because it could not be"):
+        await controller.start(_params(f"printf x >> {shlex.quote(str(marker))}"))
+    with pytest.raises(RuntimeError, match="refusing"):
+        WaitController().persist_launches(journal)
+    assert not marker.exists()
+    assert not target.exists()
 
 
 async def test_start_returns_output_and_exit_together_within_the_wait(
