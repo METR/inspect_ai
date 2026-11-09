@@ -391,6 +391,45 @@ async def test_output_from_a_child_after_exit_is_kept(
     assert reply.result.stdout == "earlylate"
 
 
+async def test_output_that_fills_the_buffer_during_the_readers_wait_is_kept(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wait returns a full reply for the host to drain, not cut the reader off."""
+    monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 64 * 1024)
+    monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 16 * 1024)
+    waiting = anyio.Event()
+    wait_for_readers = Job._wait_for_readers
+
+    async def signal_then_wait(job: Job, *, reply: bool = False) -> None:
+        waiting.set()
+        await wait_for_readers(job, reply=reply)
+
+    monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
+    gate = tmp_path / "gate"
+    write = _python("import sys; sys.stdout.write('x' * 256 * 1024)")
+    # the leader exits at once; its child writes 256 KiB once `gate` exists
+    params = _params(
+        f"(while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.01; done; {write}) &"
+    )
+    output = ""
+
+    async def poll_to_the_end() -> None:
+        nonlocal output
+        reply = await controller.start(params)
+        output += reply.result.stdout
+        while reply.result.state == "running":
+            reply = await controller.poll(params.request_id, reply.result.seq, 5.0)
+            output += reply.result.stdout
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(poll_to_the_end)
+            await waiting.wait()
+            gate.touch()
+
+    assert output == "x" * 256 * 1024
+
+
 async def test_a_child_flooding_the_pipe_does_not_block_completion(
     controller: WaitController, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1125,9 +1164,9 @@ async def test_an_unsent_result_is_kept_while_its_poll_settles_the_readers(
     settling = anyio.Event()
     wait_for_readers = Job._wait_for_readers
 
-    async def signal_then_wait(job: Job, *, reply_full: bool = False) -> None:
+    async def signal_then_wait(job: Job, *, reply: bool = False) -> None:
         settling.set()
-        await wait_for_readers(job, reply_full=reply_full)
+        await wait_for_readers(job, reply=reply)
 
     monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
     go, release = tmp_path / "go", tmp_path / "release"

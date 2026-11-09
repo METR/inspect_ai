@@ -485,9 +485,9 @@ def _signal_waits_for_readers(monkeypatch: pytest.MonkeyPatch) -> anyio.Event:
     waiting = anyio.Event()
     wait_for_readers = Job._wait_for_readers
 
-    async def signal_then_wait(job: Job, *, reply_full: bool = False) -> None:
+    async def signal_then_wait(job: Job, *, reply: bool = False) -> None:
         waiting.set()
-        await wait_for_readers(job, reply_full=reply_full)
+        await wait_for_readers(job, reply=reply)
 
     monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
     return waiting

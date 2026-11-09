@@ -193,9 +193,7 @@ class Job:
         # a later poll finishes the drain so its output is not lost. Once the
         # readers are done this does nothing.
         if self._state != "running":
-            await self._wait_for_readers(
-                reply_full=self._buffered() >= _MAX_POLL_OUTPUT_BYTES
-            )
+            await self._wait_for_readers(reply=True)
 
         # Always limit per-poll output to keep JSON-RPC responses small.
         # Defer reporting terminal state until buffers are fully drained
@@ -489,14 +487,15 @@ class Job:
             except asyncio.CancelledError:
                 pass
 
-    async def _wait_for_readers(self, *, reply_full: bool = False) -> None:
+    async def _wait_for_readers(self, *, reply: bool = False) -> None:
         """Wait for the read tasks to reach EOF, then cancel any left.
 
         The readers get `_READER_GRACE_SECONDS` in all, counted from the first
-        call, for a child that still holds the pipes. A poll with a full reply
-        buffered does not wait: sending that reply frees the space a reader
-        blocked on a full buffer needs, so output larger than the buffer is not
-        cut off, and the readers keep what is left of their time. Time a reader
+        call, for a child that still holds the pipes. For a poll's `reply`, the
+        wait ends as soon as a full reply is buffered, before or during it:
+        sending that reply frees the space a reader blocked on a full buffer
+        needs, so output larger than the buffer is not cut off, and the readers
+        keep what is left of their time. Time a reader
         spends blocked on a full buffer, waiting for the host to drain it, does
         not count, however slowly the host polls, until the readers have taken
         `_MAX_TAIL_BYTES` since the first call. That is more than a leader
@@ -514,7 +513,8 @@ class Job:
         readers = [t for t in (self._stdout_task, self._stderr_task) if not t.done()]
         if not readers:
             return
-        now = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        now = loop.time()
         read = self._stdout_buffer.total + self._stderr_buffer.total
         if self._readers_deadline is None:
             self._readers_deadline = now + _READER_GRACE_SECONDS
@@ -528,9 +528,19 @@ class Job:
         if blocked and read - self._read_at_first_wait < _MAX_TAIL_BYTES:
             self._readers_deadline += now - max(min(blocked), self._readers_checked)
         self._readers_checked = now
-        remaining = self._readers_deadline - now
-        if reply_full and remaining > 0:
-            return
+        while reply and not all(task.done() for task in readers):
+            remaining = self._readers_deadline - loop.time()
+            if remaining <= 0:
+                break
+            if self._buffered() >= _MAX_POLL_OUTPUT_BYTES:
+                return
+            self._changed.clear()
+            try:
+                # bounded: another waiter can clear the event before this one sees it
+                await asyncio.wait_for(self._changed.wait(), min(remaining, 0.25))
+            except asyncio.TimeoutError:
+                pass
+        remaining = self._readers_deadline - loop.time()
         _, pending = await asyncio.wait(readers, timeout=max(remaining, 0.0))
         for task in pending:
             task.cancel()
