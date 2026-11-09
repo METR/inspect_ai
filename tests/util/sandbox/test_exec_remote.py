@@ -1615,14 +1615,29 @@ class TestAwaitableWaitProtocol:
             "exec_remote_poll",
         ]
 
-    async def test_command_error_cannot_trigger_legacy_start(self) -> None:
-        sandbox = _make_scripted_sandbox([_rpc_error("Method not found", code=-32099)])
+    @pytest.mark.parametrize("code", [-32099, -32600, -32700])
+    async def test_command_error_cannot_trigger_legacy_start(self, code: int) -> None:
+        """Only -32601 means the server lacks the method, whatever the message says."""
+        sandbox = _make_scripted_sandbox([_rpc_error("Method not found", code=code)])
         sandbox._exec_remote_wait_supported = None
 
         with pytest.raises(RuntimeError, match="Method not found"):
             await exec_remote_awaitable(sandbox, ["cmd"], 5, _WAIT)
 
-        assert [method for method, _ in sandbox.requests] == ["exec_remote_start_wait"]
+        assert "exec_remote_start" not in [method for method, _ in sandbox.requests]
+
+    async def test_malformed_start_reply_is_not_resent(self) -> None:
+        """A reply came back, so the start is not resent; it may have run, so it is killed."""
+        sandbox = _make_scripted_sandbox(["not json", _kill_response()])
+        sandbox._exec_remote_wait_supported = None
+
+        with pytest.raises(ValueError):
+            await exec_remote_awaitable(sandbox, ["cmd"], 5, _WAIT)
+
+        assert [method for method, _ in sandbox.requests] == [
+            "exec_remote_start_wait",
+            "exec_remote_kill_wait",
+        ]
 
     async def test_launch_error_is_raised_once_with_the_legacy_text(self) -> None:
         """The server answered, so the start is neither resent nor killed."""
