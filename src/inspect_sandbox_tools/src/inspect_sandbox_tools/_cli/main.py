@@ -314,8 +314,8 @@ def _bridge(max_frame_bytes: int) -> None:
         reply(_bridge_reply(request_data, request_json_str, max_frame_bytes))
 
     reply(_BRIDGE_READY)
-    while line := sys.stdin.buffer.readline(max_frame_bytes + 1):
-        if len(line) > max_frame_bytes or not line.endswith(b"\n"):
+    while line := sys.stdin.buffer.readline(max_frame_bytes):
+        if not line.endswith(b"\n"):
             raise ValueError("Bridge request is longer than the frame limit")
         request_json_str = line.decode("utf-8").strip()
         request_data = json.loads(request_json_str)
