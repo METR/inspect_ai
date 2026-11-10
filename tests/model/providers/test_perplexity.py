@@ -4,12 +4,12 @@ from typing import Any, AsyncIterator
 import anyio
 import pytest
 from openai._models import construct_type
-from openai._types import NOT_GIVEN
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
     ResponseStreamEvent,
 )
+from test_helpers.openai_request import sent_request
 from test_helpers.utils import skip_if_no_perplexity
 
 from inspect_ai._util._async import tg_collect
@@ -334,10 +334,13 @@ def _provider(
     provider = PerplexityAPI(model_name=model_name, api_key="sk-test")
 
     async def fake_create(**kwargs: Any) -> Response:
+        request = sent_request(kwargs)
         if requests is not None:
-            requests.append(kwargs)
+            requests.append(request)
         # deep copy so that each call gets a response of its own
-        return responses[kwargs["input"][0]["content"][0]["text"]].model_copy(deep=True)
+        return responses[request["input"][0]["content"][0]["text"]].model_copy(
+            deep=True
+        )
 
     monkeypatch.setattr(provider.client.responses, "create", fake_create)
     return provider
@@ -377,10 +380,9 @@ async def test_perplexity_web_search_only_when_requested(
 
     without_search, with_search = requests
     assert without_search["model"] == agent_model
-    assert without_search["tools"] is NOT_GIVEN
-    assert "extra_body" not in without_search
+    assert "tools" not in without_search
     assert with_search["model"] == agent_model
-    assert with_search["extra_body"] == {"tools": [{"type": "web_search"}]}
+    assert with_search["tools"] == [{"type": "web_search"}]
 
 
 @pytest.mark.anyio
@@ -400,7 +402,7 @@ async def test_perplexity_tool_choice(
     requests: list[dict[str, Any]] = []
 
     async def fake_create(**kwargs: Any) -> Response:
-        requests.append(kwargs)
+        requests.append(sent_request(kwargs))
         return _agent_response("a", 1)
 
     assert isinstance(model.api, PerplexityAPI)
@@ -414,12 +416,10 @@ async def test_perplexity_tool_choice(
     finally:
         await model.api.aclose()
 
-    extra_body = requests[0].get("extra_body", {})
-    # the generate_responses helper sends no tool choice of its own
-    assert requests[0]["tool_choice"] is NOT_GIVEN
-    assert extra_body.get("tool_choice") == expected
+    # the only tool choice sent is the Agent API one
+    assert requests[0].get("tool_choice") == expected
     # "none" removes the web_search tool before the provider sees it
-    assert ("tools" in extra_body) == (tool_choice != "none")
+    assert ("tools" in requests[0]) == (tool_choice != "none")
 
 
 @pytest.mark.anyio
@@ -433,7 +433,7 @@ async def test_perplexity_extra_body_tool_choice(
     requests: list[dict[str, Any]] = []
 
     async def fake_create(**kwargs: Any) -> Response:
-        requests.append(kwargs)
+        requests.append(sent_request(kwargs))
         return _agent_response("a", 1)
 
     assert isinstance(model.api, PerplexityAPI)
@@ -450,8 +450,8 @@ async def test_perplexity_extra_body_tool_choice(
     finally:
         await model.api.aclose()
 
-    assert requests[0]["tool_choice"] is NOT_GIVEN
-    assert requests[0]["extra_body"] == {"tools": [fetch_url], "tool_choice": "none"}
+    assert requests[0]["tools"] == [fetch_url]
+    assert requests[0]["tool_choice"] == "none"
 
 
 @pytest.mark.anyio
@@ -463,7 +463,7 @@ async def test_perplexity_forced_search_conflicts_with_extra_body_tool_choice(
     requests: list[dict[str, Any]] = []
 
     async def fake_create(**kwargs: Any) -> Response:
-        requests.append(kwargs)
+        requests.append(sent_request(kwargs))
         return _agent_response("a", 1)
 
     assert isinstance(model.api, PerplexityAPI)
@@ -503,7 +503,7 @@ async def test_perplexity_agent_api_response(monkeypatch: pytest.MonkeyPatch) ->
 
     assert provider.base_url == "https://api.perplexity.ai/v1"
     assert requests[0]["model"] == "perplexity/sonar"
-    assert requests[0]["extra_body"] == {"tools": [{"type": "web_search"}]}
+    assert requests[0]["tools"] == [{"type": "web_search"}]
 
     assert isinstance(output, ModelOutput)
     assert output.completion == "answer a"
@@ -601,18 +601,16 @@ async def test_perplexity_web_search_options_and_extra_body(
 
     request = requests[0]
     # Agent API fields pass through; Responses fields are set on the request
-    assert request["extra_body"] == {
-        "max_steps": 3,
-        "tools": [
-            {
-                "type": "web_search",
-                "max_tokens": 2000,
-                "max_tokens_per_page": 500,
-                "search_type": search_type,
-                "filters": {"search_domain_filter": ["example.com"]},
-            }
-        ],
-    }
+    assert request["max_steps"] == 3
+    assert request["tools"] == [
+        {
+            "type": "web_search",
+            "max_tokens": 2000,
+            "max_tokens_per_page": 500,
+            "search_type": search_type,
+            "filters": {"search_domain_filter": ["example.com"]},
+        }
+    ]
     assert request["store"] is True
 
 
@@ -648,7 +646,7 @@ async def test_perplexity_extra_body_keeps_request_fields(
 
     request = requests[0]
     # fields the request reads or sets are not sent again to replace it
-    assert request["extra_body"] == {"max_steps": 3}
+    assert request["max_steps"] == 3
     assert request["reasoning"] == {
         "effort": "high",
         "summary": "detailed",
@@ -668,7 +666,7 @@ async def test_perplexity_forced_search_with_extra_body_tools(
     requests: list[dict[str, Any]] = []
 
     async def fake_create(**kwargs: Any) -> Response:
-        requests.append(kwargs)
+        requests.append(sent_request(kwargs))
         return _agent_response("a", 1)
 
     assert isinstance(model.api, PerplexityAPI)
@@ -693,13 +691,11 @@ async def test_perplexity_forced_search_with_extra_body_tools(
     finally:
         await model.api.aclose()
 
-    forced, raw_none = (request["extra_body"] for request in requests)
+    forced, raw_none = requests
     # "required" could be met by fetch_url alone
     assert forced["tool_choice"] == {"type": "web_search"}
-    assert raw_none == {
-        "tools": [fetch_url, {"type": "web_search"}],
-        "tool_choice": "none",
-    }
+    assert raw_none["tools"] == [fetch_url, {"type": "web_search"}]
+    assert raw_none["tool_choice"] == "none"
 
 
 @pytest.mark.anyio
@@ -831,7 +827,7 @@ async def test_perplexity_concurrent_generate_uses_own_response(
     b_received = anyio.Event()
 
     async def fake_create(**kwargs: Any) -> Response:
-        name = kwargs["input"][0]["content"][0]["text"]
+        name = sent_request(kwargs)["input"][0]["content"][0]["text"]
         if name == "a":
             await b_received.wait()
         else:
@@ -882,14 +878,11 @@ async def test_perplexity_web_search_with_extra_body_tools(
     try:
         # web_search() is added to the Agent API tools passed in extra_body
         await generate([_web_search_tool(True)], {"tools": [fetch_url]})
-        assert requests[-1]["extra_body"]["tools"] == [
-            fetch_url,
-            {"type": "web_search"},
-        ]
+        assert requests[-1]["tools"] == [fetch_url, {"type": "web_search"}]
 
         # without web_search(), extra_body's tools pass through
         await generate([], {"tools": [fetch_url]})
-        assert requests[-1]["extra_body"]["tools"] == [fetch_url]
+        assert requests[-1]["tools"] == [fetch_url]
 
         with pytest.raises(ValueError, match="already has a web_search tool"):
             await generate(
@@ -1041,7 +1034,7 @@ async def test_perplexity_streamed_response(monkeypatch: pytest.MonkeyPatch) -> 
     requests: list[dict[str, Any]] = []
 
     async def fake_create(**kwargs: Any) -> _FakeStream:
-        requests.append(kwargs)
+        requests.append(sent_request(kwargs))
         return stream
 
     provider = PerplexityAPI(model_name="sonar", api_key="sk-test")
@@ -1106,10 +1099,7 @@ async def test_perplexity_fetch_url_results(monkeypatch: pytest.MonkeyPatch) -> 
     finally:
         await provider.aclose()
 
-    assert requests[0]["extra_body"]["tools"] == [
-        {"type": "fetch_url"},
-        {"type": "web_search"},
-    ]
+    assert requests[0]["tools"] == [{"type": "fetch_url"}, {"type": "web_search"}]
     assert isinstance(output, ModelOutput)
     assert output.completion == "answer a"
     assert _citation_urls(output) == [

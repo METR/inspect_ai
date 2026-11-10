@@ -29,6 +29,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
+from test_helpers.openai_request import sent_request
 from test_helpers.utils import skip_if_no_openai, skip_if_no_openai_model
 
 from inspect_ai._util.content import Content, ContentText
@@ -127,7 +128,7 @@ async def _completions_request(
         # stands in for the direct OpenAI provider, which passes True
         supports_explicit_prompt_cache=True,
     )
-    return dict(client.chat.completions.create.call_args.kwargs)
+    return sent_request(client.chat.completions.create.call_args.kwargs)
 
 
 def _tagged_text_parts(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -514,7 +515,7 @@ async def _responses_request(
         # test_openrouter.py for the OpenAI-compatible (default False) case
         supports_explicit_prompt_cache=True,
     )
-    return dict(client.responses.create.call_args.kwargs)
+    return sent_request(client.responses.create.call_args.kwargs)
 
 
 def _tagged_input_texts(input_items: list[dict[str, Any]]) -> list[tuple[int, int]]:

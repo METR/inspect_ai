@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from test_helpers.openai_request import sent_request
 
 from inspect_ai.agent._bridge._errors import (
     BridgePolicyError,
@@ -501,7 +502,8 @@ async def test_bridged_reasoning_reaches_forced_responses_requests() -> None:
     )
 
     assert requests[0]["reasoning"] == _CLIENT_REASONING
-    assert [tool["type"] for tool in requests[0]["tools"]] == ["web_search"]
+    tools = sent_request(requests[0])["tools"]
+    assert [tool["type"] for tool in tools] == ["web_search"]
 
 
 _FUNCTION_TOOL = {
