@@ -155,6 +155,16 @@ Explicit marks are supported on the leading system message and on ordinary user/
 
 OpenAI's `gpt-5.6` and later models support the same `ContentText(cache_breakpoint=True)` marker on user and system/developer message text blocks. Unmarked requests use OpenAI's automatic (implicit) caching as they always have; marking a block switches the request to explicit mode for that call, so only the marked boundaries are cache points. OpenAI's guide distinguishes a 4-write-per-request budget from a much larger lookup history (the first two and latest fifty explicit markers) and documents no cap on the number of markers a request may supply, so Inspect applies none — unlike Anthropic's genuine 4-breakpoint request limit. Earlier OpenAI models silently keep the model's normal implicit caching instead of sending the (rejected) explicit fields. When an otherwise-supported explicit request leaves its leading system/developer block unmarked, Inspect also retains a checkpoint at the end of that block (cumulatively covering any preceding tool definitions), so the stable prefix has a boundary to reuse when a later marked block changes; a caller's own mark on that block takes priority and suppresses this automatic one.
 
+Inspect sends OpenAI's explicit-mode fields only to the direct OpenAI endpoint. When a base URL is configured (the `base_url` model arg, `OPENAI_BASE_URL`, or `INSPECT_EVAL_MODEL_BASE_URL`), and for OpenAI on Azure or Bedrock, Inspect drops the marks and the request uses implicit caching, since those endpoints may not accept the fields. If your base URL forwards requests to OpenAI unchanged (for example, a pass-through proxy), opt in with the `explicit_prompt_cache` model arg:
+
+``` bash
+inspect eval ctf.py --model openai/gpt-6-luna \
+   --model-base-url https://proxy.example.com/v1 \
+   -M explicit_prompt_cache=true
+```
+
+The model and mark-placement rules above still apply. Set `explicit_prompt_cache=false` to never send the explicit-mode fields. Setting it to `true` for an Azure or Bedrock model raises an error.
+
 ### Usage Reporting
 
 When using provider caching, model token usage will be reported with 4 distinct values rather than the normal input and output. For example:

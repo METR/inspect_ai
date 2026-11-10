@@ -44,6 +44,10 @@ class AckedChunkBuffer(Generic[T]):
         self._seq += 1
         self._held.append((self._seq, chunk))
 
+    def held(self) -> list[T]:
+        """Chunks not yet acknowledged, without discarding any."""
+        return [c for _, c in self._held]
+
     def collect(self, ack_seq: int) -> tuple[int, list[T]]:
         """Discard acked chunks and return the current seq plus what's left.
 

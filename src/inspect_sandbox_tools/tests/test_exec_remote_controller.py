@@ -9,9 +9,11 @@ import os
 import shlex
 import signal
 import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 from inspect_sandbox_tools._remote_tools._exec_remote import _job as job_module
 from inspect_sandbox_tools._remote_tools._exec_remote._controller import Controller
@@ -149,6 +151,46 @@ async def test_retired_job_shutdown_uses_only_its_captured_processes(
     )
 
 
+async def test_failed_initial_input_never_signals_a_reused_group_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader exited before reading its input, and its PID was reused."""
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+    # the identity check finds another process at the leader's PID
+    monkeypatch.setattr(job_module, "_leader_handle", lambda process: None)
+    controller = Controller()
+
+    with pytest.raises((BrokenPipeError, ConnectionResetError)):
+        await controller.submit("exit 0", input="x" * 1_000_000)
+
+    assert signalled == []
+    assert controller._jobs == {}
+
+
+async def test_failed_initial_input_kills_a_running_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command that closed its stdin and kept running is stopped, by group."""
+    jobs: list[Job] = []
+    signalled: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def record_killpg(pgid: int, sig: int) -> None:
+        signalled.append((pgid, sig))
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(os, "killpg", record_killpg)
+
+    with pytest.raises((BrokenPipeError, ConnectionResetError)):
+        await Job.create(
+            "exec 0<&-; sleep 60", input="x" * 1_000_000, on_create=jobs.append
+        )
+
+    assert jobs[0]._process.returncode is not None
+    assert signalled == [(jobs[0].pid, signal.SIGTERM)]
+
+
 async def _stop_job(job: Job) -> None:
     if job._process.returncode is None:
         job._process.kill()
@@ -263,3 +305,197 @@ async def test_kill_does_not_escalate_to_a_dead_leaders_group(
 
     assert signalled == [signal.SIGTERM]
     assert job._process.returncode is not None
+
+
+class TestPollDeliversOutputAfterLeaderExits:
+    """Output a child writes after the group leader exits must still reach poll."""
+
+    @staticmethod
+    async def _poll_to_completion(
+        controller: Controller, pid: int, interval: float = 0.05
+    ) -> tuple[PollResult, str, str]:
+        """Poll a job every `interval` seconds until it reports a terminal state."""
+        stdout, stderr = "", ""
+        ack_seq = 0
+        with anyio.fail_after(5):
+            while True:
+                result = await controller.poll(pid, ack_seq)
+                ack_seq = result.seq
+                stdout += result.stdout
+                stderr += result.stderr
+                if result.state != "running":
+                    return result, stdout, stderr
+                await anyio.sleep(interval)
+
+    @pytest.mark.asyncio
+    async def test_output_larger_than_the_buffer_is_kept_when_it_is_full_at_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Scaled down: a 64 KiB buffer, 16 KiB replies and 76 KiB of output, so
+        # a reader is blocked on the full buffer when the command exits.
+        monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 64 * 1024)
+        monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 16 * 1024)
+        controller = Controller()
+        pid = await controller.submit("head -c 77824 /dev/zero | tr '\\0' x")
+        job = controller._jobs[pid]
+        with anyio.fail_after(5):
+            while not job.exited:
+                await anyio.sleep(0.01)
+        result, stdout, _ = await self._poll_to_completion(controller, pid)
+        assert (result.state, len(stdout)) == ("completed", 77824)
+
+    @pytest.mark.asyncio
+    async def test_output_larger_than_the_buffer_survives_a_slow_poll_after_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # At exit 64 KiB is buffered and the rest is still in the pipe, so with
+        # 16 KiB replies the drain takes many polls, one of them late.
+        monkeypatch.setattr(job_module, "_BACKPRESSURE_BUFFER_SIZE", 64 * 1024)
+        monkeypatch.setattr(job_module, "_MAX_POLL_OUTPUT_BYTES", 16 * 1024)
+        controller = Controller()
+        pid = await controller.submit("head -c 262144 /dev/zero | tr '\\0' x")
+        job = controller._jobs[pid]
+        with anyio.fail_after(5):
+            while not job.exited:
+                await anyio.sleep(0.01)
+        await controller.poll(pid, 0)
+        await anyio.sleep(1.1)  # longer than the readers' grace after exit
+        result, stdout, _ = await self._poll_to_completion(controller, pid, 0.01)
+        assert (result.state, len(stdout)) == ("completed", 262144)
+
+    @pytest.mark.asyncio
+    async def test_late_stdout_from_background_child_is_delivered(self) -> None:
+        controller = Controller()
+        pid = await controller.submit("(sleep 0.3; printf late) & printf early")
+        result, stdout, stderr = await self._poll_to_completion(controller, pid)
+        assert stdout == "earlylate"
+        assert result.state == "completed"
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_late_stderr_from_background_child_is_delivered(self) -> None:
+        controller = Controller()
+        pid = await controller.submit("(sleep 0.3; printf late 1>&2) & printf early")
+        result, stdout, stderr = await self._poll_to_completion(controller, pid)
+        assert stdout == "early"
+        assert stderr == "late"
+        assert result.state == "completed"
+        assert result.exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_first_poll_in_submit_turn_keeps_output(self) -> None:
+        """The first poll can see the exit before the readers run; output survives.
+
+        On main the buffers are closed before the readers drain the pipe, so this
+        loses the output about half the time.
+        """
+        for _ in range(10):
+            controller = Controller()
+            pid = await controller.submit("printf hello")
+            result, stdout, stderr = await self._poll_to_completion(controller, pid)
+            assert stdout == "hello"
+            assert result.state == "completed"
+            assert result.exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_completes_within_one_second_when_a_child_writes_forever(
+        self,
+    ) -> None:
+        """A single 1 s bound covers both streams, not 1 s per stream."""
+        controller = Controller()
+        pid = await controller.submit(
+            "(while true; do printf x; sleep 0.01; done) & printf early"
+        )
+        try:
+            start = time.monotonic()
+            result, stdout, stderr = await self._poll_to_completion(controller, pid)
+            elapsed = time.monotonic() - start
+        finally:
+            _kill_group(pid)
+        assert result.state == "completed"
+        assert "early" in stdout
+        assert elapsed < 1.5
+
+    @pytest.mark.asyncio
+    async def test_cancelling_poll_waiting_for_readers_raises_in_caller(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        controller = Controller()
+        pid = await controller.submit(
+            "(while true; do printf x; sleep 0.01; done) & printf early"
+        )
+        try:
+            job = controller._jobs[pid]
+            with anyio.fail_after(5):
+                while job._process.returncode is None:
+                    await anyio.sleep(0.01)
+
+            waiting = _signal_waits_for_readers(monkeypatch)
+            task = asyncio.create_task(controller.poll(pid, ack_seq=0))
+            await waiting.wait()
+            assert not task.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            _kill_group(pid)
+
+    @pytest.mark.asyncio
+    async def test_output_survives_a_poll_cancelled_while_waiting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A poll cancelled while draining the readers must not lose output.
+
+        The state is already terminal, so a later poll finishes the drain and
+        still delivers the output the readers get afterwards.
+
+        A gate file holds the child's late write until the test releases it, so
+        the output cannot arrive before the poll is cancelled.
+        """
+        controller = Controller()
+        gate = shlex.quote(str(tmp_path / "gate"))
+        pid = await controller.submit(
+            f"(while [ ! -e {gate} ]; do sleep 0.01; done; printf late) & printf early"
+        )
+        try:
+            job = controller._jobs[pid]
+            with anyio.fail_after(5):
+                while job._process.returncode is None:
+                    await anyio.sleep(0.01)
+
+            waiting = _signal_waits_for_readers(monkeypatch)
+            task = asyncio.create_task(controller.poll(pid, ack_seq=0))
+            await waiting.wait()
+            assert not task.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            (tmp_path / "gate").touch()
+            result, stdout, stderr = await self._poll_to_completion(controller, pid)
+            assert stdout == "earlylate"
+            assert result.state == "completed"
+            assert result.exit_code == 0
+        finally:
+            _kill_group(pid)
+
+
+def _signal_waits_for_readers(monkeypatch: pytest.MonkeyPatch) -> anyio.Event:
+    """Return an event set as a poll starts waiting for a job's readers."""
+    waiting = anyio.Event()
+    wait_for_readers = Job._wait_for_readers
+
+    async def signal_then_wait(job: Job, *, reply: bool = False) -> None:
+        waiting.set()
+        await wait_for_readers(job, reply=reply)
+
+    monkeypatch.setattr(Job, "_wait_for_readers", signal_then_wait)
+    return waiting
+
+
+def _kill_group(pid: int) -> None:
+    """Kill a job's process group, including children that outlived the leader."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass

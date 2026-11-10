@@ -188,6 +188,8 @@ class SandboxEnvironment(abc.ABC):
     # than an `__init__` assignment because several providers do not call
     # `SandboxEnvironment.__init__`.
     _root_access: RootAccess | None = None
+    _exec_remote_wait_supported: bool | None = None
+    _exec_remote_acks: tuple[str, ...] = ()
 
     def __init__(self) -> None:
         self._inject_lock = anyio.Lock()

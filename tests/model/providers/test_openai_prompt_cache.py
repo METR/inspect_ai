@@ -9,13 +9,17 @@ documents no cap on the number of supplied markers, unlike Anthropic's
 genuine 4-breakpoint request limit.
 """
 
+import inspect
+import json
 import random
 import string
 from contextlib import nullcontext
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx2
 import pytest
+from openai import DefaultAsyncHttpxClient
 from openai._types import NOT_GIVEN
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
@@ -25,6 +29,7 @@ from openai.types.responses.response_usage import (
     OutputTokensDetails,
     ResponseUsage,
 )
+from test_helpers.openai_request import sent_request
 from test_helpers.utils import skip_if_no_openai, skip_if_no_openai_model
 
 from inspect_ai._util.content import Content, ContentText
@@ -123,7 +128,7 @@ async def _completions_request(
         # stands in for the direct OpenAI provider, which passes True
         supports_explicit_prompt_cache=True,
     )
-    return dict(client.chat.completions.create.call_args.kwargs)
+    return sent_request(client.chat.completions.create.call_args.kwargs)
 
 
 def _tagged_text_parts(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -510,7 +515,7 @@ async def _responses_request(
         # test_openrouter.py for the OpenAI-compatible (default False) case
         supports_explicit_prompt_cache=True,
     )
-    return dict(client.responses.create.call_args.kwargs)
+    return sent_request(client.responses.create.call_args.kwargs)
 
 
 def _tagged_input_texts(input_items: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -839,6 +844,262 @@ async def test_openai_base_url_env_var_declines_explicit_cache(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example.com/v1")
     api = _openai_api("gpt-5.6", responses_api=use_responses)
     assert await _generate_and_capture_cache_flag(api, monkeypatch) is False
+
+
+# ---------------------------------------------------------------------------
+# explicit_prompt_cache model arg
+# ---------------------------------------------------------------------------
+
+
+_GATEWAY_URL = "https://gateway.example.com/v1"
+_DIRECT_URL = "https://api.openai.com/v1"
+
+# a set reasoning_summary skips the reasoning-summaries probe request
+_NO_PROBE_CONFIG = GenerateConfig(reasoning_summary="none")
+
+_RESPONSES_BODY = {
+    "id": "resp-test",
+    "object": "response",
+    "created_at": 0,
+    "model": "gpt-5.6",
+    "status": "completed",
+    "output": [
+        {
+            "type": "message",
+            "id": "msg-1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+        }
+    ],
+    "parallel_tool_calls": True,
+    "tool_choice": "auto",
+    "tools": [],
+    "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "total_tokens": 15,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    },
+}
+
+_COMPLETION_BODY = {
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "gpt-5.6",
+    "choices": [
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "ok"},
+        }
+    ],
+}
+
+
+class _SentRequest(NamedTuple):
+    url: str
+    prompt_cache_options: object
+    breakpoints: list[tuple[int, int]]
+
+
+def _endpoint_url(base_url: str, responses_api: bool) -> str:
+    return f"{base_url}/responses" if responses_api else f"{base_url}/chat/completions"
+
+
+async def _generate_and_capture_request(
+    model_name: str,
+    *,
+    responses_api: bool,
+    base_url: str | None = None,
+    explicit_prompt_cache: bool | None = None,
+    config: GenerateConfig = _NO_PROBE_CONFIG,
+) -> _SentRequest:
+    """Run `OpenAIAPI.generate()` on a marked prompt and return the HTTP request it sent.
+
+    Capturing at the transport, rather than patching `create()`, shows the URL
+    the SDK resolved and the body it serialized.
+    """
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        if request.url.path.endswith("/responses"):
+            return httpx2.Response(200, json=_RESPONSES_BODY)
+        return httpx2.Response(200, json=_COMPLETION_BODY)
+
+    api = OpenAIAPI(
+        model_name=model_name,
+        base_url=base_url,
+        api_key="test-key",
+        responses_api=responses_api,
+        explicit_prompt_cache=explicit_prompt_cache,
+        http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+    try:
+        await api.generate(
+            input=_rubric_then_item(breakpoint=True),
+            tools=[],
+            tool_choice="auto",
+            config=config,
+        )
+    finally:
+        await api.aclose()
+
+    assert len(sent) == 1
+    body = json.loads(sent[0].content)
+    if responses_api:
+        breakpoints = _tagged_input_texts(body["input"])
+    else:
+        breakpoints = _tagged_text_parts(body["messages"])
+    return _SentRequest(str(sent[0].url), body.get("prompt_cache_options"), breakpoints)
+
+
+def test_explicit_prompt_cache_is_a_named_constructor_parameter() -> None:
+    # callers feature-detect support from the constructor signature; an arg
+    # popped from **model_args would be invisible to them
+    assert "explicit_prompt_cache" in inspect.signature(OpenAIAPI.__init__).parameters
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+async def test_explicit_prompt_cache_true_sends_explicit_fields_with_base_url_arg(
+    use_responses: bool,
+) -> None:
+    sent = await _generate_and_capture_request(
+        "gpt-5.6",
+        responses_api=use_responses,
+        base_url=_GATEWAY_URL,
+        explicit_prompt_cache=True,
+    )
+    assert sent.url == _endpoint_url(_GATEWAY_URL, use_responses)
+    assert sent.prompt_cache_options == {"mode": "explicit"}
+    assert sent.breakpoints == [(0, 0)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+async def test_explicit_prompt_cache_true_sends_explicit_fields_with_base_url_env_var(
+    monkeypatch: pytest.MonkeyPatch, use_responses: bool
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", _GATEWAY_URL)
+    sent = await _generate_and_capture_request(
+        "gpt-5.6", responses_api=use_responses, explicit_prompt_cache=True
+    )
+    assert sent.url == _endpoint_url(_GATEWAY_URL, use_responses)
+    assert sent.prompt_cache_options == {"mode": "explicit"}
+    assert sent.breakpoints == [(0, 0)]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+async def test_base_url_without_explicit_prompt_cache_sends_no_explicit_fields(
+    use_responses: bool,
+) -> None:
+    sent = await _generate_and_capture_request(
+        "gpt-5.6", responses_api=use_responses, base_url=_GATEWAY_URL
+    )
+    assert sent.url == _endpoint_url(_GATEWAY_URL, use_responses)
+    assert sent.prompt_cache_options is None
+    assert sent.breakpoints == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+# gpt-5.5 predates explicit prompt caching; glm-5.3 is a non-OpenAI model
+# served behind an OpenAI-compatible base URL, with no gpt version at all
+@pytest.mark.parametrize("model_name", ["gpt-5.5", "glm-5.3"])
+async def test_explicit_prompt_cache_true_keeps_model_eligibility(
+    use_responses: bool, model_name: str
+) -> None:
+    sent = await _generate_and_capture_request(
+        model_name,
+        responses_api=use_responses,
+        base_url=_GATEWAY_URL,
+        explicit_prompt_cache=True,
+    )
+    assert sent.prompt_cache_options is None
+    assert sent.breakpoints == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+async def test_explicit_prompt_cache_true_keeps_cache_prompt_false(
+    use_responses: bool,
+) -> None:
+    sent = await _generate_and_capture_request(
+        "gpt-5.6",
+        responses_api=use_responses,
+        base_url=_GATEWAY_URL,
+        explicit_prompt_cache=True,
+        config=_NO_PROBE_CONFIG.model_copy(update={"cache_prompt": False}),
+    )
+    assert sent.prompt_cache_options is None
+    assert sent.breakpoints == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "use_responses", [False, True], ids=["completions", "responses"]
+)
+async def test_explicit_prompt_cache_false_sends_no_explicit_fields_on_direct_endpoint(
+    monkeypatch: pytest.MonkeyPatch, use_responses: bool
+) -> None:
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("INSPECT_EVAL_MODEL_BASE_URL", raising=False)
+    # baseline: without the arg, the direct endpoint sends the explicit fields
+    default = await _generate_and_capture_request(
+        "gpt-5.6", responses_api=use_responses
+    )
+    assert default.url == _endpoint_url(_DIRECT_URL, use_responses)
+    assert default.prompt_cache_options == {"mode": "explicit"}
+
+    sent = await _generate_and_capture_request(
+        "gpt-5.6", responses_api=use_responses, explicit_prompt_cache=False
+    )
+    assert sent.url == _endpoint_url(_DIRECT_URL, use_responses)
+    assert sent.prompt_cache_options is None
+    assert sent.breakpoints == []
+
+
+@pytest.mark.parametrize("model_name", ["azure/gpt-5.6", "bedrock/gpt-5.6"])
+def test_explicit_prompt_cache_true_rejected_for_azure_and_bedrock(
+    model_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="explicit_prompt_cache"):
+        _openai_api(model_name, explicit_prompt_cache=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("service", ["azure", "bedrock"])
+async def test_generate_excludes_azure_and_bedrock_whatever_explicit_prompt_cache_holds(
+    monkeypatch: pytest.MonkeyPatch, service: str
+) -> None:
+    # generate() applies the exclusion itself rather than relying on the
+    # constructor having rejected True
+    if service == "azure":
+        api = _azure_api("azure/gpt-5.6", responses_api=False)
+    else:
+        api = _openai_api("bedrock/gpt-5.6", responses_api=False)
+    api.explicit_prompt_cache = True
+    assert await _generate_and_capture_cache_flag(api, monkeypatch) is False
+
+
+def test_explicit_prompt_cache_rejects_non_bool() -> None:
+    with pytest.raises(ValueError, match="explicit_prompt_cache"):
+        _openai_api("gpt-5.6", explicit_prompt_cache="false")
 
 
 # ---------------------------------------------------------------------------

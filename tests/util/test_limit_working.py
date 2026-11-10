@@ -61,6 +61,7 @@ from inspect_ai.util._sandbox.environment import (
     SandboxEnvironmentConfigType,
 )
 from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+from inspect_ai.util._sandbox.exec_remote import ExecRemoteAwaitableOptions
 from inspect_ai.util._subprocess import ExecResult
 
 
@@ -1394,7 +1395,9 @@ async def test_bridged_host_tool_call_is_known_work(
     assert reading == ((0, 5, 0) if own_wait else (5, 0, 5))
 
 
-@pytest.mark.parametrize("launch", ["bridge", "exec", "exec_remote"])
+@pytest.mark.parametrize(
+    "launch", ["bridge", "exec", "exec_remote", "exec_remote_held"]
+)
 async def test_bridged_agent_launch_is_not_known_work(
     sample_clock: _MockTime, monkeypatch: pytest.MonkeyPatch, launch: str
 ) -> None:
@@ -1406,11 +1409,12 @@ async def test_bridged_agent_launch_is_not_known_work(
     `sandbox_agent_bridge()` the launcher is not known work, so the failed
     attempt and backoff are waiting and the successful request is working.
     The controls: the same exec outside a bridge is known work, and an
-    `exec_remote` launch outside a bridge is known work only for its start.
+    `exec_remote` launch outside a bridge is known work only for its start,
+    unless the server holds the start (`server_wait`), which then is not.
     """
 
     class RemoteSandbox(_GatedSandbox):
-        """Answers `exec_remote`'s requests; its poll waits for `release`."""
+        """Answers `exec_remote`; its poll and held start wait for `release`."""
 
         async def exec(
             self,
@@ -1425,11 +1429,14 @@ async def test_bridged_agent_launch_is_not_known_work(
         ) -> ExecResult[str]:
             if input is None:
                 return await super().exec(cmd)
+            method = json.loads(input)["method"]
             result: dict[str, object] = {"pid": 42}
-            if json.loads(input)["method"] == "exec_remote_poll":
+            if method in ("exec_remote_poll", "exec_remote_start_wait"):
                 await self.release.wait()
                 result = {"state": "completed", "exit_code": 0, "seq": 0}
                 result.update(stdout="", stderr="")
+                if method == "exec_remote_start_wait":
+                    result = {"pid": 42, "result": result}
             response = {"jsonrpc": "2.0", "result": result, "id": 1}
             return ExecResult(
                 success=True, returncode=0, stdout=json.dumps(response), stderr=""
@@ -1505,8 +1512,10 @@ async def test_bridged_agent_launch_is_not_known_work(
         async with anyio.create_task_group() as tg:
             tg.start_soon(run)
             launched.set()
-            if launch == "exec_remote":
-                await proxy.exec_remote(["agent"], stream=False)
+            if launch.startswith("exec_remote"):
+                held = launch == "exec_remote_held"
+                options = ExecRemoteAwaitableOptions(server_wait=held)
+                await proxy.exec_remote(["agent"], options, stream=False)
             else:
                 await proxy.exec(["poll"])
 
