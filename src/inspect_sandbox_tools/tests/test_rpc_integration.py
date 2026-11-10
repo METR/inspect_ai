@@ -1,6 +1,7 @@
 """End-to-end checks of the ``exec`` CLI entry point against a real server."""
 
 import base64
+import contextlib
 import json
 import os
 import select
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -88,47 +90,79 @@ def test_malformed_jsonrpc_request() -> None:
 class _Bridge:
     """A `bridge` CLI process: requests in on stdin, replies out on stdout."""
 
-    def __init__(self, max_frame_bytes: int = 65536) -> None:
-        self.process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "inspect_sandbox_tools._cli.main",
-                "bridge",
-                "--max-frame-bytes",
-                str(max_frame_bytes),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert json.loads(self.read_line()) == {
-            "jsonrpc": "2.0",
-            "method": "__inspect_bridge_ready__",
-            "params": {"version": 1},
-        }
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self.process = process
+        self._buffer = b""
 
     def send(self, request: dict[str, Any]) -> None:
+        self.send_line(json.dumps(request).encode() + b"\n")
+
+    def send_line(self, line: bytes) -> None:
         assert self.process.stdin
-        self.process.stdin.write(json.dumps(request).encode() + b"\n")
+        self.process.stdin.write(line)
         self.process.stdin.flush()
 
     def read_line(self, timeout: float = 10) -> bytes:
+        """The next line of stdout, with its newline; fails if none comes in time."""
         assert self.process.stdout
-        readable, _, _ = select.select([self.process.stdout], [], [], timeout)
-        assert readable, "no reply from the bridge"
-        return self.process.stdout.readline()
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self._buffer:
+            remaining = max(deadline - time.monotonic(), 0)
+            readable, _, _ = select.select([self.process.stdout], [], [], remaining)
+            assert readable, "no reply from the bridge"
+            data = os.read(self.process.stdout.fileno(), 65536)
+            assert data, "the bridge closed its stdout"
+            self._buffer += data
+        line, _, self._buffer = self._buffer.partition(b"\n")
+        return line + b"\n"
 
-    def read(self) -> dict[str, Any]:
-        return json.loads(self.read_line())
-
-    def read_reply(self, timeout: float) -> dict[str, Any]:
+    def read(self, timeout: float = 10) -> dict[str, Any]:
         return json.loads(self.read_line(timeout))
+
+    def rest(self) -> bytes:
+        """Everything else the bridge writes before it exits."""
+        assert self.process.stdout
+        while data := os.read(self.process.stdout.fileno(), 65536):
+            self._buffer += data
+        rest, self._buffer = self._buffer, b""
+        return rest
 
     def close(self) -> int:
         assert self.process.stdin
         self.process.stdin.close()
         return self.process.wait(10)
+
+
+@contextlib.contextmanager
+def _bridge(max_frame_bytes: int = 65536) -> Iterator[_Bridge]:
+    """A started bridge, stopped when the block ends however it ends."""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "inspect_sandbox_tools._cli.main",
+            "bridge",
+            "--max-frame-bytes",
+            str(max_frame_bytes),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        bridge = _Bridge(process)
+        assert bridge.read() == {
+            "jsonrpc": "2.0",
+            "method": "__inspect_bridge_ready__",
+            "params": {"version": 1},
+        }
+        yield bridge
+    finally:
+        process.kill()
+        process.wait(10)
+        for pipe in (process.stdin, process.stdout):
+            if pipe is not None:
+                pipe.close()
 
 
 def _wait_until_refused(socket_path: Path) -> None:
@@ -155,66 +189,77 @@ def _start_wait(command: str, request_id: str, id: int) -> dict[str, Any]:
 
 def test_bridge_answers_requests_while_another_is_held(tmp_path: Path) -> None:
     release = tmp_path / "release"
-    bridge = _Bridge()
-    bridge.send(
-        _start_wait(f"while [ ! -e {release} ]; do sleep 0.05; done", uuid4().hex, 1)
-    )
-    bridge.send({"jsonrpc": "2.0", "method": "remote_version", "id": 2})
+    with _bridge() as bridge:
+        bridge.send(
+            _start_wait(
+                f"while [ ! -e {release} ]; do sleep 0.05; done", uuid4().hex, 1
+            )
+        )
+        bridge.send({"jsonrpc": "2.0", "method": "remote_version", "id": 2})
 
-    # the server holds the first request until its command ends, which needs `release`
-    assert bridge.read()["id"] == 2
-    release.touch()
-    assert bridge.read()["id"] == 1
-    assert bridge.close() == 0
+        # the server holds the first request until its command ends, which needs `release`
+        assert bridge.read()["id"] == 2
+        release.touch()
+        assert bridge.read()["id"] == 1
+        assert bridge.close() == 0
 
 
 def test_bridge_spills_a_reply_longer_than_the_frame_limit() -> None:
-    bridge = _Bridge(max_frame_bytes=4096)
-    bridge.send(_start_wait("printf 'x%.0s' $(seq 20000)", uuid4().hex, 1))
+    with _bridge(max_frame_bytes=4096) as bridge:
+        bridge.send(_start_wait("printf 'x%.0s' $(seq 20000)", uuid4().hex, 1))
 
-    line = bridge.read_line()
-    assert len(line) <= 4096
-    response = b""
-    chunk = json.loads(line)["__inspect_json_rpc_response_chunk__"]
-    while True:
-        response += base64.b64decode(chunk["chunk"])
-        if chunk["done"]:
-            break
-        params = {"handle": chunk["handle"], "offset": chunk["next_offset"]}
-        bridge.send(
-            {
-                "jsonrpc": "2.0",
-                "method": "__inspect_json_rpc_response_chunk__",
-                "params": params,
-                "id": 2,
-            }
-        )
         line = bridge.read_line()
         assert len(line) <= 4096
+        response = b""
         chunk = json.loads(line)["__inspect_json_rpc_response_chunk__"]
+        while True:
+            response += base64.b64decode(chunk["chunk"])
+            if chunk["done"]:
+                break
+            params = {"handle": chunk["handle"], "offset": chunk["next_offset"]}
+            bridge.send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "__inspect_json_rpc_response_chunk__",
+                    "params": params,
+                    "id": 2,
+                }
+            )
+            line = bridge.read_line()
+            assert len(line) <= 4096
+            chunk = json.loads(line)["__inspect_json_rpc_response_chunk__"]
 
-    assert json.loads(response)["result"]["result"]["stdout"] == "x" * 20000
-    assert bridge.close() == 0
+        assert json.loads(response)["result"]["result"]["stdout"] == "x" * 20000
+        assert bridge.close() == 0
 
 
 def test_bridge_restarts_a_server_that_died() -> None:
-    bridge = _Bridge()
-    request_id = uuid4().hex
-    bridge.send(_start_wait("true", request_id, 1))
-    assert bridge.read()["result"]["result"]["state"] == "completed"
-    server_pid = json.loads(SERVER_PID_PATH.read_text())["pid"]
-    os.kill(server_pid, signal.SIGKILL)
-    _wait_until_refused(SOCKET_PATH)
+    with _bridge() as bridge:
+        request_id = uuid4().hex
+        bridge.send(_start_wait("true", request_id, 1))
+        assert bridge.read()["result"]["result"]["state"] == "completed"
+        server_pid = json.loads(SERVER_PID_PATH.read_text())["pid"]
+        os.kill(server_pid, signal.SIGKILL)
+        _wait_until_refused(SOCKET_PATH)
 
-    bridge.send({"jsonrpc": "2.0", "method": "remote_version", "id": 2})
-    assert "result" in bridge.read_reply(timeout=30)
-    assert json.loads(SERVER_PID_PATH.read_text())["pid"] != server_pid
-    # the new server knows the old one launched it, so a resent start is not rerun
-    bridge.send(_start_wait("true", request_id, 3))
-    assert "may have run before the sandbox tools server restarted" in str(
-        bridge.read()
-    )
-    assert bridge.close() == 0
+        bridge.send({"jsonrpc": "2.0", "method": "remote_version", "id": 2})
+        assert "result" in bridge.read(timeout=30)
+        assert json.loads(SERVER_PID_PATH.read_text())["pid"] != server_pid
+        # the new server knows the old one launched it, so a resent start is not rerun
+        bridge.send(_start_wait("true", request_id, 3))
+        assert "may have run before the sandbox tools server restarted" in str(
+            bridge.read()
+        )
+        # a command the bridge's server runs without input reads EOF, not the requests
+        bridge.send(_start_wait("cat", uuid4().hex, 4))
+        assert bridge.read()["result"]["result"] == {
+            "state": "completed",
+            "exit_code": 0,
+            "seq": 1,
+            "stdout": "",
+            "stderr": "",
+        }
+        assert bridge.close() == 0
 
 
 @pytest.mark.parametrize(
@@ -233,13 +278,13 @@ def test_bridge_restarts_a_server_that_died() -> None:
 def test_bridge_refuses_requests_it_cannot_forward(
     request_data: dict[str, Any],
 ) -> None:
-    bridge = _Bridge()
-    bridge.send(request_data)
+    with _bridge() as bridge:
+        bridge.send(request_data)
 
-    reply = bridge.read()
-    assert reply["id"] == 1
-    assert "cannot be sent over the bridge" in reply["__inspect_bridge_error__"]
-    assert bridge.close() == 0
+        reply = bridge.read()
+        assert reply["id"] == 1
+        assert "cannot be sent over the bridge" in reply["__inspect_bridge_error__"]
+        assert bridge.close() == 0
 
 
 @pytest.mark.parametrize(
@@ -254,10 +299,8 @@ def test_bridge_refuses_requests_it_cannot_forward(
     ids=["not JSON", "no ID", "longer than the frame limit"],
 )
 def test_bridge_exits_on_a_line_that_is_not_a_request(line: bytes) -> None:
-    bridge = _Bridge(max_frame_bytes=100)
-    assert bridge.process.stdin and bridge.process.stdout
-    bridge.process.stdin.write(line)
-    bridge.process.stdin.flush()
+    with _bridge(max_frame_bytes=100) as bridge:
+        bridge.send_line(line)
 
-    assert bridge.process.wait(10) != 0
-    assert bridge.process.stdout.read() == b""
+        assert bridge.process.wait(10) != 0
+        assert bridge.rest() == b""

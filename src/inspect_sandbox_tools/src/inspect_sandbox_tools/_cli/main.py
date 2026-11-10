@@ -327,6 +327,12 @@ def _bridge(max_frame_bytes: int) -> None:
         ).start()
 
 
+# Creating a private directory sets the process umask for a moment, and a server
+# started meanwhile would keep that umask for every command it runs. So `bridge`
+# threads take turns at the steps that can do either.
+_BRIDGE_SETUP_LOCK = threading.Lock()
+
+
 def _bridge_reply(
     request_data: dict[str, Any], request_json_str: str, max_frame_bytes: int
 ) -> str:
@@ -340,18 +346,28 @@ def _bridge_reply(
             isinstance(params, dict) and "_run_as" in params
         ):
             raise ValueError(f"{method} cannot be sent over the bridge")
-        response = _dispatch_remote_method(request_json_str)
-        return chunk_json_rpc_response_if_needed(
-            request_data, response, max_frame_bytes
-        )
+        with _BRIDGE_SETUP_LOCK:
+            _ensure_server_is_running()
+        response = _json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
+        with _BRIDGE_SETUP_LOCK:
+            return chunk_json_rpc_response_if_needed(
+                request_data, response, max_frame_bytes
+            )
     except Exception as ex:
-        return json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": request_data["id"],
-                _BRIDGE_ERROR_FIELD: f"{type(ex).__name__}: {ex}",
-            }
+        return _bridge_error(
+            request_data["id"], f"{type(ex).__name__}: {ex}", max_frame_bytes
         )
+
+
+def _bridge_error(request_id: Any, error: str, max_frame_bytes: int) -> str:
+    """A reply carrying `error`, shortened until the line fits in a frame."""
+    while True:
+        reply = json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, _BRIDGE_ERROR_FIELD: error}
+        )
+        if len(reply) + 1 <= max_frame_bytes or not error:
+            return reply
+        error = error[: len(error) // 2]
 
 
 def _request_method(request_data: Any) -> str:
@@ -491,6 +507,9 @@ def _ensure_server_is_running_locked() -> None:
                 # Dev/test mode: use Python interpreter with module invocation
                 else [sys.executable, "-m", "inspect_sandbox_tools._cli.main", "server"]
             ),
+            # Not this process's stdin: under `bridge` it carries the host's
+            # requests, and commands started without input inherit the server's.
+            stdin=subprocess.DEVNULL,
             stdout=stdout_log,
             stderr=stderr_log,
             env={**os.environ, SERVER_DIR_ENV: str(SERVER_DIR)},
