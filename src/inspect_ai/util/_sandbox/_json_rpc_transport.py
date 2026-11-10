@@ -69,7 +69,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             sandbox: The sandbox environment to use.
             cli: The path to the cli available in the sandbox.
             bridge: Send the requests in `BRIDGE_METHODS` over the sandbox's
-                bridge when `INSPECT_EXEC_REMOTE_BRIDGE` is set (see
+                bridge when `INSPECT_EXEC_REMOTE_BRIDGE` is `1` or `true` (see
                 `_json_rpc_bridge`).
         """
         self.sandbox = sandbox

@@ -1,4 +1,4 @@
-"""End-to-end checks of the ``exec`` CLI entry point against a real server."""
+"""End-to-end checks of the ``exec`` and ``bridge`` CLI entry points against a real server."""
 
 import base64
 import contextlib
@@ -292,11 +292,12 @@ def test_bridge_refuses_requests_it_cannot_forward(
     [
         b"not json\n",
         b'{"jsonrpc": "2.0", "method": "remote_version"}\n',
+        b'{"jsonrpc": "2.0", "id": 1}\n',
         # never split into the two requests it holds
         b'{"jsonrpc": "2.0", "method": "remote_version", "id": 1}'.ljust(100)
         + b'{"jsonrpc": "2.0", "method": "remote_version", "id": 2}\n',
     ],
-    ids=["not JSON", "no ID", "longer than the frame limit"],
+    ids=["not JSON", "no ID", "no method", "longer than the frame limit"],
 )
 def test_bridge_exits_on_a_line_that_is_not_a_request(line: bytes) -> None:
     with _bridge(max_frame_bytes=100) as bridge:
@@ -304,3 +305,12 @@ def test_bridge_exits_on_a_line_that_is_not_a_request(line: bytes) -> None:
 
         assert bridge.process.wait(10) != 0
         assert bridge.rest() == b""
+
+
+def test_bridge_accepts_a_request_exactly_as_long_as_the_frame_limit() -> None:
+    request = b'{"jsonrpc": "2.0", "method": "remote_version", "id": 1}'
+    with _bridge(max_frame_bytes=100) as bridge:
+        bridge.send_line(request.ljust(99) + b"\n")
+
+        assert bridge.read()["id"] == 1
+        assert bridge.close() == 0

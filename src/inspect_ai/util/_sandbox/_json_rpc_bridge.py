@@ -1,8 +1,8 @@
 """Many sandbox tools requests over one long-lived exec.
 
 `SandboxJSONRPCTransport` normally starts the injected CLI in a new exec for each
-request. When `INSPECT_EXEC_REMOTE_BRIDGE` is set and the sandbox provider
-implements `SandboxEnvironment.exec_stdio`, exec_remote's requests instead go over
+request. When `INSPECT_EXEC_REMOTE_BRIDGE` is `1` or `true` and the sandbox provider
+implements `SandboxEnvironment.exec_stdio`, exec_remote's server-wait requests go over
 one `inspect-sandbox-tools bridge` exec per sandbox and tools user. The bridge
 forwards each request line to the sandbox tools server, as `exec` does with its one
 request, and writes each reply as a line.
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 BRIDGE_ENV = "INSPECT_EXEC_REMOTE_BRIDGE"
-"""Sends exec_remote's requests over a bridge when `1` or `true`."""
+"""Sends exec_remote's server-wait requests over a bridge when `1` or `true`."""
 
 BRIDGE_METHODS = frozenset(
     {

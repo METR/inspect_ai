@@ -305,9 +305,12 @@ class _Pipe(ByteStream):
         self._receive = receive
         self._peer_send = peer_send  # closed with this end, to wake its reader
         self.close_fails = False
+        self.send_fails = False
         self.receive_fails = False
 
     async def send(self, item: bytes) -> None:
+        if self.send_fails:
+            raise RuntimeError("the connection failed")
         # a byte stream may deliver one write in pieces
         half = len(item) // 2
         await self._send.send(item[:half])
@@ -386,7 +389,7 @@ class _BridgeSandbox(SandboxEnvironment):
         self.stdio_calls.append(cmd)
         self.stdio_users.append(user)
         if self._serve is None:
-            raise NotImplementedError("exec_stdio not implemented")
+            return await super().exec_stdio(cmd, user)  # the default: not implemented
         if self.before_open is not None:
             await self.before_open()
         host, sandbox = _pipe(self.stdin_buffer)
@@ -1082,15 +1085,41 @@ async def test_held_request_over_an_open_bridge_ignores_the_held_request_limit(
     assert second["wait_seconds"] > 0
 
 
+@pytest.mark.parametrize("failing", ["send", "receive"])
 @pytest.mark.usefixtures("bridge_on")
-async def test_bridge_whose_stream_fails_is_replaced() -> None:
+async def test_bridge_whose_stream_fails_is_replaced(failing: str) -> None:
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_poll_wait") == "bridged"
-        sandbox.bridges[0].host.receive_fails = True
+        setattr(sandbox.bridges[0].host, f"{failing}_fails", True)
         assert await _result(transport, "exec_remote_poll_wait") == "bridged"
 
     assert len(sandbox.bridges) == 2
+
+
+@pytest.mark.parametrize("extra", [0, 1], ids=["exactly the limit", "one byte over"])
+@pytest.mark.usefixtures("bridge_on")
+async def test_reply_frame_limit_includes_the_newline(extra: int) -> None:
+    sent: list[str] = []
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        request = await bridge.next_request()
+        if len(sandbox.bridges) > 1:
+            await bridge.reply(request)
+        else:
+            reply = {"jsonrpc": "2.0", "id": request["id"], "result": ""}
+            reply["result"] = "x" * (1024 - len(json.dumps(reply)) - 1 + extra)
+            sent.append(reply["result"])
+            await bridge.stream.send(json.dumps(reply).encode() + b"\n")
+        await bridge.wait_closed()
+
+    async with _bridge_sandbox(serve) as sandbox:
+        with override_max_exec_output_size(1024):
+            result = await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
+
+    assert len(sandbox.bridges) == 1 + extra
+    assert result == ("bridged" if extra else sent[0])
 
 
 @pytest.mark.usefixtures("bridge_on")
