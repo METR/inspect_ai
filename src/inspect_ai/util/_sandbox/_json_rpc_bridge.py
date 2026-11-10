@@ -67,6 +67,10 @@ class BridgeDropped(RuntimeError):
     """The bridge ended, broke or misbehaved before a request's reply arrived."""
 
 
+class BridgeUnavailable(Exception):
+    """No bridge could send a request sent with `bridge_only`."""
+
+
 class _Bridge:
     """One `bridge` exec: requests are written as lines, and replies matched by ID.
 
@@ -294,8 +298,9 @@ async def _bridge(
     bridge does not report ready within `OPEN_TIMEOUT`. That is remembered, so a
     sandbox whose bridge fails to start (including one started again after a
     drop) sends every later request in its own exec. Another error starting it
-    is raised for the request that started it, and remembered the same way. The frame limit is the exec output limit,
-    which a caller can lower for its requests, so each limit has its own bridge.
+    is raised for the request that started it, and remembered the same way. The
+    frame limit is the exec output limit, which a caller can lower for its
+    requests, so each limit has its own bridge.
     """
     if sandbox._json_rpc_bridges is None:
         sandbox._json_rpc_bridges = _Bridges()

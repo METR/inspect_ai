@@ -41,6 +41,7 @@ from inspect_ai.util._concurrency import (
 )
 
 from ._cli import SANDBOX_CLI, tools_user_param
+from ._json_rpc_bridge import BridgeUnavailable
 from ._json_rpc_transport import SandboxJSONRPCTransport
 
 if TYPE_CHECKING:
@@ -244,11 +245,11 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     with the provider's `exec_stdio`, instead of an exec each; held requests
     sent that way do not count toward `INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY`.
     Starting the process, or starting it again after a drop, may take up to 60
-    seconds more each time. Each attempt at a
-    request waits at most `poll_timeout` (a provider's own retries of a
-    timed-out exec do not apply), and a request lost when the process's stream
-    drops is sent once more. Sandboxes whose provider or sandbox tools build
-    cannot run the process use an exec per request.
+    seconds more each time. Each attempt at a request waits at most
+    `poll_timeout` (a provider's own retries of a timed-out exec do not apply),
+    and a request lost when the process's stream drops is sent once more.
+    Sandboxes whose provider or sandbox tools build cannot run the process use
+    an exec per request.
     """
 
 
@@ -505,14 +506,19 @@ class ExecRemoteProcess:
         params: dict[str, object],
         result_type: type[T],
         error_mapper: type[JSONRPCErrorMapper] = GenericJSONRPCErrorMapper,
+        *,
+        bridge: bool = True,
     ) -> T:
         """Make an RPC call to the sandbox."""
         held = bool(params.get("wait_seconds"))
-        slot: ConcurrencySemaphore | None = None
         # A held request over an open bridge takes no exec, which the limit protects.
-        if held and not self._transport.bridged(
-            method, params, self._sandbox._tools_user
-        ):
+        bridge_only = (
+            bridge
+            and held
+            and self._transport.bridged(method, self._sandbox._tools_user)
+        )
+        slot: ConcurrencySemaphore | None = None
+        if held and not bridge_only:
             slot = await get_or_create_semaphore(
                 "exec-remote-wait", _wait_concurrency(), None, False
             )
@@ -541,14 +547,22 @@ class ExecRemoteProcess:
         )
         if self._options.poll_timeout_retry is not None:
             extra_args["timeout_retry"] = self._options.poll_timeout_retry
-        async with slot.semaphore if slot is not None else contextlib.nullcontext():
-            return await exec_model_request(
-                method=method,
-                params=params,
-                result_type=result_type,
-                transport=self._transport,
-                error_mapper=error_mapper,
-                **extra_args,
+        if bridge_only:
+            extra_args["bridge_only"] = True
+        try:
+            async with slot.semaphore if slot is not None else contextlib.nullcontext():
+                return await exec_model_request(
+                    method=method,
+                    params=params,
+                    result_type=result_type,
+                    transport=self._transport,
+                    error_mapper=error_mapper,
+                    **extra_args,
+                )
+        except BridgeUnavailable:
+            # The bridge closed after admission, so this request takes an exec.
+            return await self._rpc(
+                method, params, result_type, error_mapper, bridge=False
             )
 
     async def _start(self, *, wait: bool = False) -> None:

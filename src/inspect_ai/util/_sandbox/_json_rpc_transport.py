@@ -25,6 +25,7 @@ from .._subprocess import ExecResult
 from ._cli import SANDBOX_CLI
 from ._json_rpc_bridge import (
     BRIDGE_METHODS,
+    BridgeUnavailable,
     bridge_enabled,
     bridge_error,
     bridge_open,
@@ -77,15 +78,19 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self._response_chunking = cli == SANDBOX_CLI
         self._bridge = bridge
 
-    def bridged(self, method: str, params: JSONRPCParamsType, user: str | None) -> bool:
-        """Whether a request would go over an open bridge, so it needs no exec."""
-        max_frame_bytes = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+    def bridged(self, method: str, user: str | None) -> bool:
+        """Whether a request would go over an open bridge, so it needs no exec.
+
+        Send it with `bridge_only`, since the bridge can close (or the request
+        not fit in a frame) before it is sent.
+        """
         return (
             self._bridge
             and method in BRIDGE_METHODS
             and bridge_enabled()
-            and bridge_open(self.sandbox, user, max_frame_bytes)
-            and len(create_json_rpc_request(method, params, False)) < max_frame_bytes
+            and bridge_open(
+                self.sandbox, user, SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+            )
         )
 
     async def __call__(
@@ -101,14 +106,17 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             method: The JSON-RPC method to call.
             params: The parameters for the JSON-RPC method.
             is_notification: Whether this is a notification (no response expected).
-            **transport_extra_args: Additional parameters including timeout and user.
+            **transport_extra_args: Additional parameters including timeout and
+                user, and `bridge_only`, which sends the request only over a bridge.
 
         Returns:
             The response from the RPC call.
 
         Raises:
             RuntimeError: If the sandbox execution fails.
+            BridgeUnavailable: If no bridge sent a `bridge_only` request.
         """
+        bridge_only = transport_extra_args.pop("bridge_only", False)
         request = create_json_rpc_request(method, params, is_notification)
         max_response_bytes = (
             SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
@@ -121,6 +129,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             rpc_call_description(method, params),
             transport_extra_args,
             max_response_bytes,
+            bridge_only,
         )
         if max_response_bytes is None:
             return response
@@ -135,6 +144,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         description: str,
         transport_extra_args: dict[str, Any],
         max_response_bytes: int | None,
+        bridge_only: bool = False,
     ) -> str:
         if (
             self._bridge
@@ -161,6 +171,8 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                         f"Sandbox.exec failure executing {description}: {error}"
                     )
                 return reply
+        if bridge_only:
+            raise BridgeUnavailable(f"No sandbox tools bridge sent {description}")
         env = (
             {_JSON_RPC_RESPONSE_MAX_BYTES_ENV: str(max_response_bytes)}
             if max_response_bytes is not None

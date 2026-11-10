@@ -1298,6 +1298,50 @@ async def test_held_request_too_long_for_a_frame_takes_a_held_request_slot(
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_held_request_whose_bridge_cannot_restart_takes_a_held_request_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY", "0")
+    completed = {
+        "pid": 42,
+        "result": {
+            "state": "completed",
+            "exit_code": 0,
+            "seq": 1,
+            "stdout": "",
+            "stderr": "",
+        },
+    }
+    held: list[float] = []
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        await bridge.reply(await bridge.next_request(), completed)
+        await bridge.next_request()
+        await bridge.stream.aclose()  # exits with the held request unanswered
+
+    async def exec(cmd: list[str], **kwargs: Any) -> ExecResult[str]:
+        request = json.loads(kwargs["input"])
+        held.append(request["params"]["wait_seconds"])
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": completed}
+        return ExecResult(True, 0, json.dumps(reply), "")
+
+    async def not_ready() -> None:
+        raise TimeoutError
+
+    async with _bridge_sandbox(serve) as sandbox:
+        monkeypatch.setattr(sandbox, "exec", exec)
+        proxy = SandboxEnvironmentProxy(sandbox)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        await exec_remote_awaitable(proxy, ["ls"], 5, options)  # opens the bridge
+        sandbox.before_open = not_ready
+        await exec_remote_awaitable(proxy, ["ls"], 5, options)
+
+    assert sandbox.bridges[0].requests[1]["params"]["wait_seconds"] > 0
+    assert held == [0.0]  # sent in its own exec, with no slot free, so not held
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_caller_cancelled_while_its_request_is_written_keeps_the_bridge() -> None:
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
