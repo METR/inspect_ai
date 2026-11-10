@@ -75,7 +75,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self.sandbox = sandbox
         self.cli = cli
         self._response_chunking = cli == SANDBOX_CLI
-        self._bridge = bridge and self._response_chunking
+        self._bridge = bridge
 
     def bridged(self, method: str, user: str | None) -> bool:
         """Whether a request would go over an open bridge, so it needs no exec."""

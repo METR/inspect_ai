@@ -20,6 +20,8 @@ import anyio
 from anyio.abc import ByteStream
 from anyio.streams.buffered import BufferedByteStream
 
+from inspect_ai._util.logger import warn_once
+
 from ._cli import SANDBOX_CLI
 
 if TYPE_CHECKING:
@@ -133,8 +135,8 @@ class _Bridge:
         async with self._send_lock:
             try:
                 await self._stream.send(frame)
-            except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
-                await self.drop("the bridge's stdin closed")
+            except Exception as ex:
+                await self.drop(f"writing to the bridge failed: {ex!r}")
             except BaseException:
                 # interrupted (a timeout, for one) with part of the frame written
                 await self.close("a request was interrupted while it was written")
@@ -167,8 +169,8 @@ class _Bridge:
             await self.drop("the bridge sent a reply longer than the frame limit")
         except anyio.IncompleteRead:
             await self.drop("the bridge exited")
-        except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
-            await self.drop("the bridge's stdout closed")
+        except Exception as ex:
+            await self.drop(f"reading from the bridge failed: {ex!r}")
         if len(line) >= self._max_frame_bytes:  # found past the limit in one read
             await self.drop("the bridge sent a reply longer than the frame limit")
         return line
@@ -294,11 +296,13 @@ async def _bridge(
         except (TimeoutError, BridgeDropped) as ex:
             if bridge is not None:
                 await bridge.close("the bridge did not report ready")
-            logger.warning(
-                "Sending sandbox tools requests in separate execs: the bridge did "
-                "not report ready (%s)",
-                ex,
+            warn_once(
+                logger,
+                "A sandbox's tools bridge did not report ready, so its requests "
+                "are sent in separate execs (an older sandbox tools build has no "
+                "bridge).",
             )
+            logger.debug("The sandbox tools bridge did not report ready: %r", ex)
             bridges.by_key[key] = None
             return None
         except BaseException:

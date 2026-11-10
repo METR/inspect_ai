@@ -299,10 +299,13 @@ class _Pipe(ByteStream):
         self,
         send: MemoryObjectSendStream[bytes],
         receive: MemoryObjectReceiveStream[bytes],
+        peer_send: MemoryObjectSendStream[bytes],
     ) -> None:
         self._send = send
         self._receive = receive
+        self._peer_send = peer_send  # closed with this end, to wake its reader
         self.close_fails = False
+        self.receive_fails = False
 
     async def send(self, item: bytes) -> None:
         # a byte stream may deliver one write in pieces
@@ -312,6 +315,8 @@ class _Pipe(ByteStream):
         await self._send.send(item[half:])
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
+        if self.receive_fails:
+            raise RuntimeError("the connection failed")
         return await self._receive.receive()
 
     async def send_eof(self) -> None:
@@ -319,6 +324,7 @@ class _Pipe(ByteStream):
 
     async def aclose(self) -> None:
         await self._send.aclose()
+        await self._peer_send.aclose()
         await self._receive.aclose()
         if self.close_fails:
             raise OSError("closing failed")
@@ -327,8 +333,9 @@ class _Pipe(ByteStream):
 class _FakeBridge:
     """The sandbox end of one bridge stream."""
 
-    def __init__(self, stream: _Pipe) -> None:
+    def __init__(self, stream: _Pipe, host: _Pipe) -> None:
         self.stream = stream
+        self.host = host  # the end the host was given
         self.requests: list[dict[str, Any]] = []
         self._buffer = b""
 
@@ -384,7 +391,7 @@ class _BridgeSandbox(SandboxEnvironment):
             await self.before_open()
         host, sandbox = _pipe(self.stdin_buffer)
         host.close_fails = self.close_fails
-        self.bridges.append(_FakeBridge(sandbox))
+        self.bridges.append(_FakeBridge(sandbox, host))
         self._tg.start_soon(self._serve, self.bridges[-1])
         return host
 
@@ -453,7 +460,10 @@ def _pipe(host_to_sandbox_buffer: int) -> tuple[_Pipe, _Pipe]:
         host_to_sandbox_buffer
     )
     sandbox_send, host_receive = anyio.create_memory_object_stream[bytes](100)
-    return _Pipe(host_send, host_receive), _Pipe(sandbox_send, sandbox_receive)
+    return (
+        _Pipe(host_send, host_receive, sandbox_send),
+        _Pipe(sandbox_send, sandbox_receive, host_send),
+    )
 
 
 @contextlib.asynccontextmanager
@@ -468,7 +478,7 @@ async def _bridge_sandbox(
 
 async def _serve_forever(bridge: _FakeBridge) -> None:
     await bridge.ready()
-    with contextlib.suppress(anyio.EndOfStream):
+    with contextlib.suppress(anyio.EndOfStream, anyio.ClosedResourceError):
         while True:
             await bridge.reply(await bridge.next_request())
 
@@ -1070,3 +1080,42 @@ async def test_held_request_over_an_open_bridge_ignores_the_held_request_limit(
     first, second = (request["params"] for request in sandbox.bridges[0].requests)
     assert first["wait_seconds"] == 0.0  # no bridge was open yet
     assert second["wait_seconds"] > 0
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_bridge_whose_stream_fails_is_replaced() -> None:
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+        sandbox.bridges[0].host.receive_fails = True
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+
+    assert len(sandbox.bridges) == 2
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_closing_a_bridge_resends_the_requests_waiting_on_it() -> None:
+    async def serve(bridge: _FakeBridge) -> None:
+        if len(sandbox.bridges) > 1:
+            await _serve_forever(bridge)
+            return
+        await bridge.ready()
+        await bridge.next_request()
+        await bridge.next_request()
+        await bridge.wait_closed()
+
+    results: list[Any] = []
+
+    async def waiting(transport: SandboxJSONRPCTransport) -> None:
+        results.append(await _result(transport, "exec_remote_poll_wait"))
+
+    async with _bridge_sandbox(serve) as sandbox:
+        transport = _bridged_transport(sandbox)
+        with anyio.fail_after(5):  # well inside the waiting request's own timeout
+            async with anyio.create_task_group() as requests:
+                requests.start_soon(waiting, transport)
+                await anyio.wait_all_tasks_blocked()
+                with pytest.raises(SandboxTimeoutError):
+                    await _result(transport, "exec_remote_poll_wait", timeout=0.05)
+
+    assert results == ["bridged"]
