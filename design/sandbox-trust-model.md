@@ -167,10 +167,10 @@ server's private state directory (see
 one per call, unless the host runs with `INSPECT_EXEC_REMOTE_BRIDGE` and the
 sandbox provider implements `exec_stdio`: then `exec_remote`'s server-wait
 requests share one long-lived `bridge` CLI per sandbox, tools user and frame limit
-(`guest/_cli/main.py:285-370`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
+(`guest/_cli/main.py:285-372`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
 bridge's stdin carries the host's requests, so the server it starts gets
 `/dev/null` as stdin rather than inheriting it, and commands the server runs
-without input cannot read that stream (`guest/_cli/main.py:512`).
+without input cannot read that stream (`guest/_cli/main.py:514`).
 
 Plain `bash()` and `python()` (`ai/tool/_tools/_execute.py:65-176`) call
 `sandbox.exec()` directly and never involve the injected tools. Tools are
@@ -232,7 +232,7 @@ crosses the boundary only as the response to a request the host made. The host
 reads a bridge only while a request waits on it, bounds each line by the exec
 output limit, and drops a bridge that sends a reply no request waits for (a
 late reply to a request that stopped waiting is dropped instead)
-(`ai/util/_sandbox/_json_rpc_bridge.py:143-176`).
+(`ai/util/_sandbox/_json_rpc_bridge.py:106-123,160-195`).
 
 ### Pattern 2: agent inside the sandbox
 
