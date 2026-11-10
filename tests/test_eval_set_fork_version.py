@@ -45,5 +45,5 @@ def test_a_later_upstream_version_is_not_read_as_an_older_fork_one(
 
 def test_the_versions_this_build_speaks() -> None:
     """A runner pins these exactly (Hawk: `hawk/core/sharding.py`), so a rebase that moves either must move the runner's with it."""
-    assert EVAL_SET_SELECTION_VERSION == 9081
+    assert EVAL_SET_SELECTION_VERSION == 9082
     assert EVAL_SET_CAPTURE_VERSION == 9031
