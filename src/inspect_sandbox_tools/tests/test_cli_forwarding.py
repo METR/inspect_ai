@@ -117,6 +117,26 @@ def test_forwarding_refuses_a_request_to_run_as_another_user(
     assert forwarded == []
 
 
+def test_bridge_reports_a_request_the_server_never_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where `exec` would exit non-zero, `bridge` replies with an error the host raises."""
+
+    def unanswered(request_json_str: str) -> str:
+        raise ConnectionError("server closed the connection")
+
+    monkeypatch.setattr(main_module, "_dispatch_remote_method", unanswered)
+    request = {"jsonrpc": "2.0", "method": "remote_version", "id": 7}
+
+    reply = main_module._bridge_reply(request, json.dumps(request), 65536)
+
+    assert json.loads(reply) == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "__inspect_bridge_error__": "ConnectionError: server closed the connection",
+    }
+
+
 @pytest.mark.parametrize(
     "reply",
     [

@@ -10,6 +10,7 @@ from shortuuid import uuid
 from inspect_ai._util.constants import SANDBOX_SETUP_TIMEOUT
 from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
 
+from ._json_rpc_bridge import close_bridges
 from ._privileged import (
     IMAGE_PATH_VARIABLE,
     image_path_lookup,
@@ -323,6 +324,8 @@ async def cleanup_sandbox_environments_sample(
 ) -> None:
     sandboxenv_type = registry_find_sandboxenv(type)
     sample_cleanup = cast(SampleCleanup, getattr(sandboxenv_type, "sample_cleanup"))
+    for environment in environments.values():
+        await close_bridges(environment)
     environments = unproxy_environments(environments)
     await sample_cleanup(task_name, config, environments, interrupted)
 

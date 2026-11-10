@@ -238,6 +238,13 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     of the sandbox tools server: a start resent after one fails with an error
     that the command may have run, and is not run again. Servers without
     support are polled as usual.
+
+    When `INSPECT_EXEC_REMOTE_BRIDGE` is `1` or `true`, these requests go over
+    one long-running sandbox tools process per sandbox, started with the
+    provider's `exec_stdio`, instead of an exec each. Each request still waits
+    at most `poll_timeout`, and one lost when that process's stream drops is
+    sent once more. Sandboxes whose provider or sandbox tools build cannot run
+    the process use an exec per request.
     """
 
 
@@ -475,7 +482,7 @@ class ExecRemoteProcess:
         hold = min(MAX_WAIT_SECONDS, max(0.0, rpc_timeout / 4))
         # A hold under MIN_WAIT_SECONDS would only make more requests: poll instead.
         self._wait_seconds = hold if hold >= MIN_WAIT_SECONDS else 0.0
-        self._transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+        self._transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI, bridge=True)
 
     @property
     def pid(self) -> int:

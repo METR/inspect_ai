@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterator, Literal, Type, Union, overload
 
+from anyio.abc import ByteStream
 from pydantic import JsonValue
 from pydantic_core import to_jsonable_python
 from typing_extensions import override
@@ -55,9 +56,6 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
-        from inspect_ai.event._sandbox import SandboxEvent
-        from inspect_ai.log._transcript import transcript
-
         # started
         timestamp = datetime.now(timezone.utc)
 
@@ -89,7 +87,43 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
         if is_sandbox_service_command(cmd):
             return result
 
-        # yield event
+        self.record_exec(
+            timestamp,
+            cmd,
+            input,
+            result,
+            cwd=cwd,
+            env=env,
+            user=user,
+            timeout=timeout,
+            timeout_retry=timeout_retry,
+        )
+
+        # verify output size
+        SandboxEnvironmentProxy.verify_exec_result_size(result)
+
+        # return result
+        return result
+
+    def record_exec(
+        self,
+        timestamp: datetime,
+        cmd: list[str],
+        input: str | bytes | None,
+        result: ExecResult[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: int | None = None,
+        timeout_retry: bool = True,
+    ) -> None:
+        """Record an exec event, for `exec()` and for requests sent over a bridge."""
+        from inspect_ai.event._sandbox import SandboxEvent
+        from inspect_ai.log._transcript import transcript
+
+        if not self._events_enabled():
+            return
         options: dict[str, JsonValue] = {}
         if cwd:
             options["cwd"] = cwd
@@ -101,32 +135,24 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
             options["timeout"] = timeout
         if timeout_retry is not True:
             options["timeout_retry"] = timeout_retry
-
-        if self._events_enabled():
-            transcript()._event(
-                SandboxEvent(
-                    timestamp=timestamp,
-                    action="exec",
-                    cmd=" ".join([shlex.quote(c) for c in cmd]),
-                    input=content_display(input) if input is not None else None,
-                    options=options,
-                    result=result.returncode,
-                    output=content_display(
-                        f"{result.stderr}\n\n{result.stdout}"
-                        if result.stderr
-                        else result.stdout
-                    )
-                    if self not in _event_output_off.get()
-                    else None,
-                    completed=datetime.now(timezone.utc),
+        transcript()._event(
+            SandboxEvent(
+                timestamp=timestamp,
+                action="exec",
+                cmd=" ".join([shlex.quote(c) for c in cmd]),
+                input=content_display(input) if input is not None else None,
+                options=options,
+                result=result.returncode,
+                output=content_display(
+                    f"{result.stderr}\n\n{result.stdout}"
+                    if result.stderr
+                    else result.stdout
                 )
+                if self not in _event_output_off.get()
+                else None,
+                completed=datetime.now(timezone.utc),
             )
-
-        # verify output size
-        SandboxEnvironmentProxy.verify_exec_result_size(result)
-
-        # return result
-        return result
+        )
 
     @staticmethod
     def verify_exec_result_size(exec_result: ExecResult[str]) -> None:
@@ -208,6 +234,10 @@ class SandboxEnvironmentProxy(SandboxEnvironment):
 
         # return result
         return output
+
+    @override
+    async def exec_stdio(self, cmd: list[str], user: str | None = None) -> ByteStream:
+        return await self._sandbox.exec_stdio(cmd, user=user)
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:

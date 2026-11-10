@@ -5,6 +5,7 @@ import logging
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Awaitable,
@@ -19,6 +20,7 @@ from typing import (
 )
 
 import anyio
+from anyio.abc import ByteStream
 from pydantic import BaseModel, Field, model_validator
 
 from inspect_ai._util.logger import warn_once
@@ -31,6 +33,9 @@ from .exec_remote import (
     exec_remote_awaitable,
     exec_remote_streaming,
 )
+
+if TYPE_CHECKING:
+    from ._json_rpc_bridge import _Bridges
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +195,7 @@ class SandboxEnvironment(abc.ABC):
     _root_access: RootAccess | None = None
     _exec_remote_wait_supported: bool | None = None
     _exec_remote_acks: tuple[str, ...] = ()
+    _json_rpc_bridges: _Bridges | None = None
 
     def __init__(self) -> None:
         self._inject_lock = anyio.Lock()
@@ -339,6 +345,29 @@ class SandboxEnvironment(abc.ABC):
             exceeds the limit.
         """
         ...
+
+    async def exec_stdio(self, cmd: list[str], user: str | None = None) -> ByteStream:
+        """Start a long-running command and return a stream joined to its stdio.
+
+        Inspect uses this to keep one sandbox tools process per sandbox for many
+        requests, instead of an `exec()` for each (see `INSPECT_EXEC_REMOTE_BRIDGE`).
+        Sending writes to the command's stdin, and receiving reads its stdout,
+        raising `anyio.EndOfStream` once stdout closes. Stderr is not part of the
+        stream. Closing the stream stops the command. The command runs as `exec()`
+        would run it for the same `user`.
+
+        Args:
+          cmd: Command or command and arguments to execute.
+          user: Optional username or UID to run the command as.
+
+        Returns:
+          A stream joined to the command's stdin and stdout.
+
+        Raises:
+          NotImplementedError: For sandboxes that don't provide it. Inspect then
+            runs an `exec()` for each request.
+        """
+        raise NotImplementedError("exec_stdio not implemented")
 
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
         """Information required to connect to sandbox environment.

@@ -8,6 +8,7 @@ import json
 import re
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from inspect_ai._util._json_rpc import (
@@ -20,7 +21,9 @@ from inspect_ai._util._json_rpc import (
 if TYPE_CHECKING:
     from .environment import SandboxEnvironment
 
+from .._subprocess import ExecResult
 from ._cli import SANDBOX_CLI
+from ._json_rpc_bridge import BRIDGE_METHODS, bridge_enabled, bridge_request
 from .limits import SandboxEnvironmentLimits
 
 _JSON_RPC_RESPONSE_CHUNK_METHOD = "__inspect_json_rpc_response_chunk__"
@@ -51,16 +54,22 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self,
         sandbox: SandboxEnvironment,
         cli: str,
+        *,
+        bridge: bool = False,
     ):
         """Initialize a new SandboxJSONRPCTransport.
 
         Args:
             sandbox: The sandbox environment to use.
             cli: The path to the cli available in the sandbox.
+            bridge: Send the requests in `BRIDGE_METHODS` over the sandbox's
+                bridge when `INSPECT_EXEC_REMOTE_BRIDGE` is set (see
+                `_json_rpc_bridge`).
         """
         self.sandbox = sandbox
         self.cli = cli
         self._response_chunking = cli == SANDBOX_CLI
+        self._bridge = bridge and self._response_chunking
 
     async def __call__(
         self,
@@ -90,6 +99,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             else None
         )
         response = await self._sandbox_exec(
+            method,
             request,
             rpc_call_description(method, params),
             transport_extra_args,
@@ -103,11 +113,27 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
 
     async def _sandbox_exec(
         self,
+        method: str,
         request: str,
         description: str,
         transport_extra_args: dict[str, Any],
         max_response_bytes: int | None,
     ) -> str:
+        if (
+            self._bridge
+            and max_response_bytes is not None
+            and method in BRIDGE_METHODS
+            and bridge_enabled()
+        ):
+            started = datetime.now(timezone.utc)
+            user = transport_extra_args.get("user", None)
+            timeout = transport_extra_args.get("timeout", None)
+            reply = await bridge_request(
+                self.sandbox, user, request, description, timeout, max_response_bytes
+            )
+            if reply is not None:
+                self._record_bridged(started, request, reply, user, timeout)
+                return reply
         env = (
             {_JSON_RPC_RESPONSE_MAX_BYTES_ENV: str(max_response_bytes)}
             if max_response_bytes is not None
@@ -172,6 +198,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
 
                 expected_offset = chunk.next_offset
                 next_response = await self._sandbox_exec(
+                    _JSON_RPC_RESPONSE_CHUNK_METHOD,
                     create_json_rpc_request(
                         _JSON_RPC_RESPONSE_CHUNK_METHOD,
                         {"handle": handle, "offset": expected_offset},
@@ -202,6 +229,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         }
         with suppress(Exception):
             await self._sandbox_exec(
+                _JSON_RPC_RESPONSE_CHUNK_METHOD,
                 create_json_rpc_request(
                     _JSON_RPC_RESPONSE_CHUNK_METHOD,
                     {"handle": handle, "release": True},
@@ -210,6 +238,27 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 "chunked JSON-RPC response cleanup",
                 cleanup_args,
                 max_response_bytes,
+            )
+
+    def _record_bridged(
+        self,
+        started: datetime,
+        request: str,
+        reply: str,
+        user: str | None,
+        timeout: int | None,
+    ) -> None:
+        """Record the exec event that sending the request in its own exec would."""
+        from .events import SandboxEnvironmentProxy
+
+        if isinstance(self.sandbox, SandboxEnvironmentProxy):
+            self.sandbox.record_exec(
+                started,
+                [self.cli, "bridge"],
+                request,
+                ExecResult(True, 0, reply, ""),
+                user=user,
+                timeout=timeout,
             )
 
 
