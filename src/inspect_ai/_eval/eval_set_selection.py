@@ -71,18 +71,31 @@ runner whose definitions may do this should omit the facets, or set
 `INSPECT_EVAL_SET_NO_PRUNE` in the worker's environment; there is no
 mechanical check, and this is the reason there is a switch.
 
-Two of the definition's options are overridden in worker mode, because both
-are completion decisions that belong to the runner rather than the worker:
-`fail_on_error` is forced to `False` (so sample errors never fail a task —
-the runner sees them in the log and decides what to do) and task-level retry
-is disabled (the runner retries by respawning a worker with `resume`, and an
-in-process loop would multiply its attempt budget and leave a failed log per
-attempt in the shared directory). `continue_on_fail` needs no override: it is
-moot once `fail_on_error` is `False`. Everything else the definition set is
-honoured, `retry_on_error` in particular — sample-level retry stays under the
-definition author's control. The values the definition asked for are recorded
-in the capture manifest's `options`, so a runner can see what it is honouring
-and what is being overridden.
+By default (`completion="runner"`) two of the definition's options are
+overridden in worker mode, because both are completion decisions that belong
+to the runner rather than the worker: `fail_on_error` is forced to `False` (so
+sample errors never fail a task — the runner sees them in the log and decides
+what to do) and task-level retry is disabled (the runner retries by respawning
+a worker with `resume`, and an in-process loop would multiply its attempt
+budget and leave a failed log per attempt in the shared directory).
+`continue_on_fail` needs no override: it is moot once `fail_on_error` is
+`False`. Everything else the definition set is honoured, `retry_on_error` in
+particular — sample-level retry stays under the definition author's control.
+The values the definition asked for are recorded in the capture manifest's
+`options`, so a runner can see what it is honouring and what is being
+overridden.
+
+A runner that would rather not adjudicate completion itself sets
+`completion="definition"` (a METR fork addition, see
+`_FORK_COMPLETION_VERSION`): the worker then keeps the
+definition's `fail_on_error` and `continue_on_fail`, makes as many attempts at
+a failed task as an unsharded `eval_set()` would, and recovers a crashed
+`resume` log with the definition's `incomplete_action`. Its result says
+whether every selected task succeeded under that policy. The retries run in
+the worker and are always immediate, even with `retry_immediate=False`, since
+batch retry is eval-set orchestration. Each failed attempt leaves its `error`
+log in the directory beside the retry's, and removing it is the runner's job,
+as is all other log cleanup.
 
 Scanning in selection mode is **record-only**: a worker dispatches scanners
 per settled sample and writes scout's per-transcript buffer, but never touches
@@ -112,18 +125,28 @@ Schema changes require a version bump and corresponding golden-test updates
 import json
 import os
 from collections import Counter
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import file
 
+from .eval_set_fork_version import (
+    fork_protocol_version,
+    protocol_version_understood,
+)
 from .eval_set_overrides import EvalSetOverrides, validate_eval_set_overrides
 
 INSPECT_EVAL_SET_SELECTION = "INSPECT_EVAL_SET_SELECTION"
 
 EVAL_SET_SELECTION_VERSION = 8
+
+# METR fork: the fork's own additions are numbered above upstream's range (see
+# `eval_set_fork_version`), so the line above stays as upstream has it.
+_UPSTREAM_SELECTION_VERSION = EVAL_SET_SELECTION_VERSION
+_FORK_COMPLETION_VERSION = fork_protocol_version(_UPSTREAM_SELECTION_VERSION, 1)
+EVAL_SET_SELECTION_VERSION = _FORK_COMPLETION_VERSION
 
 
 def eval_set_selection_requested() -> str | None:
@@ -213,6 +236,14 @@ class EvalSetSelection(BaseModel):
     Tasks are still matched to their identifiers with the definition's solver. The logs record `inspect_ai/empty_attempt` as their solver, which is what `zero_samples()` requires of an empty-attempt log. Cannot be combined with `resume`.
     """
 
+    completion: Literal["runner", "definition"] = "runner"
+    """Who decides whether a selected task is complete.
+
+    `"runner"` (the default): the worker forces `fail_on_error=False` and does no task retry, so sample errors never fail a task, and the runner decides from the log what to rerun. A crashed (`started`) `resume` log is recovered with the default disposition, so samples in progress at the crash re-run.
+
+    `"definition"`: the worker keeps the definition's `fail_on_error` and `continue_on_fail` and makes as many attempts at a failed task as an unsharded `eval_set()` would: the first attempt and up to `retry_attempts` retries (10 when unset), or `retry_attempts` attempts in all with `retry_immediate=False`. Each retry resumes the failed attempt's completed samples. Retries run in the worker and are always immediate, since batch retry is eval-set orchestration. Each failed attempt's `error` log stays in the log directory for the runner to clean up. A crashed (`started`) `resume` log is recovered as `eval_set()` recovers a task's latest log, with the definition's `incomplete_action` and `incomplete_max`; when that leaves the log complete (as `incomplete_action="error"` can), the task is not run again and the recovered log is its result.
+    """
+
 
 # The version each optional field was introduced in. A document may not use a
 # field newer than the version it declares: the declaration is what an older
@@ -224,10 +255,16 @@ class EvalSetSelection(BaseModel):
 # The gate is not ceremony, and `limit` is what shows why: an unknown field an
 # older inspect ignores usually costs nothing, but an ignored `limit` means a
 # worker asked for two samples runs five thousand.
+#
+# A field counts as used when the document names it, even at its default:
+# an older inspect refuses `completion` as an unknown field whatever its
+# value. An explicit null is exempt for backward compatibility with writers
+# that dump None fields (`overrides` and `scanners` default to None).
 _FIELD_MIN_VERSION: dict[str, int] = {
     "overrides": 3,
     "scanners": 7,
     "empty_attempt": 8,
+    "completion": _FORK_COMPLETION_VERSION,
 }
 
 # the same rule for fields of a *task* entry. It needs its own dict rather than
@@ -318,11 +355,14 @@ def read_eval_set_selection(selection_path: str) -> EvalSetSelection:
     # the models forbid extras -- so the mismatch has to be reported as the
     # version problem it is rather than as an unknown field.
     version = _document_version(document)
-    if version is not None and version > EVAL_SET_SELECTION_VERSION:
+    if version is not None and not protocol_version_understood(
+        version, _UPSTREAM_SELECTION_VERSION, EVAL_SET_SELECTION_VERSION
+    ):
         raise PrerequisiteError(
             f"The eval set selection at '{selection_path}' uses schema version "
             f"{version}, but this version of inspect understands at "
-            f"most version {EVAL_SET_SELECTION_VERSION} (upgrade inspect-ai)."
+            f"most version {_UPSTREAM_SELECTION_VERSION}, and the METR fork's "
+            f"versions up to {EVAL_SET_SELECTION_VERSION} (upgrade inspect-ai)."
         )
 
     try:
@@ -352,7 +392,9 @@ def read_eval_set_selection(selection_path: str) -> EvalSetSelection:
         {
             name
             for name, introduced in _FIELD_MIN_VERSION.items()
-            if introduced > selection.version and getattr(selection, name) is not None
+            if introduced > selection.version
+            and name in selection.model_fields_set
+            and getattr(selection, name) is not None
         }
         | {
             name
