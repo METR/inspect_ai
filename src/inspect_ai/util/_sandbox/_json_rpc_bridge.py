@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
@@ -98,12 +99,13 @@ class _Bridge:
         if ready != _READY:
             await self.drop(f"the bridge did not start: {line[:200]!r}")
 
-    async def request(self, request_id: object, frame: bytes) -> str:
+    async def request(self, request_id: object, frame: bytes, deadline: float) -> str:
+        """Send `frame` and wait for its reply; its write ends by `deadline`."""
         if self.dropped is not None:
             raise BridgeDropped(self.dropped)
         self._replies[request_id] = None
         try:
-            await self._send(frame)
+            await self._send(frame, deadline)
             while (reply := self._replies[request_id]) is None:
                 if self.dropped is not None:
                     raise BridgeDropped(self.dropped)
@@ -138,16 +140,18 @@ class _Bridge:
             except Exception as ex:
                 logger.debug("Closing a sandbox tools bridge failed: %s", ex)
 
-    async def _send(self, frame: bytes) -> None:
+    async def _send(self, frame: bytes, deadline: float) -> None:
         async with self._send_lock:
-            try:
-                await self._stream.send(frame)
-            except Exception as ex:
-                await self.drop(f"writing to the bridge failed: {ex!r}")
-            except BaseException:
-                # interrupted (a timeout, for one) with part of the frame written
-                await self.close("a request was interrupted while it was written")
-                raise
+            # Cancelling the caller does not cut a frame short, which would corrupt
+            # the stream for every other request; only the request's deadline does.
+            with anyio.CancelScope(shield=True, deadline=deadline) as scope:
+                try:
+                    await self._stream.send(frame)
+                except Exception as ex:
+                    await self.drop(f"writing to the bridge failed: {ex!r}")
+            if scope.cancelled_caught:
+                await self.close("a request could not be written in time")
+                raise TimeoutError
 
     async def _read_reply(self) -> None:
         self._reading = True
@@ -211,7 +215,8 @@ async def bridge_request(
     Returns None, so the request is sent in its own exec, when there is no bridge:
     the provider does not implement `exec_stdio`, the bridge did not start (an
     older sandbox tools build, for one), or the request does not fit in a frame.
-    Other errors starting a bridge are raised, as the provider raises them.
+    Another error starting a bridge is raised, as the provider raised it, for the
+    request that started it.
 
     A request lost with a dropped bridge is sent once more over a new bridge, or
     in its own exec (None) if no new bridge starts; a second loss raises
@@ -230,9 +235,10 @@ async def bridge_request(
         bridge = await _bridge(sandbox, user, max_frame_bytes)
         if bridge is None:
             return None
+        deadline = math.inf if timeout is None else anyio.current_time() + timeout
         try:
             with anyio.fail_after(timeout):
-                return await bridge.request(request_id, frame)
+                return await bridge.request(request_id, frame, deadline)
         except TimeoutError as ex:
             await bridge.close(f"{description} timed out")
             raise SandboxTimeoutError(
@@ -287,7 +293,8 @@ async def _bridge(
     None when the sandbox cannot run one: its provider has no `exec_stdio`, or the
     bridge does not report ready within `OPEN_TIMEOUT`. That is remembered, so a
     sandbox whose bridge fails to start (including one started again after a
-    drop) sends every later request in its own exec. The frame limit is the exec output limit,
+    drop) sends every later request in its own exec. Another error starting it
+    is raised for the request that started it, and remembered the same way. The frame limit is the exec output limit,
     which a caller can lower for its requests, so each limit has its own bridge.
     """
     if sandbox._json_rpc_bridges is None:
@@ -325,9 +332,15 @@ async def _bridge(
             logger.debug("The sandbox tools bridge did not report ready: %r", ex)
             bridges.by_key[key] = None
             return None
-        except BaseException:
+        except Exception:
+            # raised for this request; the requests queued behind it use execs
             if bridge is not None:
                 await bridge.close("starting the bridge failed")
+            bridges.by_key[key] = None
+            raise
+        except BaseException:
+            if bridge is not None:
+                await bridge.close("starting the bridge was cancelled")
             raise
         if bridges.closed:  # the sample ended while it opened
             await bridge.close("the sample ended")

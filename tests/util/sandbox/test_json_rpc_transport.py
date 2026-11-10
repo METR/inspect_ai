@@ -307,6 +307,7 @@ class _Pipe(ByteStream):
         self.close_fails = False
         self.send_fails = False
         self.receive_fails = False
+        self.write_seconds = 0.0
 
     async def send(self, item: bytes) -> None:
         if self.send_fails:
@@ -314,7 +315,7 @@ class _Pipe(ByteStream):
         # a byte stream may deliver one write in pieces
         half = len(item) // 2
         await self._send.send(item[:half])
-        await anyio.lowlevel.checkpoint()
+        await anyio.sleep(self.write_seconds)
         await self._send.send(item[half:])
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
@@ -676,16 +677,28 @@ async def test_bridge_that_does_not_open_in_time_is_not_used(
 
 
 @pytest.mark.usefixtures("bridge_on")
-async def test_provider_error_starting_a_bridge_is_raised() -> None:
+async def test_provider_error_starting_a_bridge_is_raised_once() -> None:
     async def replaced() -> None:
+        await anyio.sleep(0.05)
         raise RuntimeError("the pod was replaced")
+
+    results: list[Any] = []
+
+    async def request(transport: SandboxJSONRPCTransport) -> None:
+        try:
+            results.append(await _result(transport, "exec_remote_poll_wait"))
+        except RuntimeError as ex:
+            results.append(str(ex))
 
     async with _bridge_sandbox(_serve_forever) as sandbox:
         sandbox.before_open = replaced
-        with pytest.raises(RuntimeError, match="the pod was replaced"):
-            await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
+        transport = _bridged_transport(sandbox)
+        async with anyio.create_task_group() as requests:
+            for _ in range(3):
+                requests.start_soon(request, transport)
 
-    assert sandbox.execs == []
+    assert sorted(results) == ["per-call", "per-call", "the pod was replaced"]
+    assert len(sandbox.stdio_calls) == 1
 
 
 @pytest.mark.usefixtures("bridge_on")
@@ -1282,3 +1295,18 @@ async def test_held_request_too_long_for_a_frame_takes_a_held_request_slot(
             await exec_remote_awaitable(proxy, ["cat"], 5, options)
 
     assert held == [0.0]  # sent in its own exec, with no slot free, so not held
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_caller_cancelled_while_its_request_is_written_keeps_the_bridge() -> None:
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+        sandbox.bridges[0].host.write_seconds = 0.2
+        with anyio.move_on_after(0.05) as cancelled:
+            await _result(transport, "exec_remote_poll_wait")
+        sandbox.bridges[0].host.write_seconds = 0.0
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+
+    assert cancelled.cancelled_caught
+    assert len(sandbox.bridges) == 1

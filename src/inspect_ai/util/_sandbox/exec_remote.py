@@ -243,7 +243,8 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     one long-running sandbox tools process per sandbox and tools user, started
     with the provider's `exec_stdio`, instead of an exec each; held requests
     sent that way do not count toward `INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY`.
-    Starting the process may take up to 60 seconds more. Each attempt at a
+    Starting the process, or starting it again after a drop, may take up to 60
+    seconds more each time. Each attempt at a
     request waits at most `poll_timeout` (a provider's own retries of a
     timed-out exec do not apply), and a request lost when the process's stream
     drops is sent once more. Sandboxes whose provider or sandbox tools build
