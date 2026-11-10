@@ -490,10 +490,20 @@ async def test_sandbox_without_exec_stdio_sends_each_request_in_its_own_exec() -
     assert sandbox.execs == ["exec_remote_start_wait", "exec_remote_poll_wait"]
 
 
+@pytest.mark.parametrize(
+    "first_line",
+    [None, b"usage: inspect-sandbox-tools ...\n"],
+    ids=["exits", "prints something else"],
+)
 @pytest.mark.usefixtures("bridge_on")
-async def test_bridge_that_does_not_start_is_not_started_again() -> None:
+async def test_bridge_that_does_not_start_is_not_started_again(
+    first_line: bytes | None,
+) -> None:
     async def serve(bridge: _FakeBridge) -> None:
-        # an older sandbox tools build rejects the `bridge` argument and exits
+        # e.g. an older sandbox tools build, which has no `bridge` command
+        if first_line is not None:
+            await bridge.stream.send(first_line)
+            await bridge.wait_closed()
         await bridge.stream.aclose()
 
     async with anyio.create_task_group() as tg:
