@@ -298,7 +298,9 @@ def _bridge(max_frame_bytes: int) -> None:
     (it could not be started or reached, or closed the connection), the reply
     carries an error under ``_BRIDGE_ERROR_FIELD``, where `exec` would exit
     non-zero. A line that is not a request with an ID, or is longer than
-    ``max_frame_bytes``, ends the bridge.
+    ``max_frame_bytes``, ends the bridge. Requests still running when stdin
+    closes end with it: the host closes a bridge only once no request waits on
+    it, or when it drops one, and then sends its requests again.
     """
     _ensure_server_is_running()
     write_lock = threading.Lock()

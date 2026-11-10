@@ -352,9 +352,10 @@ class SandboxEnvironment(abc.ABC):
         Inspect uses this to keep one sandbox tools process per sandbox for many
         requests, instead of an `exec()` for each (see `INSPECT_EXEC_REMOTE_BRIDGE`).
         Sending writes to the command's stdin, and receiving reads its stdout,
-        raising `anyio.EndOfStream` once stdout closes. Stderr is not part of the
-        stream. Closing the stream stops the command. The command runs as `exec()`
-        would run it for the same `user`.
+        raising `anyio.EndOfStream` once stdout closes; either raises
+        `anyio.BrokenResourceError` when the connection to the command breaks.
+        Stderr is not part of the stream. Closing the stream stops the command.
+        The command runs as `exec()` would run it for the same `user`.
 
         Args:
           cmd: Command or command and arguments to execute.
