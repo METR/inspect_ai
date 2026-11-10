@@ -23,7 +23,13 @@ if TYPE_CHECKING:
 
 from .._subprocess import ExecResult
 from ._cli import SANDBOX_CLI
-from ._json_rpc_bridge import BRIDGE_METHODS, bridge_enabled, bridge_request
+from ._json_rpc_bridge import (
+    BRIDGE_METHODS,
+    bridge_enabled,
+    bridge_error,
+    bridge_open,
+    bridge_request,
+)
 from .limits import SandboxEnvironmentLimits
 
 _JSON_RPC_RESPONSE_CHUNK_METHOD = "__inspect_json_rpc_response_chunk__"
@@ -70,6 +76,17 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self.cli = cli
         self._response_chunking = cli == SANDBOX_CLI
         self._bridge = bridge and self._response_chunking
+
+    def bridged(self, method: str, user: str | None) -> bool:
+        """Whether a request would go over an open bridge, so it needs no exec."""
+        return (
+            self._bridge
+            and method in BRIDGE_METHODS
+            and bridge_enabled()
+            and bridge_open(
+                self.sandbox, user, SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+            )
+        )
 
     async def __call__(
         self,
@@ -126,13 +143,23 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             and bridge_enabled()
         ):
             started = datetime.now(timezone.utc)
-            user = transport_extra_args.get("user", None)
-            timeout = transport_extra_args.get("timeout", None)
             reply = await bridge_request(
-                self.sandbox, user, request, description, timeout, max_response_bytes
+                self.sandbox,
+                transport_extra_args.get("user", None),
+                request,
+                description,
+                transport_extra_args.get("timeout", None),
+                max_response_bytes,
             )
             if reply is not None:
-                self._record_bridged(started, request, reply, user, timeout)
+                error = bridge_error(reply)
+                self._record_bridged(
+                    started, request, reply, error, transport_extra_args
+                )
+                if error is not None:
+                    raise RuntimeError(
+                        f"Sandbox.exec failure executing {description}: {error}"
+                    )
                 return reply
         env = (
             {_JSON_RPC_RESPONSE_MAX_BYTES_ENV: str(max_response_bytes)}
@@ -245,8 +272,8 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         started: datetime,
         request: str,
         reply: str,
-        user: str | None,
-        timeout: int | None,
+        error: str | None,
+        transport_extra_args: dict[str, Any],
     ) -> None:
         """Record the exec event that sending the request in its own exec would."""
         from .events import SandboxEnvironmentProxy
@@ -256,9 +283,12 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 started,
                 [self.cli, "bridge"],
                 request,
-                ExecResult(True, 0, reply, ""),
-                user=user,
-                timeout=timeout,
+                ExecResult(True, 0, reply, "")
+                if error is None
+                else ExecResult(False, 1, "", error),
+                user=transport_extra_args.get("user", None),
+                timeout=transport_extra_args.get("timeout", None),
+                timeout_retry=transport_extra_args.get("timeout_retry", True),
             )
 
 

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 import anyio
 from anyio.abc import ByteStream
+from anyio.streams.buffered import BufferedByteStream
 
 from ._cli import SANDBOX_CLI
 
@@ -69,17 +70,16 @@ class _Bridge:
     No task reads the stream on its own. A caller waiting for its reply reads the
     next line when no other caller is reading, hands the reply to the request it
     answers, and lets the next waiting caller read. A reader that is cancelled
-    loses no data, since a partial line stays buffered for the next reader, and
-    a reply for a request nobody waits for (its caller timed out or was
-    cancelled) is dropped.
+    loses no data, since a partial line stays buffered for the next reader. A
+    reply for a request that stopped waiting (its caller timed out or was
+    cancelled) is dropped; any other reply no request waits for drops the bridge.
     """
 
     def __init__(self, stream: ByteStream, max_frame_bytes: int) -> None:
-        self._stream = stream
+        self._stream = BufferedByteStream(stream)
         self._max_frame_bytes = max_frame_bytes
         self._replies: dict[object, str | None] = {}
-        self._buffer = bytearray()
-        self._scanned = 0  # bytes at the start of the buffer that hold no newline
+        self._abandoned = 0  # requests that stopped waiting before their reply came
         self._reading = False
         self._turn = anyio.Event()
         self._send_lock = anyio.Lock()
@@ -110,7 +110,8 @@ class _Bridge:
                     await self._read_reply()
             return reply
         finally:
-            del self._replies[request_id]
+            if self._replies.pop(request_id) is None:
+                self._abandoned += 1
 
     async def drop(self, reason: str) -> NoReturn:
         """Close the bridge, failing the requests waiting on it with `reason`."""
@@ -118,24 +119,26 @@ class _Bridge:
         raise BridgeDropped(self.dropped)
 
     async def close(self, reason: str) -> None:
+        """Stop the bridge. Never raises: a stream that fails to close is dropped."""
         if self.dropped is not None:
             return
         self.dropped = reason
         with anyio.move_on_after(_CLOSE_TIMEOUT, shield=True):
-            await self._stream.aclose()
+            try:
+                await self._stream.aclose()
+            except Exception as ex:
+                logger.debug("Closing a sandbox tools bridge failed: %s", ex)
 
     async def _send(self, frame: bytes) -> None:
         async with self._send_lock:
-            # A frame cut short would corrupt every later one, so finish writing it
-            # unless the request's own deadline passes.
-            deadline = anyio.current_effective_deadline()
-            with anyio.CancelScope(shield=True, deadline=deadline) as scope:
-                try:
-                    await self._stream.send(frame)
-                except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
-                    await self.drop("the bridge's stdin closed")
-            if scope.cancelled_caught:
-                await self.drop("a request could not be written in time")
+            try:
+                await self._stream.send(frame)
+            except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
+                await self.drop("the bridge's stdin closed")
+            except BaseException:
+                # interrupted (a timeout, for one) with part of the frame written
+                await self.close("a request was interrupted while it was written")
+                raise
 
     async def _read_reply(self) -> None:
         self._reading = True
@@ -144,30 +147,30 @@ class _Bridge:
             try:
                 request_id = json.loads(line.decode("utf-8"))["id"]
                 waiting = request_id in self._replies and not self._replies[request_id]
-            except (ValueError, LookupError, TypeError):
+            except Exception:
                 await self.drop(f"the bridge sent an invalid reply: {line[:200]!r}")
             if waiting:
                 self._replies[request_id] = line.decode("utf-8")
+            elif self._abandoned:
+                self._abandoned -= 1  # a late reply to one of them
+            else:
+                await self.drop("the bridge sent a reply no request waits for")
         finally:
             self._reading = False
             turn, self._turn = self._turn, anyio.Event()
             turn.set()
 
     async def _read_line(self) -> bytes:
-        while (end := self._buffer.find(b"\n", self._scanned)) < 0:
-            self._scanned = len(self._buffer)
-            if self._scanned >= self._max_frame_bytes:
-                await self.drop("the bridge sent a reply longer than the frame limit")
-            try:
-                data = await self._stream.receive()
-            except anyio.EndOfStream:
-                await self.drop("the bridge exited")
-            except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
-                await self.drop("the bridge's stdout closed")
-            self._buffer += data
-        line = bytes(self._buffer[:end])
-        del self._buffer[: end + 1]
-        self._scanned = 0
+        try:
+            line = await self._stream.receive_until(b"\n", self._max_frame_bytes)
+        except anyio.DelimiterNotFound:
+            await self.drop("the bridge sent a reply longer than the frame limit")
+        except anyio.IncompleteRead:
+            await self.drop("the bridge exited")
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
+            await self.drop("the bridge's stdout closed")
+        if len(line) >= self._max_frame_bytes:  # found past the limit in one read
+            await self.drop("the bridge sent a reply longer than the frame limit")
         return line
 
 
@@ -193,14 +196,14 @@ async def bridge_request(
     Returns None, so the request is sent in its own exec, when there is no bridge:
     the provider does not implement `exec_stdio`, the bridge did not start (an
     older sandbox tools build, for one), or the request does not fit in a frame.
+    Other errors starting a bridge are raised, as the provider raises them.
 
     A request lost with a dropped bridge is sent once more over a new bridge, or
     in its own exec (None) if no new bridge starts; a second loss raises
     `BridgeDropped`. A request that times out raises `SandboxTimeoutError` and
     closes the bridge, which may be wedged; the other requests on it are sent
     again. `timeout` covers the request, not starting the bridge
-    (`OPEN_TIMEOUT`). A request the server never answered raises `RuntimeError`,
-    as a failed exec of the CLI does.
+    (`OPEN_TIMEOUT`). The reply can be a `bridge_error`.
     """
     from .events import SandboxTimeoutError
 
@@ -214,7 +217,7 @@ async def bridge_request(
             return None
         try:
             with anyio.fail_after(timeout):
-                reply = await bridge.request(request_id, frame)
+                return await bridge.request(request_id, frame)
         except TimeoutError as ex:
             await bridge.close(f"{description} timed out")
             raise SandboxTimeoutError(
@@ -225,25 +228,35 @@ async def bridge_request(
             if attempt == 2:
                 raise
             logger.info("Resending %s: %s", description, ex)
-            continue
-        if _ERROR_FIELD in (payload := json.loads(reply)):
-            raise RuntimeError(
-                f"Sandbox.exec failure executing {description}: {payload[_ERROR_FIELD]}"
-            )
-        return reply
     raise AssertionError("unreachable")
 
 
+def bridge_open(
+    sandbox: SandboxEnvironment, user: str | None, max_frame_bytes: int
+) -> bool:
+    """Whether the sandbox has an open bridge for `user` and the frame limit."""
+    bridges = sandbox._json_rpc_bridges
+    bridge = bridges.by_key.get((user, max_frame_bytes)) if bridges else None
+    return bridge is not None and bridge.dropped is None
+
+
+def bridge_error(reply: str) -> str | None:
+    """The error in a reply for a request the server never answered, if it is one."""
+    if _ERROR_FIELD not in reply:
+        return None
+    error = json.loads(reply).get(_ERROR_FIELD)
+    return error if isinstance(error, str) else None
+
+
 async def close_bridges(sandbox: SandboxEnvironment) -> None:
-    """Close the bridges a sandbox has open (at sample cleanup)."""
+    """Close the bridges a sandbox has open, when its sample ends. Never raises."""
     bridges = sandbox._json_rpc_bridges
     if bridges is None:
         return
-    async with bridges.lock:
-        for bridge in bridges.by_key.values():
-            if bridge is not None:
-                await bridge.close("the sandbox was cleaned up")
-        bridges.by_key.clear()
+    for bridge in list(bridges.by_key.values()):
+        if bridge is not None:
+            await bridge.close("the sample ended")
+    bridges.by_key.clear()
 
 
 async def _bridge(
@@ -251,9 +264,10 @@ async def _bridge(
 ) -> _Bridge | None:
     """The sandbox's open bridge for `user`, starting one if it has none.
 
-    None when the sandbox cannot run one. That is remembered, so a sandbox whose
-    bridge fails to start (including one started again after a drop) sends every
-    later request in its own exec. The frame limit is the exec output limit,
+    None when the sandbox cannot run one: its provider has no `exec_stdio`, or the
+    bridge does not report ready within `OPEN_TIMEOUT`. That is remembered, so a
+    sandbox whose bridge fails to start (including one started again after a
+    drop) sends every later request in its own exec. The frame limit is the exec output limit,
     which a caller can lower for its requests, so each limit has its own bridge.
     """
     if sandbox._json_rpc_bridges is None:
@@ -265,28 +279,21 @@ async def _bridge(
             bridge = bridges.by_key[key]
             if bridge is None or bridge.dropped is None:
                 return bridge
+        bridge = None
         try:
-            stream = await sandbox.exec_stdio(
-                [SANDBOX_CLI, "bridge", "--max-frame-bytes", str(max_frame_bytes)],
-                user=user,
-            )
+            with anyio.fail_after(OPEN_TIMEOUT):
+                stream = await sandbox.exec_stdio(
+                    [SANDBOX_CLI, "bridge", "--max-frame-bytes", str(max_frame_bytes)],
+                    user=user,
+                )
+                bridge = _Bridge(stream, max_frame_bytes)
+                await bridge.wait_ready()
         except NotImplementedError:
             bridges.by_key[key] = None
             return None
-        except Exception as ex:
-            logger.warning(
-                "Sending sandbox tools requests in separate execs: the bridge "
-                "could not be started (%s)",
-                ex,
-            )
-            bridges.by_key[key] = None
-            return None
-        bridge = _Bridge(stream, max_frame_bytes)
-        try:
-            with anyio.fail_after(OPEN_TIMEOUT):
-                await bridge.wait_ready()
         except (TimeoutError, BridgeDropped) as ex:
-            await bridge.close("the bridge did not report ready")
+            if bridge is not None:
+                await bridge.close("the bridge did not report ready")
             logger.warning(
                 "Sending sandbox tools requests in separate execs: the bridge did "
                 "not report ready (%s)",
@@ -295,7 +302,8 @@ async def _bridge(
             bridges.by_key[key] = None
             return None
         except BaseException:
-            await bridge.close("starting the bridge was cancelled")
+            if bridge is not None:
+                await bridge.close("starting the bridge failed")
             raise
         bridges.by_key[key] = bridge
         return bridge

@@ -1,28 +1,41 @@
 import base64
 import contextlib
 import json
+import sys
 from collections.abc import AsyncIterator, Callable, Coroutine
 from functools import partial
-from typing import Any
+from typing import Any, Literal, overload
 
 import anyio
+import anyio.lowlevel
 import pytest
 from anyio.abc import ByteStream, TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from typing_extensions import override
 
+from inspect_ai._eval.task.sandbox import sandboxenv_context
 from inspect_ai._util._async import tg_collect
+from inspect_ai.dataset import Sample
 from inspect_ai.event import SandboxEvent
 from inspect_ai.log._transcript import Transcript, init_transcript, transcript
-from inspect_ai.util._sandbox import context as sandbox_context
+from inspect_ai.util import sandbox as current_sandbox
+from inspect_ai.util._sandbox import _json_rpc_bridge as json_rpc_bridge
 from inspect_ai.util._sandbox._cli import SANDBOX_CLI
 from inspect_ai.util._sandbox._json_rpc_bridge import BridgeDropped, close_bridges
 from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
+from inspect_ai.util._sandbox.environment import (
+    RootAccess,
+    SandboxEnvironment,
+    SandboxEnvironmentConfigType,
+    SandboxEnvironmentSpec,
+)
 from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy, SandboxTimeoutError
 from inspect_ai.util._sandbox.exec_remote import (
     ExecRemoteAwaitableOptions,
     exec_remote_awaitable,
 )
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
+from inspect_ai.util._sandbox.registry import sandboxenv
 from inspect_ai.util._subprocess import ExecResult
 
 _CHUNK_FIELD = "__inspect_json_rpc_response_chunk__"
@@ -289,9 +302,14 @@ class _Pipe(ByteStream):
     ) -> None:
         self._send = send
         self._receive = receive
+        self.close_fails = False
 
     async def send(self, item: bytes) -> None:
-        await self._send.send(item)
+        # a byte stream may deliver one write in pieces
+        half = len(item) // 2
+        await self._send.send(item[:half])
+        await anyio.lowlevel.checkpoint()
+        await self._send.send(item[half:])
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
         return await self._receive.receive()
@@ -302,6 +320,8 @@ class _Pipe(ByteStream):
     async def aclose(self) -> None:
         await self._send.aclose()
         await self._receive.aclose()
+        if self.close_fails:
+            raise OSError("closing failed")
 
 
 class _FakeBridge:
@@ -332,40 +352,106 @@ class _FakeBridge:
                 await self.stream.receive()
 
 
-class _BridgeSandbox:
+@sandboxenv(name="bridge_fake")
+class _BridgeSandbox(SandboxEnvironment):
     """A sandbox whose `exec_stdio` runs `serve` on the other end of a pipe."""
-
-    _json_rpc_bridges = None
 
     def __init__(
         self,
         tg: TaskGroup,
         serve: Callable[[_FakeBridge], Coroutine[Any, Any, None]] | None,
     ) -> None:
+        super().__init__()
         self._tg = tg
         self._serve = serve
+        self._root_access = RootAccess("unusable", "a test sandbox")
+        self.stdin_buffer = 100
+        self.before_open: Callable[[], Coroutine[Any, Any, None]] | None = None
+        self.close_fails = False
         self.bridges: list[_FakeBridge] = []
         self.stdio_calls: list[list[str]] = []
+        self.stdio_users: list[str | None] = []
         self.execs: list[str] = []
+        self.cleanups: list[bool] = []
 
-    async def exec_stdio(self, cmd: list[str], user: str | None = None) -> _Pipe:
+    @override
+    async def exec_stdio(self, cmd: list[str], user: str | None = None) -> ByteStream:
         self.stdio_calls.append(cmd)
+        self.stdio_users.append(user)
         if self._serve is None:
             raise NotImplementedError("exec_stdio not implemented")
-        host, sandbox = _pipe()
+        if self.before_open is not None:
+            await self.before_open()
+        host, sandbox = _pipe(self.stdin_buffer)
+        host.close_fails = self.close_fails
         self.bridges.append(_FakeBridge(sandbox))
         self._tg.start_soon(self._serve, self.bridges[-1])
         return host
 
-    async def exec(self, cmd: list[str], **kwargs: Any) -> ExecResult[str]:
-        request = json.loads(kwargs["input"])
+    @override
+    async def exec(
+        self,
+        cmd: list[str],
+        input: str | bytes | None = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: int | None = None,
+        timeout_retry: bool = True,
+        concurrency: bool = True,
+    ) -> ExecResult[str]:
+        assert isinstance(input, str)
+        request = json.loads(input)
         self.execs.append(request["method"])
         reply = {"jsonrpc": "2.0", "id": request["id"], "result": "per-call"}
         return ExecResult(True, 0, json.dumps(reply), "")
 
+    @override
+    async def write_file(self, file: str, contents: str | bytes) -> None:
+        raise NotImplementedError
 
-def _pipe() -> tuple[_Pipe, _Pipe]:
-    host_send, sandbox_receive = anyio.create_memory_object_stream[bytes](100)
+    @overload
+    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+
+    @overload
+    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+
+    @override
+    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+        raise NotImplementedError
+
+    @override
+    @classmethod
+    async def sample_init(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        metadata: dict[str, str],
+    ) -> dict[str, SandboxEnvironment]:
+        assert _sample_sandbox is not None
+        return {"default": _sample_sandbox}
+
+    @override
+    @classmethod
+    async def sample_cleanup(
+        cls,
+        task_name: str,
+        config: SandboxEnvironmentConfigType | None,
+        environments: dict[str, SandboxEnvironment],
+        interrupted: bool,
+    ) -> None:
+        for environment in environments.values():
+            environment.as_type(_BridgeSandbox).cleanups.append(interrupted)
+
+
+_sample_sandbox: _BridgeSandbox | None = None
+"""What a sample using the `bridge_fake` sandbox gets."""
+
+
+def _pipe(host_to_sandbox_buffer: int) -> tuple[_Pipe, _Pipe]:
+    host_send, sandbox_receive = anyio.create_memory_object_stream[bytes](
+        host_to_sandbox_buffer
+    )
     sandbox_send, host_receive = anyio.create_memory_object_stream[bytes](100)
     return _Pipe(host_send, host_receive), _Pipe(sandbox_send, sandbox_receive)
 
@@ -388,7 +474,7 @@ async def _serve_forever(bridge: _FakeBridge) -> None:
 
 
 def _bridged_transport(sandbox: _BridgeSandbox) -> SandboxJSONRPCTransport:
-    return SandboxJSONRPCTransport(sandbox, SANDBOX_CLI, bridge=True)  # type: ignore[arg-type]
+    return SandboxJSONRPCTransport(sandbox, SANDBOX_CLI, bridge=True)
 
 
 async def _result(transport: SandboxJSONRPCTransport, method: str, **args: Any) -> Any:
@@ -462,15 +548,22 @@ async def test_bridge_raises_when_the_resent_request_is_lost_too() -> None:
     assert sandbox.execs == []
 
 
+@pytest.mark.parametrize(
+    "whole_line", [False, True], ids=["no newline within the limit", "a valid reply"]
+)
 @pytest.mark.usefixtures("bridge_on")
-async def test_bridge_reply_longer_than_the_frame_limit_drops_the_bridge() -> None:
+async def test_bridge_reply_longer_than_the_frame_limit_drops_the_bridge(
+    whole_line: bool,
+) -> None:
     async def serve(bridge: _FakeBridge) -> None:
         await bridge.ready()
         request = await bridge.next_request()
-        if len(sandbox.bridges) == 1:
-            await bridge.stream.send(b"x" * 1024)
-        else:
+        if len(sandbox.bridges) > 1:
             await bridge.reply(request)
+        elif whole_line:  # arrives in one read
+            await bridge.reply(request, "x" * 2000)
+        else:
+            await bridge.stream.send(b"x" * 1024)
         await bridge.wait_closed()
 
     async with _bridge_sandbox(serve) as sandbox:
@@ -536,6 +629,53 @@ async def test_request_that_times_out_closes_the_bridge() -> None:
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_request_that_cannot_be_written_in_time_times_out() -> None:
+    async def serve(bridge: _FakeBridge) -> None:
+        if len(sandbox.bridges) == 1:
+            await bridge.ready()
+            await anyio.sleep_forever()  # never reads its stdin
+        await _serve_forever(bridge)
+
+    async with _bridge_sandbox(serve) as sandbox:
+        sandbox.stdin_buffer = 0
+        transport = _bridged_transport(sandbox)
+        with pytest.raises(SandboxTimeoutError):
+            await _result(transport, "exec_remote_poll_wait", timeout=0.05)
+        sandbox.stdin_buffer = 100
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+
+    assert len(sandbox.bridges) == 2
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_bridge_that_does_not_open_in_time_is_not_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(json_rpc_bridge, "OPEN_TIMEOUT", 0.05)
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        sandbox.before_open = anyio.sleep_forever
+        transport = _bridged_transport(sandbox)
+        with anyio.fail_after(10):  # the request's timeout does not cover opening
+            assert await _result(transport, "exec_remote_poll_wait") == "per-call"
+            assert await _result(transport, "exec_remote_poll_wait") == "per-call"
+
+    assert len(sandbox.stdio_calls) == 1
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_provider_error_starting_a_bridge_is_raised() -> None:
+    async def replaced() -> None:
+        raise RuntimeError("the pod was replaced")
+
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        sandbox.before_open = replaced
+        with pytest.raises(RuntimeError, match="the pod was replaced"):
+            await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
+
+    assert sandbox.execs == []
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_bridge_error_reply_raises_like_a_failed_exec() -> None:
     async def serve(bridge: _FakeBridge) -> None:
         await bridge.ready()
@@ -548,19 +688,26 @@ async def test_bridge_error_reply_raises_like_a_failed_exec() -> None:
         await bridge.stream.send(json.dumps(reply).encode() + b"\n")
         await bridge.wait_closed()
 
+    init_transcript(Transcript())
     async with _bridge_sandbox(serve) as sandbox:
+        proxy = SandboxEnvironmentProxy(sandbox)
+        transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
         with pytest.raises(RuntimeError, match="Sandbox.exec failure executing"):
-            await _result(_bridged_transport(sandbox), "exec_remote_start_wait")
+            await _result(transport, "exec_remote_start_wait")
+
+    [event] = [e for e in transcript().events if isinstance(e, SandboxEvent)]
+    assert (event.cmd, event.result) == (f"{SANDBOX_CLI} bridge", 1)
+    assert "server closed the connection" in (event.output or "")
 
 
 @pytest.mark.usefixtures("bridge_on")
-async def test_only_requests_naming_a_request_id_use_the_bridge() -> None:
+async def test_only_the_bridge_methods_use_the_bridge() -> None:
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         for method in ["exec_remote_start", "exec_remote_write_stdin", "bash_session"]:
             assert await _result(transport, method) == "per-call"
         assert await _result(transport, "exec_remote_kill_wait") == "bridged"
-        unbridged = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)  # type: ignore[arg-type]
+        unbridged = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
         assert await _result(unbridged, "exec_remote_kill_wait") == "per-call"
 
     assert sandbox.execs == [
@@ -571,14 +718,28 @@ async def test_only_requests_naming_a_request_id_use_the_bridge() -> None:
     ]
 
 
-async def test_bridge_is_off_unless_enabled() -> None:
+@pytest.mark.parametrize(
+    "value,bridged",
+    [
+        (None, False),
+        ("", False),
+        ("0", False),
+        ("false", False),
+        ("1", True),
+        (" True ", True),
+    ],
+)
+async def test_bridge_is_on_only_when_enabled(
+    value: str | None, bridged: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if value is None:
+        monkeypatch.delenv("INSPECT_EXEC_REMOTE_BRIDGE", raising=False)
+    else:
+        monkeypatch.setenv("INSPECT_EXEC_REMOTE_BRIDGE", value)
     async with _bridge_sandbox(_serve_forever) as sandbox:
-        assert (
-            await _result(_bridged_transport(sandbox), "exec_remote_start_wait")
-            == "per-call"
-        )
+        result = await _result(_bridged_transport(sandbox), "exec_remote_start_wait")
 
-    assert sandbox.stdio_calls == []
+    assert result == ("bridged" if bridged else "per-call")
 
 
 @pytest.mark.usefixtures("bridge_on")
@@ -653,11 +814,11 @@ async def test_close_bridges_ends_the_bridge() -> None:
     async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
-        await close_bridges(sandbox)  # type: ignore[arg-type]
+        await close_bridges(sandbox)
         with anyio.fail_after(10):
             await closed.wait()
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
-        await close_bridges(sandbox)  # type: ignore[arg-type]
+        await close_bridges(sandbox)
 
     assert len(sandbox.bridges) == 2
 
@@ -666,7 +827,7 @@ async def test_close_bridges_ends_the_bridge() -> None:
 async def test_bridged_request_records_the_exec_event() -> None:
     init_transcript(Transcript())
     async with _bridge_sandbox(_serve_forever) as sandbox:
-        proxy = SandboxEnvironmentProxy(sandbox)  # type: ignore[arg-type]
+        proxy = SandboxEnvironmentProxy(sandbox)
         transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
         await transport(
             "exec_remote_start_wait", {"command": "ls"}, False, user="root", timeout=10
@@ -703,7 +864,7 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
         await bridge.wait_closed()
 
     async with _bridge_sandbox(serve) as sandbox:
-        proxy = SandboxEnvironmentProxy(sandbox)  # type: ignore[arg-type]
+        proxy = SandboxEnvironmentProxy(sandbox)
         result = await exec_remote_awaitable(
             proxy,
             ["ls"],
@@ -730,33 +891,182 @@ async def test_each_frame_limit_gets_its_own_bridge() -> None:
     assert [len(bridge.requests) for bridge in sandbox.bridges] == [2, 1]
 
 
+@pytest.mark.parametrize(
+    "cleanup,close_fails",
+    [(True, False), (False, False), (True, True)],
+    ids=["cleaned up", "kept", "close fails"],
+)
 @pytest.mark.usefixtures("bridge_on")
-async def test_sample_cleanup_closes_the_bridge(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_sample_exit_closes_its_bridges(
+    cleanup: bool, close_fails: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed = anyio.Event()
-    cleaned: list[dict[str, Any]] = []
 
     async def serve(bridge: _FakeBridge) -> None:
         await _serve_forever(bridge)
         closed.set()
 
-    class _Provider:
-        @classmethod
-        async def sample_cleanup(cls, *args: Any) -> None:
-            cleaned.append(args[2])
-
-    monkeypatch.setattr(
-        sandbox_context, "registry_find_sandboxenv", lambda type: _Provider
-    )
     async with _bridge_sandbox(serve) as provider:
-        proxy = SandboxEnvironmentProxy(provider)  # type: ignore[arg-type]
-        transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
-        await _result(transport, "exec_remote_start_wait")
-        await sandbox_context.cleanup_sandbox_environments_sample(
-            "fake", "task", None, {"default": proxy}, False
-        )
+        provider.close_fails = close_fails
+        monkeypatch.setattr(sys.modules[__name__], "_sample_sandbox", provider)
+        async with sandboxenv_context(
+            "task",
+            SandboxEnvironmentSpec("bridge_fake"),
+            None,
+            cleanup,
+            Sample(input="x"),
+        ):
+            transport = SandboxJSONRPCTransport(
+                current_sandbox(), SANDBOX_CLI, bridge=True
+            )
+            assert await _result(transport, "exec_remote_start_wait") == "bridged"
         with anyio.fail_after(10):
             await closed.wait()
 
-    assert cleaned == [{"default": provider}]
+    assert provider.cleanups == ([False] if cleanup else [])
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [b'{"jsonrpc": "2.0", "id": 9999, "result": 1}', b"[" * 100_000],
+    ids=["unknown ID", "too deeply nested to parse"],
+)
+@pytest.mark.usefixtures("bridge_on")
+async def test_bridge_reply_no_request_waits_for_drops_the_bridge(reply: bytes) -> None:
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        request = await bridge.next_request()
+        if len(sandbox.bridges) == 1:
+            await bridge.stream.send(reply + b"\n")
+        else:
+            await bridge.reply(request)
+        await bridge.wait_closed()
+
+    async with _bridge_sandbox(serve) as sandbox:
+        assert (
+            await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
+            == "bridged"
+        )
+
+    assert len(sandbox.bridges) == 2
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_late_reply_to_a_request_that_timed_out_is_dropped() -> None:
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        late = await bridge.next_request()
+        request = await bridge.next_request()
+        await bridge.reply(late)
+        await bridge.reply(request)
+        await bridge.wait_closed()
+
+    async with _bridge_sandbox(serve) as sandbox:
+        transport = _bridged_transport(sandbox)
+        with anyio.move_on_after(0.05):
+            await _result(transport, "exec_remote_poll_wait")
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+
+    assert len(sandbox.bridges) == 1
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_each_tools_user_gets_its_own_bridge() -> None:
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        await _result(transport, "exec_remote_poll_wait", user="root")
+        await _result(transport, "exec_remote_poll_wait", user=None)
+        await _result(transport, "exec_remote_poll_wait", user="root")
+
+    assert sandbox.stdio_users == ["root", None]
+    assert [len(bridge.requests) for bridge in sandbox.bridges] == [2, 1]
+
+
+@pytest.mark.parametrize("serve_ready", [False, True], ids=["exits", "never ready"])
+@pytest.mark.usefixtures("bridge_on")
+async def test_bridge_that_does_not_start_is_closed(
+    serve_ready: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bridge that fails to report ready, or whose start is cancelled, is closed."""
+    monkeypatch.setattr(json_rpc_bridge, "OPEN_TIMEOUT", 0.05)
+    closed = anyio.Event()
+
+    async def serve(bridge: _FakeBridge) -> None:
+        if not serve_ready:  # cancelled below while it waits
+            await anyio.sleep(0.01)
+        await bridge.wait_closed()
+        closed.set()
+
+    async with _bridge_sandbox(serve) as sandbox:
+        transport = _bridged_transport(sandbox)
+        with anyio.fail_after(10):
+            if serve_ready:
+                assert await _result(transport, "exec_remote_poll_wait") == "per-call"
+            else:
+                with anyio.move_on_after(0.01):
+                    await _result(transport, "exec_remote_poll_wait")
+            await closed.wait()
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_chunked_reply_is_fetched_over_the_bridge() -> None:
+    original = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 2000}).encode()
+    handle = "d" * 32
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        while True:
+            request = await bridge.next_request()
+            params = request.get("params", {})
+            if params.get("release") is True:
+                await bridge.reply(request, None)
+                continue
+            chunk = json.loads(
+                _chunk_response(original, handle, params.get("offset", 0), 500)
+            )
+            chunk["id"] = request["id"]
+            await bridge.stream.send(json.dumps(chunk).encode() + b"\n")
+
+    async with _bridge_sandbox(serve) as sandbox:
+        with override_max_exec_output_size(1024):
+            reply = await _bridged_transport(sandbox)(
+                "exec_remote_poll_wait", {}, False, timeout=10
+            )
+
+    assert reply == original.decode()
+    methods = [request["method"] for request in sandbox.bridges[0].requests]
+    assert methods[0] == "exec_remote_poll_wait"
+    assert set(methods[1:]) == {_CHUNK_METHOD}
+    assert sandbox.execs == []
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_held_request_over_an_open_bridge_ignores_the_held_request_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY", "0")
+    completed = {
+        "pid": 42,
+        "result": {
+            "state": "completed",
+            "exit_code": 0,
+            "seq": 1,
+            "stdout": "",
+            "stderr": "",
+        },
+    }
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        while True:
+            await bridge.reply(await bridge.next_request(), completed)
+
+    async with _bridge_sandbox(serve) as sandbox:
+        proxy = SandboxEnvironmentProxy(sandbox)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        for _ in range(2):
+            await exec_remote_awaitable(proxy, ["ls"], 5, options)
+
+    first, second = (request["params"] for request in sandbox.bridges[0].requests)
+    assert first["wait_seconds"] == 0.0  # no bridge was open yet
+    assert second["wait_seconds"] > 0

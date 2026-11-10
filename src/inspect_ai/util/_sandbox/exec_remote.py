@@ -240,11 +240,13 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     support are polled as usual.
 
     When `INSPECT_EXEC_REMOTE_BRIDGE` is `1` or `true`, these requests go over
-    one long-running sandbox tools process per sandbox, started with the
-    provider's `exec_stdio`, instead of an exec each. Each request still waits
-    at most `poll_timeout`, and one lost when that process's stream drops is
-    sent once more. Sandboxes whose provider or sandbox tools build cannot run
-    the process use an exec per request.
+    one long-running sandbox tools process per sandbox and tools user, started
+    with the provider's `exec_stdio`, instead of an exec each; held requests
+    sent that way do not count toward `INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY`.
+    Starting the process may take up to 60 seconds more. Each attempt at a
+    request waits at most `poll_timeout`, and a request lost when the process's
+    stream drops is sent once more. Sandboxes whose provider or sandbox tools
+    build cannot run the process use an exec per request.
     """
 
 
@@ -505,7 +507,8 @@ class ExecRemoteProcess:
         """Make an RPC call to the sandbox."""
         held = bool(params.get("wait_seconds"))
         slot: ConcurrencySemaphore | None = None
-        if held:
+        # A held request over an open bridge takes no exec, which the limit protects.
+        if held and not self._transport.bridged(method, self._sandbox._tools_user):
             slot = await get_or_create_semaphore(
                 "exec-remote-wait", _wait_concurrency(), None, False
             )
