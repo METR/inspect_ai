@@ -13,6 +13,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from inspect_ai._util._async import tg_collect
 from inspect_ai.event import SandboxEvent
 from inspect_ai.log._transcript import Transcript, init_transcript, transcript
+from inspect_ai.util._sandbox import context as sandbox_context
 from inspect_ai.util._sandbox._cli import SANDBOX_CLI
 from inspect_ai.util._sandbox._json_rpc_bridge import BridgeDropped, close_bridges
 from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
@@ -717,3 +718,51 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
     [bridge] = sandbox.bridges
     assert [r["method"] for r in bridge.requests] == ["exec_remote_start_wait"]
     assert sandbox.execs == []
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_each_frame_limit_gets_its_own_bridge() -> None:
+    async with anyio.create_task_group() as tg:
+        sandbox = _BridgeSandbox(tg, _serve_forever)
+        transport = _bridged_transport(sandbox)
+        await _result(transport, "exec_remote_poll_wait")
+        with override_max_exec_output_size(4096):
+            await _result(transport, "exec_remote_poll_wait")
+        await _result(transport, "exec_remote_poll_wait")
+        await close_bridges(sandbox)  # type: ignore[arg-type]
+
+    assert [cmd[-1] for cmd in sandbox.stdio_calls] == ["10485760", "4096"]
+    assert [len(bridge.requests) for bridge in sandbox.bridges] == [2, 1]
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_sample_cleanup_closes_the_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = anyio.Event()
+    cleaned: list[dict[str, Any]] = []
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await _serve_forever(bridge)
+        closed.set()
+
+    class _Provider:
+        @classmethod
+        async def sample_cleanup(cls, *args: Any) -> None:
+            cleaned.append(args[2])
+
+    monkeypatch.setattr(
+        sandbox_context, "registry_find_sandboxenv", lambda type: _Provider
+    )
+    async with anyio.create_task_group() as tg:
+        provider = _BridgeSandbox(tg, serve)
+        proxy = SandboxEnvironmentProxy(provider)  # type: ignore[arg-type]
+        transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
+        await _result(transport, "exec_remote_start_wait")
+        await sandbox_context.cleanup_sandbox_environments_sample(
+            "fake", "task", None, {"default": proxy}, False
+        )
+        with anyio.fail_after(10):
+            await closed.wait()
+
+    assert cleaned == [{"default": provider}]
