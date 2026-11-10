@@ -112,7 +112,7 @@ flowchart TB
 
     subgraph sandbox["sandbox"]
         subgraph toolszone["tools user (root when usable)"]
-            CLI["tools CLI<br/>one process per call"]
+            CLI["tools CLI<br/>one process per call,<br/>or one bridge per sandbox"]
             SERVER["tools server<br/>long-lived, holds state"]
             TREE["tools tree, mode 0700<br/>with private .server state"]
         end
@@ -155,14 +155,22 @@ The injected executable is one multi-call program
 | Process | Lifetime | Runs as | Serves |
 |---|---|---|---|
 | Tools CLI (`exec`) | One per host tool call | tools user | In-process tools (`text_editor`) itself; forwards every other method to the server |
+| Tools CLI (`bridge`) | One per sandbox and tools user, while the host keeps it open | tools user | `exec_remote`'s server-wait requests, one per stdin line; forwards each to the server as `exec` does and refuses in-process tools and `_run_as` |
 | Tools server (`start-server`) | Sandbox lifetime | tools user | Stateful tools (`bash_session`, `exec_remote`, sandbox MCP servers) |
 | Command processes | Per command | The user the tool was configured with | The tool's actual work |
 
 The CLI routes on the set of in-process tools (`guest/_cli/main.py:179-228`).
-The host never talks to the server directly; it always goes through a fresh
-CLI process, and the CLI reaches the server over a Unix socket inside the
+The host never talks to the server directly; it always goes through a CLI
+process, and the CLI reaches the server over a Unix socket inside the
 server's private state directory (see
-[the guest contract](#guest-verified-directories)).
+[the guest contract](#guest-verified-directories)). The CLI process is a fresh
+one per call, unless the host runs with `INSPECT_EXEC_REMOTE_BRIDGE` and the
+sandbox provider implements `exec_stdio`: then `exec_remote`'s server-wait
+requests share one long-lived `bridge` CLI per sandbox and tools user
+(`guest/_cli/main.py:285-370`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
+bridge's stdin carries the host's requests, so the server it starts gets
+`/dev/null` as stdin rather than inheriting it, and commands the server runs
+without input cannot read that stream (`guest/_cli/main.py:512`).
 
 Plain `bash()` and `python()` (`ai/tool/_tools/_execute.py:65-176`) call
 `sandbox.exec()` directly and never involve the injected tools. Tools are
@@ -217,9 +225,13 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:43-125`). On this path the sandbox
-has no channel of its own to the host; untrusted output crosses the boundary
-only as the response to a request the host made.
+(`ai/util/_sandbox/_json_rpc_transport.py:43-125`); over a bridge, each request
+is a line on a long-lived exec's stdin and each reply a line on its stdout. On
+this path the sandbox has no channel of its own to the host; untrusted output
+crosses the boundary only as the response to a request the host made. The host
+reads a bridge only while a request waits on it, bounds each line by the exec
+output limit, and drops a bridge that sends a reply no request waits for
+(`ai/util/_sandbox/_json_rpc_bridge.py:143-176`).
 
 ### Pattern 2: agent inside the sandbox
 

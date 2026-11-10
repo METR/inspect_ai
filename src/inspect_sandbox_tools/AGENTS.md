@@ -81,6 +81,13 @@ Tools communicate through a two-layer RPC architecture:
    for an in-process tool, it reserves the chunk file before switching, so the response
    still lands in tools-user storage.
 
+With `INSPECT_EXEC_REMOTE_BRIDGE` set on the host and a sandbox provider that
+implements `exec_stdio`, `exec_remote`'s server-wait requests instead share one
+long-lived `inspect-sandbox-tools bridge` exec per sandbox and tools user: each
+request is a line on its stdin and each reply a line on its stdout, matched by
+ID, with the same chunk files for long replies. The bridge forwards only to the
+server; in-process tools still get their own `exec`.
+
 **Layer 2 - Container Internal (stateful operations):**
 1. When stateful execution is needed, the injected executable acts as a client
 2. It starts a server process if not already running
