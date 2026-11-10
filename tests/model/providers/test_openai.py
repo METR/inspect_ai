@@ -675,7 +675,7 @@ async def test_chat_completions_streaming_with_non_strict_tools():
     request = client.chat.completions.create.call_args.kwargs
     assert request["stream"] is True
     assert request["stream_options"] == {"include_usage": True}
-    assert "strict" not in request["tools"][0]["function"]
+    assert "strict" not in request["extra_body"]["tools"][0]["function"]
 
 
 async def test_chat_completions_streaming_converts_mid_stream_safeguard_block() -> None:

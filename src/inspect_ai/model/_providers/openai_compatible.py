@@ -30,6 +30,7 @@ from inspect_ai.model._openai import (
     openai_classify_retry,
 )
 from inspect_ai.model._openai_responses import ResponsesModelInfo
+from inspect_ai.model._providers._openai_unwalked import unwalked
 from inspect_ai.model._providers.openai_responses import generate_responses
 from inspect_ai.model._providers.util.chatapi import (
     ChatAPIHandler,
@@ -387,11 +388,14 @@ class OpenAICompatibleAPI(ModelAPI):
                     "be ignored. Disable streaming to receive prompt log "
                     "probabilities.",
                 )
-            async with await self.client.chat.completions.create(**request) as stream:
+            async with await self.client.chat.completions.create(
+                **unwalked(request)
+            ) as stream:
                 return await self.stream_completion(stream)
         else:
             return cast(
-                ChatCompletion, await self.client.chat.completions.create(**request)
+                ChatCompletion,
+                await self.client.chat.completions.create(**unwalked(request)),
             )
 
     async def stream_completion(

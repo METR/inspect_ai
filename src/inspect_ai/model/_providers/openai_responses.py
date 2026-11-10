@@ -44,6 +44,7 @@ from inspect_ai._util.logger import warn_once
 from inspect_ai.log._samples import set_active_model_event_call
 from inspect_ai.model._generate_config import has_image_output
 from inspect_ai.model._providers._openai_batch import OpenAIBatcher
+from inspect_ai.model._providers._openai_unwalked import unwalked
 from inspect_ai.tool import ToolChoice, ToolInfo
 from inspect_ai.tool._tools._computer._computer import is_computer_tool_info
 from inspect_ai.util._json import json_schema_dump
@@ -261,7 +262,7 @@ async def generate_responses(
                     client, request, stream_state
                 )
             else:
-                model_response = await client.responses.create(**request)
+                model_response = await client.responses.create(**unwalked(request))
             # model_response is `Response | Any`. The lazy type inference engine
             # threw up its hands because of the `**request`.
             assert isinstance(model_response, Response)
@@ -376,7 +377,7 @@ async def _generate_responses_stream(
     # to their call id / function when reported as stream deltas
     tool_items: dict[str, ResponseFunctionToolCall] = {}
     model_response: Response | None = None
-    stream = await client.responses.create(**request)
+    stream = await client.responses.create(**unwalked(request))
     # async with so the connection closes on non-exhaustion exits too
     # (error events raise below; cancellation can land mid-iteration)
     async with stream:
