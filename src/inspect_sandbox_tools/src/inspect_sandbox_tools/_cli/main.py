@@ -290,8 +290,8 @@ def _bridge(max_frame_bytes: int) -> None:
     server holds does not delay the others. Each reply is written as one line
     when it is ready, and the host matches replies to requests by ID. Only
     requests the server handles are accepted, plus fetches of spilled replies:
-    in-process tools switch the process's user, which a long-lived bridge cannot
-    undo.
+    `exec` runs an in-process tool as the request's user (`_run_as`), which a
+    long-lived process cannot switch to, and the server would run it as itself.
 
     A reply longer than ``max_frame_bytes`` (with its newline) is spilled and
     fetched in pieces, as for `exec`. When the server never answered a request
@@ -302,7 +302,6 @@ def _bridge(max_frame_bytes: int) -> None:
     closes end with it: the host closes a bridge only once no request waits on
     it, or when it drops one, and then sends its requests again.
     """
-    _ensure_server_is_running()
     write_lock = threading.Lock()
 
     def reply(response: str) -> None:
@@ -325,6 +324,9 @@ def _bridge(max_frame_bytes: int) -> None:
         threading.Thread(
             target=forward, args=(request_data, request_json_str), daemon=True
         ).start()
+    # Requests still running are abandoned, and a thread writing a reply now
+    # would make interpreter shutdown abort.
+    os._exit(0)
 
 
 # Creating a private directory sets the process umask for a moment, and a server
