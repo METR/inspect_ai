@@ -1,7 +1,9 @@
 import asyncio
 import os
 import signal
+import sys
 from asyncio.subprocess import Process as AsyncIOProcess
+from collections.abc import Callable
 from typing import Literal, NamedTuple
 
 import psutil
@@ -33,6 +35,8 @@ class OutputChunk(NamedTuple):
 
 _BACKPRESSURE_BUFFER_SIZE = 100 * 1024 * 1024  # 100 MiB
 _MAX_POLL_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB per poll response
+_READER_GRACE_SECONDS = 1.0  # after exit, for a child still holding the pipes
+_MAX_TAIL_BYTES = 4 * 1024 * 1024  # read after exit, past which blocked time counts
 
 
 def _leader_handle(process: AsyncIOProcess) -> psutil.Process | None:
@@ -48,6 +52,14 @@ def _leader_handle(process: AsyncIOProcess) -> psutil.Process | None:
         return psutil.Process(process.pid)
     except psutil.NoSuchProcess:
         return None
+
+
+def _clip(text: str) -> str:
+    """At most one poll reply of output, cut at a UTF-8 character boundary."""
+    data = text.encode()
+    if len(data) <= _MAX_POLL_OUTPUT_BYTES:
+        return text
+    return data[:_MAX_POLL_OUTPUT_BYTES].decode(errors="ignore")
 
 
 class Job:
@@ -69,6 +81,7 @@ class Job:
         cwd: str | None = None,
         user: str | RunAs | None = None,
         can_switch_user: bool = False,
+        on_create: Callable[["Job"], None] | None = None,
     ) -> "Job":
         """Create and start a new Job for the given command.
 
@@ -85,6 +98,7 @@ class Job:
             cwd: Working directory for command execution.
             user: User to run the command as (requires can_switch_user=True).
             can_switch_user: Whether the server can switch users (running as root).
+            on_create: Register ownership before writing potentially blocking input.
         """
         user = switch_target(user, can_switch_user)
 
@@ -110,15 +124,23 @@ class Job:
 
         job = cls(process)
 
-        # Write initial input if provided
-        if input is not None and process.stdin is not None:
-            process.stdin.write(input.encode("utf-8"))
-            await process.stdin.drain()
+        try:
+            if on_create is not None:
+                on_create(job)
+            # Write initial input if provided
+            if input is not None and process.stdin is not None:
+                process.stdin.write(input.encode("utf-8"))
+                await process.stdin.drain()
 
-        # Close stdin unless caller wants it kept open
-        if not stdin_open and process.stdin is not None:
-            process.stdin.close()
-            await process.stdin.wait_closed()
+            # Close stdin unless caller wants it kept open
+            if not stdin_open and process.stdin is not None:
+                process.stdin.close()
+                await process.stdin.wait_closed()
+        except BaseException:
+            # Not shutdown(): after the leader exits, its group id may be reused,
+            # and only server shutdown may signal the group without that check.
+            await job.kill(ack_seq=0)
+            raise
 
         return job
 
@@ -134,6 +156,11 @@ class Job:
         self._acked_buffer: AckedChunkBuffer[tuple[str, str]] = AckedChunkBuffer()
         self._known_descendants: list[psutil.Process] = []
         self._retired = False
+        self._changed = asyncio.Event()
+        self._exit_task: asyncio.Task[int] | None = None
+        self._readers_deadline: float | None = None
+        self._readers_checked = 0.0
+        self._read_at_first_wait = 0
 
         # Start background read tasks
         self._stdout_task = asyncio.create_task(
@@ -149,14 +176,24 @@ class Job:
         assert self._process.pid is not None
         return self._process.pid
 
-    async def poll(self, ack_seq: int) -> PollResult:
+    @property
+    def exited(self) -> bool:
+        """Whether the process has exited (its output may still be unread)."""
+        return self._process.returncode is not None
+
+    async def poll(self, ack_seq: int, *, terminal_output: bool = False) -> PollResult:
         """Return current state and incremental output, clearing buffers."""
         # Check if process has finished
         if self._state == "running" and self._process.returncode is not None:
             self._state = "completed"
             self._exit_code = self._process.returncode
-            # Wait for read tasks to finish draining
-            await self._wait_for_readers()
+
+        # Drain the readers whenever the job is no longer running. A poll
+        # cancelled here leaves the state terminal with the readers unfinished;
+        # a later poll finishes the drain so its output is not lost. Once the
+        # readers are done this does nothing.
+        if self._state != "running":
+            await self._wait_for_readers(reply=True)
 
         # Always limit per-poll output to keep JSON-RPC responses small.
         # Defer reporting terminal state until buffers are fully drained
@@ -165,14 +202,23 @@ class Job:
             final=False, max_bytes=_MAX_POLL_OUTPUT_BYTES
         )
 
-        buffers_empty = not stdout and not stderr
+        buffers_empty = (
+            self._stdout_buffer.size == 0
+            and self._stderr_buffer.size == 0
+            and self._stdout_task.done()
+            and self._stderr_task.done()
+            if terminal_output
+            else not stdout and not stderr
+        )
         if self._state != "running" and not buffers_empty:
             # Report as running so client keeps polling
             reported_state: Literal["running", "completed", "killed"] = "running"
             reported_exit_code = None
         elif self._state != "running" and buffers_empty:
             # Buffers drained — flush decoder and report terminal state
-            stdout, stderr = self._drain_buffers(final=True)
+            final_stdout, final_stderr = self._drain_buffers(final=True)
+            stdout += final_stdout
+            stderr += final_stderr
             reported_state = self._state
             reported_exit_code = self._exit_code
         else:
@@ -191,7 +237,57 @@ class Job:
             stderr=combined_err,
         )
 
-    async def kill(self, ack_seq: int, timeout: int = 5) -> OutputChunk:
+    async def wait_for_update(self, seconds: float) -> None:
+        """Wait for exit, a full reply of output, or the deadline.
+
+        Output alone does not end the wait, so it is coalesced into fewer replies.
+        Does not consume output or delay a concurrent cancellation.
+        """
+        if self._exit_task is None:
+            self._exit_task = asyncio.create_task(self._process.wait())
+            self._exit_task.add_done_callback(lambda _: self._changed.set())
+        deadline = asyncio.get_running_loop().time() + seconds
+        while True:
+            self._changed.clear()
+            if self._state != "running" or self._process.returncode is not None:
+                return
+            if self._buffered() >= _MAX_POLL_OUTPUT_BYTES:
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                # Process.wait() can stay blocked after exit when a child inherits pipes.
+                await asyncio.wait_for(self._changed.wait(), min(remaining, 0.25))
+            except asyncio.TimeoutError:
+                pass
+
+    def _buffered(self) -> int:
+        return max(self._stdout_buffer.size, self._stderr_buffer.size)
+
+    @property
+    def held_output_bytes(self) -> int:
+        """Memory held by output chunks kept until the host acknowledges them."""
+        return sum(
+            sys.getsizeof(stdout) + sys.getsizeof(stderr)
+            for stdout, stderr in self._acked_buffer.held()
+        )
+
+    def release_output(self) -> None:
+        """Release replay data while preserving descendant handles for shutdown.
+
+        Output still arriving from descendants is discarded.
+        """
+        self._acked_buffer = AckedChunkBuffer()
+        # Stopping the readers discards later output; it also frees a blocked put().
+        for task in (self._stdout_task, self._stderr_task):
+            task.cancel()
+        self._stdout_buffer.drain()
+        self._stderr_buffer.drain()
+
+    async def kill(
+        self, ack_seq: int, timeout: int = 5, *, drain_terminal: bool = False
+    ) -> OutputChunk:
         """Terminate the process and return any remaining buffered output.
 
         Since the subprocess was started with start_new_session=True, it is the
@@ -204,13 +300,19 @@ class Job:
         as root would then signal. A job whose leader exited on its own is
         treated as finished: its buffered output is returned and any children
         that outlived it may be left running.
+
+        With ``drain_terminal`` (the awaitable protocol), a job that already ended
+        is killed too, and the reply holds at most one poll reply of output per
+        stream, output the host has not acknowledged first: the host reads
+        nothing after a kill, so the rest is dropped.
         """
-        if self._state != "running":
+        if self._state != "running" and not drain_terminal:
             self._acked_buffer.push(("", ""))
             seq, chunks = self._acked_buffer.collect(ack_seq)
             return OutputChunk(seq, *self._combine_chunks(chunks))
 
         self._state = "killed"
+        self._changed.set()
         # Check and signal are not atomic. Likelihood that leader could exit, be
         # reaped and have its PID reused between is unlikely, as the PID space must
         # wrap inside that gap.
@@ -226,10 +328,20 @@ class Job:
 
         await self._wait_for_readers()
 
-        stdout, stderr = self._drain_buffers(final=True)
+        if drain_terminal:
+            stdout, stderr = self._drain_buffers(
+                final=True, max_bytes=_MAX_POLL_OUTPUT_BYTES
+            )
+            self._stdout_buffer.drain()
+            self._stderr_buffer.drain()
+        else:
+            stdout, stderr = self._drain_buffers(final=True)
         self._acked_buffer.push((stdout, stderr))
         seq, chunks = self._acked_buffer.collect(ack_seq)
-        return OutputChunk(seq, *self._combine_chunks(chunks))
+        stdout, stderr = self._combine_chunks(chunks)
+        if drain_terminal:
+            stdout, stderr = _clip(stdout), _clip(stderr)
+        return OutputChunk(seq, stdout, stderr)
 
     async def shutdown(self, timeout: int = 30) -> None:
         """Forcefully terminate this server-owned job during server shutdown."""
@@ -244,7 +356,7 @@ class Job:
             )
         finally:
             self._known_descendants.clear()
-            await self._wait_for_readers()
+            await self.cleanup()
 
     async def _force_kill_group(self, pgid: int, timeout: int) -> None:
         """SIGKILL the group once SIGTERM's grace period has passed.
@@ -368,21 +480,71 @@ class Job:
     async def cleanup(self) -> None:
         """Clean up resources. Called after job is removed from controller."""
         await self._wait_for_readers()
+        if self._exit_task is not None and not self._exit_task.done():
+            self._exit_task.cancel()
+            try:
+                await self._exit_task
+            except asyncio.CancelledError:
+                pass
 
-    async def _wait_for_readers(self) -> None:
-        """Wait for background read tasks to complete."""
-        self._stdout_buffer.close()
-        self._stderr_buffer.close()
-        for task in [self._stdout_task, self._stderr_task]:
-            if not task.done():
-                try:
-                    await asyncio.wait_for(task, timeout=1.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+    async def _wait_for_readers(self, *, reply: bool = False) -> None:
+        """Wait for the read tasks to reach EOF, then cancel any left.
+
+        The readers get `_READER_GRACE_SECONDS` in all, counted from the first
+        call, for a child that still holds the pipes. For a poll's `reply`, the
+        wait ends as soon as a full reply is buffered, before or during it:
+        sending that reply frees the space a reader blocked on a full buffer
+        needs, so output larger than the buffer is not cut off, and the readers
+        keep what is left of their time. Time a reader
+        spends blocked on a full buffer, waiting for the host to drain it, does
+        not count, however slowly the host polls, until the readers have taken
+        `_MAX_TAIL_BYTES` since the first call. That is more than a leader
+        leaves in its pipe and the stream reader when it exits (a pipe holds
+        64 KiB by default, at most 1 MiB unless a privileged process enlarges
+        it), so output past it comes from a child still writing, which then
+        gets only the time left.
+
+        Only the tasks still running when called are awaited, so a repeated
+        call does not re-raise an error an earlier call already handled. The
+        buffers stay open while the tasks run, so output read after the leader
+        exits is kept, and cancelling a task frees a put() that waits on a full
+        buffer. A reader error is raised to the caller.
+        """
+        readers = [t for t in (self._stdout_task, self._stderr_task) if not t.done()]
+        if not readers:
+            return
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        read = self._stdout_buffer.total + self._stderr_buffer.total
+        if self._readers_deadline is None:
+            self._readers_deadline = now + _READER_GRACE_SECONDS
+            self._readers_checked = now
+            self._read_at_first_wait = read
+        blocked = [
+            buffer.blocked_since
+            for buffer in (self._stdout_buffer, self._stderr_buffer)
+            if buffer.blocked_since is not None
+        ]
+        if blocked and read - self._read_at_first_wait < _MAX_TAIL_BYTES:
+            self._readers_deadline += now - max(min(blocked), self._readers_checked)
+        self._readers_checked = now
+        while reply and not all(task.done() for task in readers):
+            remaining = self._readers_deadline - loop.time()
+            if remaining <= 0:
+                break
+            if self._buffered() >= _MAX_POLL_OUTPUT_BYTES:
+                return
+            self._changed.clear()
+            try:
+                # bounded: another waiter can clear the event before this one sees it
+                await asyncio.wait_for(self._changed.wait(), min(remaining, 0.25))
+            except asyncio.TimeoutError:
+                pass
+        remaining = self._readers_deadline - loop.time()
+        _, pending = await asyncio.wait(readers, timeout=max(remaining, 0.0))
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*readers)
 
     async def _read_stream(
         self, stream: asyncio.StreamReader | None, buffer: BoundedByteBuffer
@@ -397,5 +559,8 @@ class Job:
                 if not data:
                     break
                 await buffer.put(data)
+                self._changed.set()
         except asyncio.CancelledError:
             pass
+        finally:
+            self._changed.set()

@@ -11,6 +11,9 @@ class BoundedByteBuffer:
     buffer is full. While put() is suspended the caller stops reading
     from the pipe, the kernel buffer fills, and the subprocess blocks
     on write — applying backpressure all the way to the source.
+
+    A put() that waits on a full buffer is freed by a drain() or by
+    cancelling the task that awaits it.
     """
 
     def __init__(self, max_bytes: int) -> None:
@@ -20,17 +23,30 @@ class BoundedByteBuffer:
         self._buf = bytearray()
         self._has_space = asyncio.Event()
         self._has_space.set()
-        self._closed = False
+        self.blocked_since: float | None = None
+        """Event loop time a put() began waiting for space; None while none waits."""
+        self.total = 0
+        """Bytes put in all, including those drained since."""
+
+    @property
+    def size(self) -> int:
+        """Bytes buffered now."""
+        return len(self._buf)
 
     async def put(self, data: bytes) -> None:
         """Append data, awaiting if the buffer is full."""
         if not data:
             return
-        while len(self._buf) >= self._max_bytes and not self._closed:
-            self._has_space.clear()
-            await self._has_space.wait()
-        if not self._closed:
-            self._buf.extend(data)
+        try:
+            while len(self._buf) >= self._max_bytes:
+                if self.blocked_since is None:
+                    self.blocked_since = asyncio.get_running_loop().time()
+                self._has_space.clear()
+                await self._has_space.wait()
+        finally:
+            self.blocked_since = None
+        self._buf.extend(data)
+        self.total += len(data)
 
     def drain(self, max_bytes: int | None = None) -> bytes:
         """Return buffered data and remove it from the buffer.
@@ -47,14 +63,6 @@ class BoundedByteBuffer:
             del self._buf[:max_bytes]
         self._has_space.set()
         return result
-
-    def close(self) -> None:
-        """Unblock any waiting put() so the reader task can exit.
-
-        Subsequent put() calls are silently discarded.
-        """
-        self._closed = True
-        self._has_space.set()
 
 
 class DecodingBuffer:

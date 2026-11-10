@@ -482,8 +482,9 @@ directory instead (`ai/util/_sandbox/local.py:67-71`, `:96-101`).
 - checks only the final component; the caller must supply parents protected
   against replacement by other principals.
 
-Files inside the directory (the socket's pid, lock, log and status files) are
-opened through `_open_private` (`server_dir.py:194-232`): `O_NOFOLLOW` and
+Files inside the directory (the socket's pid, lock, log and status files, and
+the `exec-remote-launched` journal of `exec_remote` request IDs) are opened
+through `_open_private` (`server_dir.py:194-232`): `O_NOFOLLOW` and
 `O_NONBLOCK`, then `fstat` must show a regular file owned by the effective uid,
 and a newly created file is set to `0600` through the descriptor. Both the CLI
 and the server create or verify the directory before use
