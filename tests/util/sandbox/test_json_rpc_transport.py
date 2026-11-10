@@ -1,7 +1,7 @@
 import base64
 import contextlib
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from functools import partial
 from typing import Any
 
@@ -370,6 +370,16 @@ def _pipe() -> tuple[_Pipe, _Pipe]:
     return _Pipe(host_send, host_receive), _Pipe(sandbox_send, sandbox_receive)
 
 
+@contextlib.asynccontextmanager
+async def _bridge_sandbox(
+    serve: Callable[[_FakeBridge], Coroutine[Any, Any, None]] | None,
+) -> AsyncIterator[_BridgeSandbox]:
+    """A `_BridgeSandbox` whose fake bridges are cancelled when the block ends."""
+    async with anyio.create_task_group() as tg:
+        yield _BridgeSandbox(tg, serve)
+        tg.cancel_scope.cancel()
+
+
 async def _serve_forever(bridge: _FakeBridge) -> None:
     await bridge.ready()
     with contextlib.suppress(anyio.EndOfStream):
@@ -401,8 +411,7 @@ async def test_bridge_matches_out_of_order_replies_by_id() -> None:
         await bridge.reply(first, first["method"])
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         results = await tg_collect(
             [
@@ -410,7 +419,6 @@ async def test_bridge_matches_out_of_order_replies_by_id() -> None:
                 partial(_result, transport, "exec_remote_poll_wait"),
             ]
         )
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert results == ["exec_remote_start_wait", "exec_remote_poll_wait"]
     assert sandbox.stdio_calls == [
@@ -430,10 +438,8 @@ async def test_bridge_resends_a_request_lost_with_a_dropped_bridge() -> None:
         await bridge.reply(request)
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         result = await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert result == "bridged"
     first, second = sandbox.bridges
@@ -448,8 +454,7 @@ async def test_bridge_raises_when_the_resent_request_is_lost_too() -> None:
         await bridge.next_request()
         await bridge.stream.aclose()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         with pytest.raises(BridgeDropped, match="the bridge exited"):
             await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
 
@@ -468,11 +473,9 @@ async def test_bridge_reply_longer_than_the_frame_limit_drops_the_bridge() -> No
             await bridge.reply(request)
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         with override_max_exec_output_size(1024):
             result = await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert result == "bridged"
     assert len(sandbox.bridges) == 2
@@ -480,8 +483,7 @@ async def test_bridge_reply_longer_than_the_frame_limit_drops_the_bridge() -> No
 
 @pytest.mark.usefixtures("bridge_on")
 async def test_sandbox_without_exec_stdio_sends_each_request_in_its_own_exec() -> None:
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, None)
+    async with _bridge_sandbox(None) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "per-call"
         assert await _result(transport, "exec_remote_poll_wait") == "per-call"
@@ -506,8 +508,7 @@ async def test_bridge_that_does_not_start_is_not_started_again(
             await bridge.wait_closed()
         await bridge.stream.aclose()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "per-call"
         assert await _result(transport, "exec_remote_poll_wait") == "per-call"
@@ -525,13 +526,11 @@ async def test_request_that_times_out_closes_the_bridge() -> None:
             await bridge.reply(request)
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         with pytest.raises(SandboxTimeoutError, match="exec_remote_poll_wait"):
             await _result(transport, "exec_remote_poll_wait", timeout=0.05)
         assert await _result(transport, "exec_remote_poll_wait") == "bridged"
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert len(sandbox.bridges) == 2
 
@@ -549,24 +548,20 @@ async def test_bridge_error_reply_raises_like_a_failed_exec() -> None:
         await bridge.stream.send(json.dumps(reply).encode() + b"\n")
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         with pytest.raises(RuntimeError, match="Sandbox.exec failure executing"):
             await _result(_bridged_transport(sandbox), "exec_remote_start_wait")
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
 
 @pytest.mark.usefixtures("bridge_on")
 async def test_only_requests_naming_a_request_id_use_the_bridge() -> None:
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, _serve_forever)
+    async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         for method in ["exec_remote_start", "exec_remote_write_stdin", "bash_session"]:
             assert await _result(transport, method) == "per-call"
         assert await _result(transport, "exec_remote_kill_wait") == "bridged"
         unbridged = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)  # type: ignore[arg-type]
         assert await _result(unbridged, "exec_remote_kill_wait") == "per-call"
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert sandbox.execs == [
         "exec_remote_start",
@@ -577,8 +572,7 @@ async def test_only_requests_naming_a_request_id_use_the_bridge() -> None:
 
 
 async def test_bridge_is_off_unless_enabled() -> None:
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, _serve_forever)
+    async with _bridge_sandbox(_serve_forever) as sandbox:
         assert (
             await _result(_bridged_transport(sandbox), "exec_remote_start_wait")
             == "per-call"
@@ -589,8 +583,7 @@ async def test_bridge_is_off_unless_enabled() -> None:
 
 @pytest.mark.usefixtures("bridge_on")
 async def test_request_too_long_for_a_frame_is_sent_in_its_own_exec() -> None:
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, _serve_forever)
+    async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         with override_max_exec_output_size(1024):
             reply = await transport(
@@ -630,19 +623,17 @@ async def test_cancelled_reader_loses_no_reply() -> None:
     async def second(transport: SandboxJSONRPCTransport) -> None:
         results.append(await _result(transport, "exec_remote_poll_wait"))
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         scope = anyio.CancelScope()
-        tg.start_soon(first, transport, scope)
-        await first_sent.wait()
         async with anyio.create_task_group() as requests:
+            requests.start_soon(first, transport, scope)
+            await first_sent.wait()
             requests.start_soon(second, transport)
             await second_sent.wait()
             await anyio.wait_all_tasks_blocked()
             scope.cancel()
             first_cancelled.set()
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert scope.cancelled_caught
     assert results == ["second"]
@@ -659,8 +650,7 @@ async def test_close_bridges_ends_the_bridge() -> None:
         await bridge.wait_closed()
         closed.set()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
         await close_bridges(sandbox)  # type: ignore[arg-type]
@@ -675,13 +665,12 @@ async def test_close_bridges_ends_the_bridge() -> None:
 @pytest.mark.usefixtures("bridge_on")
 async def test_bridged_request_records_the_exec_event() -> None:
     init_transcript(Transcript())
-    async with anyio.create_task_group() as tg:
-        proxy = SandboxEnvironmentProxy(_BridgeSandbox(tg, _serve_forever))  # type: ignore[arg-type]
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        proxy = SandboxEnvironmentProxy(sandbox)  # type: ignore[arg-type]
         transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
         await transport(
             "exec_remote_start_wait", {"command": "ls"}, False, user="root", timeout=10
         )
-        await close_bridges(proxy)
 
     [event] = [e for e in transcript().events if isinstance(e, SandboxEvent)]
     assert (event.action, event.cmd, event.result) == (
@@ -713,8 +702,7 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
         )
         await bridge.wait_closed()
 
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as sandbox:
         proxy = SandboxEnvironmentProxy(sandbox)  # type: ignore[arg-type]
         result = await exec_remote_awaitable(
             proxy,
@@ -722,7 +710,6 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
             5,
             ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10),
         )
-        await close_bridges(proxy)
 
     assert (result.returncode, result.stdout, result.stderr) == (3, "out", "err")
     [bridge] = sandbox.bridges
@@ -732,14 +719,12 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
 
 @pytest.mark.usefixtures("bridge_on")
 async def test_each_frame_limit_gets_its_own_bridge() -> None:
-    async with anyio.create_task_group() as tg:
-        sandbox = _BridgeSandbox(tg, _serve_forever)
+    async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         await _result(transport, "exec_remote_poll_wait")
         with override_max_exec_output_size(4096):
             await _result(transport, "exec_remote_poll_wait")
         await _result(transport, "exec_remote_poll_wait")
-        await close_bridges(sandbox)  # type: ignore[arg-type]
 
     assert [cmd[-1] for cmd in sandbox.stdio_calls] == ["10485760", "4096"]
     assert [len(bridge.requests) for bridge in sandbox.bridges] == [2, 1]
@@ -764,8 +749,7 @@ async def test_sample_cleanup_closes_the_bridge(
     monkeypatch.setattr(
         sandbox_context, "registry_find_sandboxenv", lambda type: _Provider
     )
-    async with anyio.create_task_group() as tg:
-        provider = _BridgeSandbox(tg, serve)
+    async with _bridge_sandbox(serve) as provider:
         proxy = SandboxEnvironmentProxy(provider)  # type: ignore[arg-type]
         transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
         await _result(transport, "exec_remote_start_wait")
