@@ -81,8 +81,9 @@ class _Bridge:
         self._stream = BufferedByteStream(stream)
         self._max_frame_bytes = max_frame_bytes
         self._replies: dict[object, str | None] = {}
-        self._abandoned = 0  # requests that stopped waiting before their reply came
+        self._abandoned: set[object] = set()  # stopped waiting before their reply
         self._reading = False
+        self._read_scope: anyio.CancelScope | None = None
         self._turn = anyio.Event()
         self._send_lock = anyio.Lock()
         self.dropped: str | None = None
@@ -113,7 +114,7 @@ class _Bridge:
             return reply
         finally:
             if self._replies.pop(request_id) is None:
-                self._abandoned += 1
+                self._abandoned.add(request_id)
 
     async def drop(self, reason: str) -> NoReturn:
         """Close the bridge, failing the requests waiting on it with `reason`."""
@@ -121,10 +122,16 @@ class _Bridge:
         raise BridgeDropped(self.dropped)
 
     async def close(self, reason: str) -> None:
-        """Stop the bridge. Never raises: a stream that fails to close is dropped."""
+        """Stop the bridge. Never raises: a stream that fails to close is dropped.
+
+        The waiting requests fail with `reason` at once, whether or not closing
+        the stream ends its reader's read.
+        """
         if self.dropped is not None:
             return
         self.dropped = reason
+        if self._read_scope is not None:
+            self._read_scope.cancel()
         with anyio.move_on_after(_CLOSE_TIMEOUT, shield=True):
             try:
                 await self._stream.aclose()
@@ -145,7 +152,10 @@ class _Bridge:
     async def _read_reply(self) -> None:
         self._reading = True
         try:
-            line = await self._read_line()
+            with anyio.CancelScope() as self._read_scope:
+                line = await self._read_line()
+            if self._read_scope.cancelled_caught:
+                raise BridgeDropped(self.dropped)
             try:
                 request_id = json.loads(line.decode("utf-8"))["id"]
                 waiting = request_id in self._replies and not self._replies[request_id]
@@ -153,11 +163,12 @@ class _Bridge:
                 await self.drop(f"the bridge sent an invalid reply: {line[:200]!r}")
             if waiting:
                 self._replies[request_id] = line.decode("utf-8")
-            elif self._abandoned:
-                self._abandoned -= 1  # a late reply to one of them
+            elif request_id in self._abandoned:
+                self._abandoned.remove(request_id)
             else:
                 await self.drop("the bridge sent a reply no request waits for")
         finally:
+            self._read_scope = None
             self._reading = False
             turn, self._turn = self._turn, anyio.Event()
             turn.set()
@@ -183,6 +194,8 @@ class _Bridges:
     lock: anyio.Lock = field(default_factory=anyio.Lock)
     by_key: dict[tuple[str | None, int], _Bridge | None] = field(default_factory=dict)
     """An open bridge, or None when the sandbox cannot run one."""
+    closed: bool = False
+    """Whether the sample has ended, after which no bridge opens."""
 
 
 async def bridge_request(
@@ -251,10 +264,15 @@ def bridge_error(reply: str) -> str | None:
 
 
 async def close_bridges(sandbox: SandboxEnvironment) -> None:
-    """Close the bridges a sandbox has open, when its sample ends. Never raises."""
+    """Close the bridges a sandbox has open, when its sample ends. Never raises.
+
+    No bridge opens after this, including one that was opening; later requests
+    are sent in their own execs.
+    """
+    if sandbox._json_rpc_bridges is None:
+        sandbox._json_rpc_bridges = _Bridges()
     bridges = sandbox._json_rpc_bridges
-    if bridges is None:
-        return
+    bridges.closed = True
     for bridge in list(bridges.by_key.values()):
         if bridge is not None:
             await bridge.close("the sample ended")
@@ -277,6 +295,8 @@ async def _bridge(
     bridges = sandbox._json_rpc_bridges
     key = (user, max_frame_bytes)
     async with bridges.lock:
+        if bridges.closed:
+            return None
         if key in bridges.by_key:
             bridge = bridges.by_key[key]
             if bridge is None or bridge.dropped is None:
@@ -309,5 +329,8 @@ async def _bridge(
             if bridge is not None:
                 await bridge.close("starting the bridge failed")
             raise
+        if bridges.closed:  # the sample ended while it opened
+            await bridge.close("the sample ended")
+            return None
         bridges.by_key[key] = bridge
         return bridge

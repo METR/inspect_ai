@@ -509,7 +509,9 @@ class ExecRemoteProcess:
         held = bool(params.get("wait_seconds"))
         slot: ConcurrencySemaphore | None = None
         # A held request over an open bridge takes no exec, which the limit protects.
-        if held and not self._transport.bridged(method, self._sandbox._tools_user):
+        if held and not self._transport.bridged(
+            method, params, self._sandbox._tools_user
+        ):
             slot = await get_or_create_semaphore(
                 "exec-remote-wait", _wait_concurrency(), None, False
             )

@@ -77,15 +77,15 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self._response_chunking = cli == SANDBOX_CLI
         self._bridge = bridge
 
-    def bridged(self, method: str, user: str | None) -> bool:
+    def bridged(self, method: str, params: JSONRPCParamsType, user: str | None) -> bool:
         """Whether a request would go over an open bridge, so it needs no exec."""
+        max_frame_bytes = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
         return (
             self._bridge
             and method in BRIDGE_METHODS
             and bridge_enabled()
-            and bridge_open(
-                self.sandbox, user, SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
-            )
+            and bridge_open(self.sandbox, user, max_frame_bytes)
+            and len(create_json_rpc_request(method, params, False)) < max_frame_bytes
         )
 
     async def __call__(
