@@ -81,7 +81,7 @@ Tools communicate through a two-layer RPC architecture:
    for an in-process tool, it reserves the chunk file before switching, so the response
    still lands in tools-user storage.
 
-With `INSPECT_EXEC_REMOTE_BRIDGE` set on the host and a sandbox provider that
+With `INSPECT_EXEC_REMOTE_BRIDGE` set to `1` or `true` on the host and a sandbox provider that
 implements `exec_stdio`, `exec_remote`'s server-wait requests instead share one
 long-lived `inspect-sandbox-tools bridge` exec per sandbox and tools user: each
 request is a line on its stdin and each reply a line on its stdout, matched by

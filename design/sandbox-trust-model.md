@@ -166,7 +166,7 @@ server's private state directory (see
 [the guest contract](#guest-verified-directories)). The CLI process is a fresh
 one per call, unless the host runs with `INSPECT_EXEC_REMOTE_BRIDGE` and the
 sandbox provider implements `exec_stdio`: then `exec_remote`'s server-wait
-requests share one long-lived `bridge` CLI per sandbox and tools user
+requests share one long-lived `bridge` CLI per sandbox, tools user and frame limit
 (`guest/_cli/main.py:285-370`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
 bridge's stdin carries the host's requests, so the server it starts gets
 `/dev/null` as stdin rather than inheriting it, and commands the server runs
@@ -230,7 +230,8 @@ is a line on a long-lived exec's stdin and each reply a line on its stdout. On
 this path the sandbox has no channel of its own to the host; untrusted output
 crosses the boundary only as the response to a request the host made. The host
 reads a bridge only while a request waits on it, bounds each line by the exec
-output limit, and drops a bridge that sends a reply no request waits for
+output limit, and drops a bridge that sends a reply no request waits for (a
+late reply to a request that stopped waiting is dropped instead)
 (`ai/util/_sandbox/_json_rpc_bridge.py:143-176`).
 
 ### Pattern 2: agent inside the sandbox
