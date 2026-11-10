@@ -381,6 +381,7 @@ def _bridged_transport(sandbox: _BridgeSandbox) -> SandboxJSONRPCTransport:
 
 
 async def _result(transport: SandboxJSONRPCTransport, method: str, **args: Any) -> Any:
+    args.setdefault("timeout", 10)  # fail rather than hang when a reply never comes
     return json.loads(await transport(method, {}, False, **args))["result"]
 
 
@@ -652,7 +653,8 @@ async def test_close_bridges_ends_the_bridge() -> None:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
         await close_bridges(sandbox)  # type: ignore[arg-type]
-        await closed.wait()
+        with anyio.fail_after(10):
+            await closed.wait()
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
         await close_bridges(sandbox)  # type: ignore[arg-type]
 
@@ -665,7 +667,9 @@ async def test_bridged_request_records_the_exec_event() -> None:
     async with anyio.create_task_group() as tg:
         proxy = SandboxEnvironmentProxy(_BridgeSandbox(tg, _serve_forever))  # type: ignore[arg-type]
         transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
-        await transport("exec_remote_start_wait", {"command": "ls"}, False, user="root")
+        await transport(
+            "exec_remote_start_wait", {"command": "ls"}, False, user="root", timeout=10
+        )
         await close_bridges(proxy)
 
     [event] = [e for e in transcript().events if isinstance(e, SandboxEvent)]
@@ -675,7 +679,7 @@ async def test_bridged_request_records_the_exec_event() -> None:
         0,
     )
     assert json.loads(event.input or "")["params"] == {"command": "ls"}
-    assert event.options == {"user": "root"}
+    assert event.options == {"user": "root", "timeout": 10}
 
 
 @pytest.mark.usefixtures("bridge_on")
@@ -702,7 +706,10 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
         sandbox = _BridgeSandbox(tg, serve)
         proxy = SandboxEnvironmentProxy(sandbox)  # type: ignore[arg-type]
         result = await exec_remote_awaitable(
-            proxy, ["ls"], 5, ExecRemoteAwaitableOptions(server_wait=True)
+            proxy,
+            ["ls"],
+            5,
+            ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10),
         )
         await close_bridges(proxy)
 
