@@ -97,6 +97,29 @@ batch retry is eval-set orchestration. Each failed attempt leaves its `error`
 log in the directory beside the retry's, and removing it is the runner's job,
 as is all other log cleanup.
 
+A worker always serves ACP (the Agent Client Protocol), because it is
+detached and ACP is its only human channel: `approver: human` and `ask_user`
+park until a client attaches. The transport the definition passes as
+`acp_server` is kept: a TCP port, a `host:port`, or a socket path. So a runner
+that reaches its workers over a TCP port-forward can attach. As in an unsharded
+run, a `host:port` such as `0.0.0.0:4444` binds that interface, and the ACP
+server does not authenticate clients. A definition that passes nothing,
+`True`, `False` or `0` gets the default owner-only socket, keyed on the pid.
+
+The overrides document cannot set `acp_server`. For a CLI definition
+(`inspect eval-set`), though, `INSPECT_EVAL_ACP_SERVER` supplies the
+definition's value as any `INSPECT_*` default does, so a runner must not pass
+it into a worker's environment unless it means to set the transport. A
+definition's fixed transport is the same in every worker, so a runner must not
+place two workers of such a definition in one network namespace (a port) or on
+one filesystem (a path): a second bind of a port fails that worker, and a
+second bind of a path takes the path over from the first, whose exit then
+removes it. The METR fork's second version (`_FORK_ACP_TRANSPORT_VERSION`)
+added no field. A runner that relies on the kept transport declares it, so an
+inspect without the rule refuses the document rather than binding the default
+socket. The rule applies whatever version a document
+declares.
+
 Scanning in selection mode is **record-only**: a worker dispatches scanners
 per settled sample and writes scout's per-transcript buffer, but never touches
 the scan directory's lifecycle — no init, no finalize, no orphan cleanup. The
@@ -146,7 +169,8 @@ EVAL_SET_SELECTION_VERSION = 8
 # `eval_set_fork_version`), so the line above stays as upstream has it.
 _UPSTREAM_SELECTION_VERSION = EVAL_SET_SELECTION_VERSION
 _FORK_COMPLETION_VERSION = fork_protocol_version(_UPSTREAM_SELECTION_VERSION, 1)
-EVAL_SET_SELECTION_VERSION = _FORK_COMPLETION_VERSION
+_FORK_ACP_TRANSPORT_VERSION = fork_protocol_version(_UPSTREAM_SELECTION_VERSION, 2)
+EVAL_SET_SELECTION_VERSION = _FORK_ACP_TRANSPORT_VERSION
 
 
 def eval_set_selection_requested() -> str | None:
