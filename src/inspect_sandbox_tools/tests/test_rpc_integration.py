@@ -293,11 +293,18 @@ def test_bridge_refuses_requests_it_cannot_forward(
         b"not json\n",
         b'{"jsonrpc": "2.0", "method": "remote_version"}\n',
         b'{"jsonrpc": "2.0", "id": 1}\n',
+        b'{"jsonrpc": "2.0",'.ljust(100) + b'"method": "remote_version", "id": 1}\n',
         # never split into the two requests it holds
         b'{"jsonrpc": "2.0", "method": "remote_version", "id": 1}'.ljust(100)
         + b'{"jsonrpc": "2.0", "method": "remote_version", "id": 2}\n',
     ],
-    ids=["not JSON", "no ID", "no method", "longer than the frame limit"],
+    ids=[
+        "not JSON",
+        "no ID",
+        "no method",
+        "longer than the frame limit",
+        "two requests longer than the frame limit",
+    ],
 )
 def test_bridge_exits_on_a_line_that_is_not_a_request(line: bytes) -> None:
     with _bridge(max_frame_bytes=100) as bridge:
