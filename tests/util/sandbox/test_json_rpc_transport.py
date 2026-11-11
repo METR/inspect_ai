@@ -1556,6 +1556,26 @@ async def test_held_request_whose_bridge_cannot_restart_takes_a_held_request_slo
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind() -> None:
+    """Only a request that went out can still get a reply to drop."""
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        assert await _result(transport, "exec_remote_poll_wait") == "bridged"
+        sandbox.bridges[0].host.write_seconds = 0.2  # the next send holds the lock
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_result, transport, "exec_remote_poll_wait")
+            await anyio.wait_all_tasks_blocked()
+            with anyio.move_on_after(0.05):  # cancelled as it waits for the lock
+                await _result(transport, "exec_remote_poll_wait")
+        bridges = sandbox._json_rpc_bridges
+
+    assert bridges is not None
+    assert [bridge._abandoned for bridge in bridges.by_key.values() if bridge] == [
+        set()
+    ]
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_caller_cancelled_while_its_request_is_written_keeps_the_bridge() -> None:
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)

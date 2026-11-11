@@ -234,7 +234,7 @@ crosses the boundary only as the response to a request the host made. The host
 reads a bridge only while a request waits on it, bounds each line by the exec
 output limit, and drops a bridge that sends a reply no request waits for (a
 late reply to a request that stopped waiting is dropped instead)
-(`ai/util/_sandbox/_json_rpc_bridge.py:115-132,169-204`).
+(`ai/util/_sandbox/_json_rpc_bridge.py:115-134,171-206`).
 
 ### Pattern 2: agent inside the sandbox
 

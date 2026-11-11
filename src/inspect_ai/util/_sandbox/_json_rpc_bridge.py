@@ -117,8 +117,10 @@ class _Bridge:
         if self.dropped is not None:
             raise BridgeDropped(self.dropped)
         self._replies[request_id] = None
+        sent = False
         try:
             await self._send(frame, deadline)
+            sent = True
             while (reply := self._replies[request_id]) is None:
                 if self.dropped is not None:
                     raise BridgeDropped(self.dropped)
@@ -128,8 +130,8 @@ class _Bridge:
                     await self._read_reply()
             return reply
         finally:
-            if self._replies.pop(request_id) is None:
-                self._abandoned.add(request_id)
+            if self._replies.pop(request_id) is None and sent:
+                self._abandoned.add(request_id)  # its reply may still come
 
     async def drop(self, reason: str) -> NoReturn:
         """Close the bridge, failing the requests waiting on it with `reason`."""
