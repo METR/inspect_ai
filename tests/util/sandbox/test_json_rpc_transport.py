@@ -42,7 +42,11 @@ from inspect_ai.util._sandbox.exec_remote import (
     ExecRemoteAwaitableOptions,
     exec_remote_awaitable,
 )
-from inspect_ai.util._sandbox.limits import override_max_exec_output_size
+from inspect_ai.util._sandbox.limits import (
+    OutputLimitExceededError,
+    override_max_exec_output_size,
+    override_max_read_file_size,
+)
 from inspect_ai.util._sandbox.registry import sandboxenv
 from inspect_ai.util._subprocess import ExecResult
 
@@ -86,7 +90,7 @@ async def test_sandbox_json_rpc_transport_reassembles_large_unicode_response() -
 
     transport = SandboxJSONRPCTransport(FakeSandbox(), SANDBOX_CLI)  # type: ignore[arg-type]
 
-    with override_max_exec_output_size(1024):
+    with override_max_exec_output_size(320):
         assert await transport("large", {}, False) == original_response
 
     continuation_offsets = [
@@ -95,7 +99,7 @@ async def test_sandbox_json_rpc_transport_reassembles_large_unicode_response() -
     assert continuation_offsets == sorted(continuation_offsets)
     assert len(continuation_offsets) > 2
     assert all(
-        call["env"]["INSPECT_SANDBOX_JSON_RPC_RESPONSE_MAX_BYTES"] == "1024"
+        call["env"]["INSPECT_SANDBOX_JSON_RPC_RESPONSE_MAX_BYTES"] == "320"
         for call in exec_inputs
     )
     assert json.loads(exec_inputs[-1]["input"])["params"]["release"] is True
@@ -123,6 +127,104 @@ async def test_a_chunked_reply_whose_release_is_refused_fails_as_a_replaced_sand
         await transport("big", {}, False)
 
     assert offsets == [0, 100]  # every chunk was fetched before the release
+
+
+@pytest.mark.parametrize("over_the_limit", [True, False])
+async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
+    over_the_limit: bool,
+) -> None:
+    """Its first chunk declares the size; one over the limit fails only that call."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 5000}).encode()
+    requests: list[dict[str, Any]] = []
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        requests.append(json.loads(sandbox.inputs[-1] or ""))
+        params = requests[-1].get("params", {})
+        if params.get("release"):
+            return ExecResult(True, 0, _success_response(), "")
+        offset = params.get("offset", 0)
+        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, offset, 2048), "")
+
+    sandbox = CannedSandbox(policy)
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    with (
+        override_max_exec_output_size(4096),
+        override_max_read_file_size(len(reply) - over_the_limit),
+    ):
+        if over_the_limit:
+            with pytest.raises(OutputLimitExceededError) as raised:
+                await transport("big", {}, False)
+            assert raised.value.limit_str == f"{len(reply) - 1} bytes"
+        else:
+            assert await transport("big", {}, False) == reply.decode()
+
+    fetched = [r["params"].get("offset") for r in requests[1:-1]]
+    assert fetched == ([] if over_the_limit else list(range(2048, len(reply), 2048)))
+    assert requests[-1]["params"] == {"handle": "c" * 32, "release": True}
+
+
+@pytest.mark.parametrize(
+    ("frame", "first", "rest", "ok"),
+    [
+        pytest.param(4096, 1, 1, False, id="one-byte pieces"),
+        pytest.param(1024, 1, 1, False, id="one-byte pieces, small frame"),
+        pytest.param(513, 1, 1, False, id="one-byte pieces, smaller frame"),
+        pytest.param(
+            321, 1, 1, False, id="one-byte pieces, smallest frame with a floor"
+        ),
+        pytest.param(325, 1, 1, False, id="one-byte pieces, frame of 325"),
+        pytest.param(4096, 1000, 1000, False, id="pieces under the floor"),
+        pytest.param(4096, 2048, 1, False, id="a full piece, then one-byte ones"),
+        pytest.param(4096, 2048, 2048, True, id="full pieces, one-byte last"),
+        pytest.param(
+            None, 512 * 1024, 512 * 1024, True, id="the tools' 512 KiB pieces"
+        ),
+        pytest.param(
+            None,
+            48 * 1024,
+            48 * 1024,
+            True,
+            id="the tools' pieces in their 64 KiB frame",
+        ),
+    ],
+)
+async def test_a_chunked_reply_in_tiny_pieces_fails_that_call(
+    frame: int | None, first: int, rest: int, ok: bool
+) -> None:
+    """Each piece costs an exec and an event; the tools fill each frame instead.
+
+    Only the last piece may be short.
+    """
+    size = 2 * 2048 + 1 if frame else 3 * 512 * 1024 + 1  # a short last piece
+    envelope = len(json.dumps({"jsonrpc": "2.0", "id": 1, "result": ""}))
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * (size - envelope)})
+    requests: list[dict[str, Any]] = []
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        requests.append(json.loads(sandbox.inputs[-1] or ""))
+        params = requests[-1].get("params", {})
+        if params.get("release"):
+            return ExecResult(True, 0, _success_response(), "")
+        offset = params.get("offset", 0)
+        piece = first if offset == 0 else rest
+        return ExecResult(
+            True, 0, _chunk_response(reply.encode(), "c" * 32, offset, piece), ""
+        )
+
+    sandbox = CannedSandbox(policy)
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    frame_limit = (
+        override_max_exec_output_size(frame) if frame else contextlib.nullcontext()
+    )
+    with frame_limit:
+        if ok:
+            assert await transport("big", {}, False) == reply
+        else:
+            with pytest.raises(RuntimeError, match="too many pieces"):
+                await transport("big", {}, False)
+            # the call, then the release, after the first piece if it was full
+            assert len(requests) == (3 if first == 2048 else 2)
+    assert requests[-1]["params"] == {"handle": "c" * 32, "release": True}
 
 
 async def test_a_refused_release_does_not_replace_an_error_on_its_way() -> None:
@@ -199,7 +301,10 @@ async def test_sandbox_json_rpc_transport_rejects_out_of_order_chunk() -> None:
 
     transport = SandboxJSONRPCTransport(FakeSandbox(), SANDBOX_CLI)  # type: ignore[arg-type]
 
-    with pytest.raises(RuntimeError, match="out of order"):
+    with (
+        override_max_exec_output_size(320),
+        pytest.raises(RuntimeError, match="out of order"),
+    ):
         await transport("large", {}, False)
     assert continuation_count == 1
 
@@ -232,7 +337,10 @@ async def test_sandbox_json_rpc_transport_surfaces_continuation_error() -> None:
 
     transport = SandboxJSONRPCTransport(FakeSandbox(), SANDBOX_CLI)  # type: ignore[arg-type]
 
-    with pytest.raises(RuntimeError, match="chunk missing"):
+    with (
+        override_max_exec_output_size(320),
+        pytest.raises(RuntimeError, match="chunk missing"),
+    ):
         await transport("large", {}, False)
 
 
@@ -272,12 +380,13 @@ async def test_sandbox_json_rpc_transport_keeps_concurrent_handles_separate() ->
             )
 
     transport = SandboxJSONRPCTransport(FakeSandbox(), SANDBOX_CLI)  # type: ignore[arg-type]
-    results = await tg_collect(
-        [
-            partial(transport, "one", {}, False),
-            partial(transport, "two", {}, False),
-        ]
-    )
+    with override_max_exec_output_size(320):
+        results = await tg_collect(
+            [
+                partial(transport, "one", {}, False),
+                partial(transport, "two", {}, False),
+            ]
+        )
 
     assert results == [responses["one"], responses["two"]]
 

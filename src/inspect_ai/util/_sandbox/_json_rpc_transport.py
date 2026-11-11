@@ -30,7 +30,7 @@ from ._json_rpc_bridge import (
     bridge_open,
     bridge_request,
 )
-from .limits import SandboxEnvironmentLimits
+from .limits import OutputLimitExceededError, SandboxEnvironmentLimits
 
 
 class SandboxReplacedError(RuntimeError):
@@ -240,12 +240,19 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         expected_offset = 0
         whole = False
         try:
+            # The reply is held whole in the host's memory, at whatever size the
+            # sandbox declares, so it gets the limit on reading a file into memory.
+            if total_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
+                raise OutputLimitExceededError(
+                    SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR, None
+                )
             while True:
                 _validate_response_chunk(
                     chunk,
                     expected_handle=handle,
                     expected_offset=expected_offset,
                     expected_total_size=total_size,
+                    max_response_bytes=max_response_bytes,
                 )
                 response_bytes.extend(chunk.data)
                 if chunk.done:
@@ -413,6 +420,7 @@ def _validate_response_chunk(
     expected_handle: str,
     expected_offset: int,
     expected_total_size: int,
+    max_response_bytes: int,
 ) -> None:
     if chunk.handle != expected_handle:
         raise RuntimeError("Chunked JSON-RPC response handle changed")
@@ -426,3 +434,15 @@ def _validate_response_chunk(
         raise RuntimeError("Chunked JSON-RPC response exceeded its declared size")
     if chunk.done != (chunk.next_offset == chunk.total_size):
         raise RuntimeError("Chunked JSON-RPC response completion metadata was invalid")
+    # Each piece costs a sandbox exec and an event, so a reply may not come in many
+    # more than the tools make: they fill each frame, up to 512 KiB, after an
+    # envelope of under 320 bytes, with base64 (3 bytes in 4). 24 KiB is under what
+    # they send in the 64 KiB frame they use when the frame size doesn't reach them.
+    # A frame of 320 bytes or less leaves them under 100 bytes a piece.
+    if (
+        not chunk.done
+        and max_response_bytes > 320
+        and len(chunk.data)
+        < min(24 * 1024, max(2, (max_response_bytes - 320) * 3 // 8))
+    ):
+        raise RuntimeError("Chunked JSON-RPC response came in too many pieces")
