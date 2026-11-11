@@ -36,6 +36,7 @@ from inspect_ai.model._call_tools import tool_call_error
 from inspect_ai.solver import generate
 from inspect_ai.tool._sandbox_tools_utils import sandbox as sandbox_tools
 from inspect_ai.util._sandbox import _cli as cli_module
+from inspect_ai.util._sandbox import _privileged as privileged_module
 from inspect_ai.util._sandbox._cli import (
     SANDBOX_CLI,
     SANDBOX_TOOLS_DIR,
@@ -1203,6 +1204,20 @@ def test_tools_cli_command_refuses_a_directory_that_is_not_the_users_own(
     assert (result.returncode, result.stdout) == (0, f"{TOOLS_DIR_REFUSED}\n")
     if entry == "missing":
         assert str(tools_tree) in result.stderr  # the reason, for the error
+
+
+def test_tools_cli_command_that_cannot_check_refuses_nothing_and_runs_nothing(
+    tools_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing `stat` (or fork, under a full process table) says nothing of the tree."""
+    (tmp_path / "failing").mkdir()
+    (tmp_path / "failing" / "stat").write_text("#!/bin/sh\nexit 1\n")
+    (tmp_path / "failing" / "stat").chmod(0o755)
+    monkeypatch.setattr(privileged_module, "SYSTEM_PATH", str(tmp_path / "failing"))
+
+    result = _run(tools_cli_command("exec", user=None), cwd=tmp_path)
+
+    assert (result.returncode, result.stdout) == (125, "")
 
 
 async def test_tools_inject_into_a_provider_that_skips_the_base_init(
