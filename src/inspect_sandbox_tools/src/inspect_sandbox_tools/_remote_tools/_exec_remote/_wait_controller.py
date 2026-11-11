@@ -14,7 +14,7 @@ from inspect_sandbox_tools._util.server_dir import (
     read_private_text,
 )
 
-from ._job import Job
+from ._job import Job, retain_running
 from .tool_types import KillResult, PollResult, StartWaitParams, WaitResult
 
 _TERMINAL_TTL = 300.0
@@ -408,7 +408,7 @@ class WaitController:
         if entry.job is not None:
             entry.job.retire()
             entry.job.release_output()
-            self._retired_jobs.append(entry.job)
+            self._retired_jobs = retain_running(self._retired_jobs, entry.job)
 
     async def shutdown(self) -> None:
         """Terminate pending, active, and retired commands owned by this controller."""

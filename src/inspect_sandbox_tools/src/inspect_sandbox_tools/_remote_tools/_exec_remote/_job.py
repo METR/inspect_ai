@@ -10,6 +10,7 @@ import psutil
 
 from inspect_sandbox_tools._util.common_types import ToolException
 from inspect_sandbox_tools._util.process_tree import (
+    live_processes,
     process_group_members,
     terminate_process_tree,
 )
@@ -52,6 +53,15 @@ def _leader_handle(process: AsyncIOProcess) -> psutil.Process | None:
         return psutil.Process(process.pid)
     except psutil.NoSuchProcess:
         return None
+
+
+def retain_running(retired: list["Job"], job: "Job") -> list["Job"]:
+    """The retired jobs, `job` included, that left a process running.
+
+    Server shutdown stops what a retired job left running, and only that, so a job
+    that left nothing need not be kept: most commands leave nothing.
+    """
+    return [kept for kept in (*retired, job) if kept.left_running]
 
 
 def _clip(text: str) -> str:
@@ -399,6 +409,11 @@ class Job:
             return
         self._retired = True
         self._remember_descendants()
+
+    @property
+    def left_running(self) -> bool:
+        """Whether a process this retired job left behind still runs."""
+        return bool(live_processes(self._known_descendants))
 
     def _remember_descendants(self) -> None:
         pid = self._process.pid
