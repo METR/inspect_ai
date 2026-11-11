@@ -42,7 +42,11 @@ from inspect_ai.util._sandbox.exec_remote import (
     ExecRemoteAwaitableOptions,
     exec_remote_awaitable,
 )
-from inspect_ai.util._sandbox.limits import override_max_exec_output_size
+from inspect_ai.util._sandbox.limits import (
+    OutputLimitExceededError,
+    override_max_exec_output_size,
+    override_max_read_file_size,
+)
 from inspect_ai.util._sandbox.registry import sandboxenv
 from inspect_ai.util._subprocess import ExecResult
 
@@ -123,6 +127,39 @@ async def test_a_chunked_reply_whose_release_is_refused_fails_as_a_replaced_sand
         await transport("big", {}, False)
 
     assert offsets == [0, 100]  # every chunk was fetched before the release
+
+
+@pytest.mark.parametrize("over_the_limit", [True, False])
+async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
+    over_the_limit: bool,
+) -> None:
+    """Its first chunk declares the size; one over the limit fails only that call."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 100}).encode()
+    requests: list[dict[str, Any]] = []
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        requests.append(json.loads(sandbox.inputs[-1] or ""))
+        params = requests[-1].get("params", {})
+        if params.get("release"):
+            return ExecResult(True, 0, _success_response(), "")
+        offset = params.get("offset", 0)
+        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, offset, 40), "")
+
+    sandbox = CannedSandbox(policy)
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    with (
+        override_max_exec_output_size(128),
+        override_max_read_file_size(len(reply) - over_the_limit),
+    ):
+        if over_the_limit:
+            with pytest.raises(OutputLimitExceededError):
+                await transport("big", {}, False)
+        else:
+            assert await transport("big", {}, False) == reply.decode()
+
+    fetched = [r["params"].get("offset") for r in requests[1:-1]]
+    assert fetched == ([] if over_the_limit else list(range(40, len(reply), 40)))
+    assert requests[-1]["params"] == {"handle": "c" * 32, "release": True}
 
 
 async def test_a_refused_release_does_not_replace_an_error_on_its_way() -> None:

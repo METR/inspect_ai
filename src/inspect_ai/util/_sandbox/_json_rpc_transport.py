@@ -30,7 +30,7 @@ from ._json_rpc_bridge import (
     bridge_open,
     bridge_request,
 )
-from .limits import SandboxEnvironmentLimits
+from .limits import OutputLimitExceededError, SandboxEnvironmentLimits
 
 
 class SandboxReplacedError(RuntimeError):
@@ -240,6 +240,12 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         expected_offset = 0
         whole = False
         try:
+            # The reply is held whole in the runner's memory, at whatever size the
+            # sandbox declares, so it gets the limit on reading a file into memory.
+            if total_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
+                raise OutputLimitExceededError(
+                    SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR, None
+                )
             while True:
                 _validate_response_chunk(
                     chunk,
