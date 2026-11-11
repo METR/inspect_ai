@@ -1044,8 +1044,11 @@ async def test_nothing_is_sent_before_the_bridge_is_ready() -> None:
     early: list[bytes] = []
 
     async def serve(bridge: _FakeBridge) -> None:
-        with anyio.move_on_after(0.2):
-            early.append(await bridge.stream.receive())
+        # Once every task waits, the host either waits for the ready line or has
+        # sent its request already.
+        await anyio.wait_all_tasks_blocked()
+        with contextlib.suppress(anyio.WouldBlock):
+            early.append(bridge.stream._receive.receive_nowait())
         await bridge.ready()
         await bridge.reply(await bridge.next_request())
 
