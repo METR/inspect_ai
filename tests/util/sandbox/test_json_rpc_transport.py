@@ -169,6 +169,10 @@ async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
         pytest.param(4096, 1, 1, False, id="one-byte pieces"),
         pytest.param(1024, 1, 1, False, id="one-byte pieces, small frame"),
         pytest.param(513, 1, 1, False, id="one-byte pieces, smaller frame"),
+        pytest.param(
+            321, 1, 1, False, id="one-byte pieces, smallest frame with a floor"
+        ),
+        pytest.param(325, 1, 1, False, id="one-byte pieces, frame of 325"),
         pytest.param(4096, 1000, 1000, False, id="pieces under the floor"),
         pytest.param(4096, 2048, 1, False, id="a full piece, then one-byte ones"),
         pytest.param(4096, 2048, 2048, True, id="full pieces, one-byte last"),

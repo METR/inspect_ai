@@ -439,7 +439,10 @@ def _validate_response_chunk(
     # envelope of under 320 bytes, with base64 (3 bytes in 4). 24 KiB is under what
     # they send in the 64 KiB frame they use when the frame size doesn't reach them.
     # A frame of 320 bytes or less leaves them under 100 bytes a piece.
-    if not chunk.done and len(chunk.data) < min(
-        24 * 1024, max(max_response_bytes - 320, 0) * 3 // 8
+    if (
+        not chunk.done
+        and max_response_bytes > 320
+        and len(chunk.data)
+        < min(24 * 1024, max(2, (max_response_bytes - 320) * 3 // 8))
     ):
         raise RuntimeError("Chunked JSON-RPC response came in too many pieces")
