@@ -44,12 +44,15 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # move that directory out of its parent, which the full check required to be
 # sticky or closed to others. A refusal exits 0 because k8s_sandbox
 # raises, hiding the output, when an exec fails right after a container restart,
-# which is when refusals happen.
+# which is when refusals happen. A check that cannot run (`stat` or a fork
+# failing, as under a full process table) is no refusal: it exits non-zero (125,
+# or the shell's own status), runs nothing, and fails as an exec does.
 _TOOLS_DIR_CHECK = (
-    '(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
-    ' && [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$(stat -c @FORMAT@ .)" = @WANT@ ])'
-    f" || {{ echo {TOOLS_DIR_REFUSED}; exit 0; }}; shift 2;"
-    ' exec "$@"'
+    '(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2" || exit 1;'
+    " s=$(stat -c @FORMAT@ .) || exit 2;"
+    ' [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$s" = @WANT@ ] || exit 1)'
+    f"; case $? in 0) ;; 1) echo {TOOLS_DIR_REFUSED}; exit 0;; *) exit 125;; esac;"
+    ' shift 2; exec "$@"'
 )
 
 
@@ -65,10 +68,11 @@ def tools_cli_command(*args: str, user: str | None) -> list[str]:
     or write into it, and nobody else can move one into place: moving a directory
     into the parent needs write access to it, and within the parent, which the full
     check required to be sticky or closed to others, only the entry's owner can
-    rename it. If the check fails, the command prints only ``TOOLS_DIR_REFUSED``,
-    and ``SandboxJSONRPCTransport`` fails the call with an error naming a replaced
-    sandbox. Nothing installs the tools again on that sandbox object, so later calls
-    fail the same way while the directory stays missing.
+    rename it. If the directory fails the check, the command prints only
+    ``TOOLS_DIR_REFUSED``, and ``SandboxJSONRPCTransport`` fails the call with an
+    error naming a replaced sandbox. Nothing installs the tools again on that sandbox
+    object, so later calls fail the same way while the directory stays missing. A
+    check that cannot run exits non-zero instead, running nothing.
 
     ``user`` is the user the command runs as. For ``"root"`` the directory must also
     be owned by uid 0, as the full check required, so a provider that stops running

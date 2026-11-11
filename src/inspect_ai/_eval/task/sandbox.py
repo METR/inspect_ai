@@ -29,6 +29,7 @@ from inspect_ai.util._concurrency import (
     get_or_create_semaphore,
     register_sandbox_limiter,
 )
+from inspect_ai.util._sandbox._json_rpc_bridge import close_bridges
 from inspect_ai.util._sandbox.compose import (
     is_docker_compatible_config,
     is_docker_compatible_sandbox_type,
@@ -166,6 +167,8 @@ async def sandboxenv_context(
             raise ex
 
         finally:
+            for environment in (environments or {}).values():
+                await close_bridges(environment)
             # cleanup sandbox environment
             if environments and cleanup:
                 with anyio.CancelScope(shield=interrupted):

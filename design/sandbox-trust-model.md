@@ -65,7 +65,7 @@ crosses a boundary described below is held to them:
 The evaluated model, and any code it runs, is the untrusted principal. Inspect
 itself (the host process) is trusted. Inside the sandbox, Inspect's injected
 tools run as the **tools user**, recorded on the sandbox object as
-`_tools_user` (`ai/util/_sandbox/environment.py:200`).
+`_tools_user` (`ai/util/_sandbox/environment.py:206`).
 
 The number of distinct principals inside a sandbox is a runtime property. It
 depends on whether root is usable and on the user the agent's code actually
@@ -112,7 +112,7 @@ flowchart TB
 
     subgraph sandbox["sandbox"]
         subgraph toolszone["tools user (root when usable)"]
-            CLI["tools CLI<br/>one process per call"]
+            CLI["tools CLI<br/>one process per call,<br/>or one bridge per sandbox"]
             SERVER["tools server<br/>long-lived, holds state"]
             TREE["tools tree, mode 0700<br/>with private .server state"]
         end
@@ -136,7 +136,7 @@ never revisited. In an eval, sample init calls it for every sandbox after the
 sample's files are copied and its setup script has run, and before solver or
 agent execution begins (`ai/util/_sandbox/context.py:293-297`); a sandbox used
 outside sample init is probed on first use. The verdict
-(`ai/util/_sandbox/environment.py:152-174`) is one of:
+(`ai/util/_sandbox/environment.py:157-179`) is one of:
 
 - `usable`: the tools install and run as root;
 - `unusable` (the provider refused root, or root cannot switch users): the
@@ -155,14 +155,22 @@ The injected executable is one multi-call program
 | Process | Lifetime | Runs as | Serves |
 |---|---|---|---|
 | Tools CLI (`exec`) | One per host tool call | tools user | In-process tools (`text_editor`) itself; forwards every other method to the server |
+| Tools CLI (`bridge`) | One per sandbox and tools user, while the host keeps it open | tools user | `exec_remote`'s server-wait requests, one per stdin line; forwards each to the server as `exec` does and refuses in-process tools and `_run_as` |
 | Tools server (`start-server`) | Sandbox lifetime | tools user | Stateful tools (`bash_session`, `exec_remote`, sandbox MCP servers) |
 | Command processes | Per command | The user the tool was configured with | The tool's actual work |
 
 The CLI routes on the set of in-process tools (`guest/_cli/main.py:179-228`).
-The host never talks to the server directly; it always goes through a fresh
-CLI process, and the CLI reaches the server over a Unix socket inside the
+The host never talks to the server directly; it always goes through a CLI
+process, and the CLI reaches the server over a Unix socket inside the
 server's private state directory (see
-[the guest contract](#guest-verified-directories)).
+[the guest contract](#guest-verified-directories)). The CLI process is a fresh
+one per call, unless the host runs with `INSPECT_EXEC_REMOTE_BRIDGE` and the
+sandbox provider implements `exec_stdio`: then `exec_remote`'s server-wait
+requests share one long-lived `bridge` CLI per sandbox, tools user and frame limit
+(`guest/_cli/main.py:285-372`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
+bridge's stdin carries the host's requests, so the server it starts gets
+`/dev/null` as stdin rather than inheriting it, and commands the server runs
+without input cannot read that stream (`guest/_cli/main.py:514`).
 
 Plain `bash()` and `python()` (`ai/tool/_tools/_execute.py:65-176`) call
 `sandbox.exec()` directly and never involve the injected tools. Tools are
@@ -219,9 +227,14 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:52-160`). On this path the sandbox
-has no channel of its own to the host; untrusted output crosses the boundary
-only as the response to a request the host made.
+(`ai/util/_sandbox/_json_rpc_transport.py:73-225`); over a bridge, each request
+is a line on a long-lived exec's stdin and each reply a line on its stdout. On
+this path the sandbox has no channel of its own to the host; untrusted output
+crosses the boundary only as the response to a request the host made. The host
+reads a bridge only while a request waits on it, bounds each line by the exec
+output limit, and drops a bridge that sends a reply no request waits for (a
+late reply to a request that stopped waiting is dropped instead)
+(`ai/util/_sandbox/_json_rpc_bridge.py:115-134,171-206`).
 
 ### Pattern 2: agent inside the sandbox
 
@@ -268,7 +281,7 @@ tools. For plain `bash()` and `python()` the omitted user goes to
 `sandbox.exec()` unchanged. For the injected tools, when the tools user is
 root the host captures the default exec identity (uid, gid, groups and
 `HOME`, `sandbox.py:442-485`) at injection and supplies it with every call
-that names no user (`ai/util/_sandbox/_cli.py:96-109`); the tools switch to it
+that names no user (`ai/util/_sandbox/_cli.py:100-113`); the tools switch to it
 before running the tool's work, a no-op when they already run as that
 identity. In a sandbox whose default user is non-root, running a tool as
 root therefore requires an explicit grant from the eval author:
@@ -536,9 +549,13 @@ operation that acts on a trusted directory with elevated authority:
 
 Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
-tools user's authority, so each of those launches is checked too, cheaply. The
-full check runs once per sandbox object. Each launch then goes through
-`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-93`): shell builtins and
+tools user's authority, so each of those launches is checked too, cheaply.
+Requests sent over a bridge share its one launch, checked when the bridge
+opens; the bridge ends with the container it runs in. The server and the
+bridge load code from the tree for as long as they run, so these checks assume
+nothing running as root deletes the tree while its container runs on. The full
+check runs until it first passes on a sandbox object. Each launch then goes through
+`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-97`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
 physical path, owned by the user running the launch (uid 0 when the tools user
@@ -554,7 +571,8 @@ state, so the call raises a `SandboxReplacedError` (a `RuntimeError`) that says
 so, which fails the sample, through a sandbox MCP session too. Nothing installs
 the tools again or clears the passing check, so later tools calls on that
 sandbox object fail the same way while the directory stays missing
-(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:125-148`). A
+(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:44-53,201-213`,
+`ai/util/_sandbox/_json_rpc_bridge.py:97-107`). A
 replacement that leaves a valid tree in place is not noticed here: a tree in a
 volume that outlives the container, or one the sandbox's own setup puts back,
 such as tools pre-staged by an init container, which runs again in a new VM.

@@ -6,8 +6,8 @@ import base64
 import binascii
 import json
 import re
-from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from inspect_ai._util._json_rpc import (
@@ -20,7 +20,16 @@ from inspect_ai._util._json_rpc import (
 if TYPE_CHECKING:
     from .environment import SandboxEnvironment
 
+from .._subprocess import ExecResult
 from ._cli import SANDBOX_CLI, SANDBOX_TOOLS_DIR, TOOLS_DIR_REFUSED, tools_cli_command
+from ._json_rpc_bridge import (
+    BRIDGE_METHODS,
+    BridgeUnavailable,
+    bridge_enabled,
+    bridge_error,
+    bridge_open,
+    bridge_request,
+)
 from .limits import SandboxEnvironmentLimits
 
 
@@ -30,6 +39,18 @@ class SandboxReplacedError(RuntimeError):
     The tools tree went away since, so the sandbox was most likely replaced and
     lost the sample's state. Not a tool error: the sample fails.
     """
+
+
+def sandbox_replaced_error(failed: str, reason: str = "") -> SandboxReplacedError:
+    """The error for a launch of the tools CLI that printed `TOOLS_DIR_REFUSED`."""
+    return SandboxReplacedError(
+        "The sandbox was most likely replaced (its container restarted, or its"
+        " VM died) and lost the sample's state: the sandbox tools directory"
+        f" installed earlier ({SANDBOX_TOOLS_DIR}) is missing or no longer the"
+        " one installed, unless something in the sandbox removed or changed it."
+        f" The tools are not installed again. Failed call: {failed}"
+        + (f". The check reported: {reason}" if reason else "")
+    )
 
 
 _JSON_RPC_RESPONSE_CHUNK_METHOD = "__inspect_json_rpc_response_chunk__"
@@ -60,16 +81,37 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         self,
         sandbox: SandboxEnvironment,
         cli: str,
+        *,
+        bridge: bool = False,
     ):
         """Initialize a new SandboxJSONRPCTransport.
 
         Args:
             sandbox: The sandbox environment to use.
             cli: The path to the cli available in the sandbox.
+            bridge: Send the requests in `BRIDGE_METHODS` over the sandbox's
+                bridge when `INSPECT_EXEC_REMOTE_BRIDGE` is `1` or `true` (see
+                `_json_rpc_bridge`).
         """
         self.sandbox = sandbox
         self.cli = cli
         self._response_chunking = cli == SANDBOX_CLI
+        self._bridge = bridge
+
+    def bridged(self, method: str, user: str | None) -> bool:
+        """Whether a request would go over an open bridge, so it needs no exec.
+
+        Send it with `bridge_only`, since the bridge can close (or the request
+        not fit in a frame) before it is sent.
+        """
+        return (
+            self._bridge
+            and method in BRIDGE_METHODS
+            and bridge_enabled()
+            and bridge_open(
+                self.sandbox, user, SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+            )
+        )
 
     async def __call__(
         self,
@@ -84,14 +126,17 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             method: The JSON-RPC method to call.
             params: The parameters for the JSON-RPC method.
             is_notification: Whether this is a notification (no response expected).
-            **transport_extra_args: Additional parameters including timeout and user.
+            **transport_extra_args: Additional parameters including timeout and
+                user, and `bridge_only`, which sends the request only over a bridge.
 
         Returns:
             The response from the RPC call.
 
         Raises:
             RuntimeError: If the sandbox execution fails.
+            BridgeUnavailable: If no bridge sent a `bridge_only` request.
         """
+        bridge_only = transport_extra_args.pop("bridge_only", False)
         request = create_json_rpc_request(method, params, is_notification)
         max_response_bytes = (
             SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
@@ -99,10 +144,12 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             else None
         )
         response = await self._sandbox_exec(
+            method,
             request,
             rpc_call_description(method, params),
             transport_extra_args,
             max_response_bytes,
+            bridge_only,
         )
         if max_response_bytes is None:
             return response
@@ -112,11 +159,40 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
 
     async def _sandbox_exec(
         self,
+        method: str,
         request: str,
         description: str,
         transport_extra_args: dict[str, Any],
         max_response_bytes: int | None,
+        bridge_only: bool = False,
     ) -> str:
+        if (
+            self._bridge
+            and max_response_bytes is not None
+            and method in BRIDGE_METHODS
+            and bridge_enabled()
+        ):
+            started = datetime.now(timezone.utc)
+            reply = await bridge_request(
+                self.sandbox,
+                transport_extra_args.get("user", None),
+                request,
+                description,
+                transport_extra_args.get("timeout", None),
+                max_response_bytes,
+            )
+            if reply is not None:
+                error = bridge_error(reply)
+                self._record_bridged(
+                    started, request, reply, error, transport_extra_args
+                )
+                if error is not None:
+                    raise RuntimeError(
+                        f"Sandbox.exec failure executing {description}: {error}"
+                    )
+                return reply
+        if bridge_only:
+            raise BridgeUnavailable(f"No sandbox tools bridge sent {description}")
         env = (
             {_JSON_RPC_RESPONSE_MAX_BYTES_ENV: str(max_response_bytes)}
             if max_response_bytes is not None
@@ -134,18 +210,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             concurrency=transport_extra_args.get("concurrency", True),
         )
         if tools_cli and exec_result.stdout.strip() == TOOLS_DIR_REFUSED:
-            # The install check passed on this sandbox object before any launch, so
-            # the tree went away since. Installing it again would let the sample carry
-            # on in a container that lost its state.
-            reason = exec_result.stderr.strip()
-            raise SandboxReplacedError(
-                "The sandbox was most likely replaced (its container restarted, or its"
-                " VM died) and lost the sample's state: the sandbox tools directory"
-                f" installed earlier ({SANDBOX_TOOLS_DIR}) is missing or no longer the"
-                " one installed, unless something in the sandbox removed or changed it."
-                f" The tools are not installed again. Failed call: {description}"
-                + (f". The check reported: {reason}" if reason else "")
-            )
+            raise sandbox_replaced_error(description, exec_result.stderr.strip())
 
         if not exec_result.success:
             # Prefer stderr, but fall back to stdout — some failures
@@ -173,6 +238,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         handle = chunk.handle
         total_size = chunk.total_size
         expected_offset = 0
+        whole = False
         try:
             while True:
                 _validate_response_chunk(
@@ -188,14 +254,17 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                             "Chunked JSON-RPC response size did not match metadata"
                         )
                     try:
-                        return response_bytes.decode("utf-8")
+                        text = response_bytes.decode("utf-8")
                     except UnicodeDecodeError:
                         raise RuntimeError(
                             "Chunked JSON-RPC response was not valid UTF-8"
                         ) from None
+                    whole = True
+                    return text
 
                 expected_offset = chunk.next_offset
                 next_response = await self._sandbox_exec(
+                    _JSON_RPC_RESPONSE_CHUNK_METHOD,
                     create_json_rpc_request(
                         _JSON_RPC_RESPONSE_CHUNK_METHOD,
                         {"handle": handle, "offset": expected_offset},
@@ -210,7 +279,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 chunk = next_chunk
         finally:
             await self._release_chunked_response(
-                handle, transport_extra_args, max_response_bytes
+                handle, transport_extra_args, max_response_bytes, whole
             )
 
     async def _release_chunked_response(
@@ -218,14 +287,21 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         handle: str,
         transport_extra_args: dict[str, Any],
         max_response_bytes: int,
+        whole: bool,
     ) -> None:
+        """Release a chunked reply's files on the server.
+
+        A refused release fails a reply that came in `whole`; it does not replace an
+        error already on its way (a cancellation, say).
+        """
         cleanup_args = {
             **transport_extra_args,
             "timeout": 5,
             "timeout_retry": False,
         }
-        with suppress(Exception):
+        try:
             await self._sandbox_exec(
+                _JSON_RPC_RESPONSE_CHUNK_METHOD,
                 create_json_rpc_request(
                     _JSON_RPC_RESPONSE_CHUNK_METHOD,
                     {"handle": handle, "release": True},
@@ -234,6 +310,35 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 "chunked JSON-RPC response cleanup",
                 cleanup_args,
                 max_response_bytes,
+            )
+        except SandboxReplacedError:
+            if whole:
+                raise
+        except Exception:
+            pass  # best effort: the server drops stale chunks itself
+
+    def _record_bridged(
+        self,
+        started: datetime,
+        request: str,
+        reply: str,
+        error: str | None,
+        transport_extra_args: dict[str, Any],
+    ) -> None:
+        """Record the exec event its own exec would, with the command `<cli> bridge`."""
+        from .events import SandboxEnvironmentProxy
+
+        if isinstance(self.sandbox, SandboxEnvironmentProxy):
+            self.sandbox.record_exec(
+                started,
+                [self.cli, "bridge"],
+                request,
+                ExecResult(True, 0, reply, "")
+                if error is None
+                else ExecResult(False, 1, "", error),
+                user=transport_extra_args.get("user", None),
+                timeout=transport_extra_args.get("timeout", None),
+                timeout_retry=transport_extra_args.get("timeout_retry", True),
             )
 
 

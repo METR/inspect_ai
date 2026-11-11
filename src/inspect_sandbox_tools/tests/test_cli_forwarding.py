@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import pytest
 from inspect_sandbox_tools._cli import main as main_module
@@ -115,6 +116,64 @@ def test_forwarding_refuses_a_request_to_run_as_another_user(
         main_module._exec(json.dumps(request))
 
     assert forwarded == []
+
+
+def test_bridge_reports_a_request_the_server_never_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where `exec` would exit non-zero, `bridge` replies with an error the host raises."""
+
+    def unanswered(socket_path: str, request_json_str: str) -> str:
+        raise ConnectionError("server closed the connection " + "x" * 5000)
+
+    monkeypatch.setattr(main_module, "_ensure_server_is_running", lambda: None)
+    monkeypatch.setattr(main_module, "_json_rpc_unix_call", unanswered)
+    request = {"jsonrpc": "2.0", "method": "remote_version", "id": 7}
+
+    reply = main_module._bridge_reply(request, json.dumps(request), 1024)
+
+    assert len(reply) + 1 <= 1024
+    assert json.loads(reply)["id"] == 7
+    assert json.loads(reply)["__inspect_bridge_error__"].startswith(
+        "ConnectionError: server closed the connection"
+    )
+
+
+def test_bridge_requests_take_turns_starting_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server setup changes the process umask, so concurrent requests never overlap there."""
+    inside = 0
+    most_inside = 0
+    count_lock = threading.Lock()
+
+    def setup() -> None:
+        nonlocal inside, most_inside
+        with count_lock:
+            inside += 1
+            most_inside = max(most_inside, inside)
+        time.sleep(0.02)
+        with count_lock:
+            inside -= 1
+
+    monkeypatch.setattr(main_module, "_ensure_server_is_running", setup)
+    monkeypatch.setattr(
+        main_module, "_json_rpc_unix_call", lambda path, request: '{"result": 1}'
+    )
+    start = threading.Barrier(8)
+
+    def request(id: int) -> None:
+        request = {"jsonrpc": "2.0", "method": "remote_version", "id": id}
+        start.wait()
+        main_module._bridge_reply(request, json.dumps(request), 65536)
+
+    threads = [threading.Thread(target=request, args=(id,)) for id in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert most_inside == 1
 
 
 @pytest.mark.parametrize(

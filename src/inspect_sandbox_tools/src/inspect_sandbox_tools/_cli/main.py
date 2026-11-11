@@ -9,6 +9,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -79,6 +80,14 @@ _SERVER_PROCESS_STOP_TIMEOUT = 5
 # Kept as names so that forwarding does not import the tools (load_tools does).
 _IN_PROCESS_TOOLS = frozenset({"text_editor", "version"})
 
+# `bridge` writes this line before any reply, so the host knows the mode is
+# supported before routing requests over it. Both are also defined in
+# inspect_ai.util._sandbox._json_rpc_bridge — keep in sync.
+_BRIDGE_READY = (
+    '{"jsonrpc":"2.0","method":"__inspect_bridge_ready__","params":{"version":1}}'
+)
+_BRIDGE_ERROR_FIELD = "__inspect_bridge_error__"
+
 
 def main() -> None:
     args = _parse_args()
@@ -87,6 +96,8 @@ def main() -> None:
             healthcheck()
         case "exec":
             _exec(args.request)
+        case "bridge":
+            _bridge(args.max_frame_bytes)
         case "start-server":
             start_server()
         case "stop-server":
@@ -271,6 +282,96 @@ def _exec(request: str | None) -> None:
     print(chunk_json_rpc_response_if_needed(request_data, response, spill=spill))
 
 
+def _bridge(max_frame_bytes: int) -> None:
+    """Forward requests read from stdin, one per line, until stdin closes.
+
+    The host keeps one `bridge` exec open per sandbox and tools user instead of
+    starting `exec` for each request. Requests run concurrently, so a request the
+    server holds does not delay the others. Each reply is written as one line
+    when it is ready, and the host matches replies to requests by ID. Only
+    requests the server handles are accepted, plus fetches of spilled replies:
+    `exec` runs an in-process tool as the request's user (`_run_as`), which a
+    long-lived process cannot switch to, and the server would run it as itself.
+
+    A reply longer than ``max_frame_bytes`` (with its newline) is spilled and
+    fetched in pieces, as for `exec`. When the server never answered a request
+    (it could not be started or reached, or closed the connection), the reply
+    carries an error under ``_BRIDGE_ERROR_FIELD``, where `exec` would exit
+    non-zero. A line that is not a request with an ID, or is longer than
+    ``max_frame_bytes``, ends the bridge. Requests still running when stdin
+    closes end with it: the host closes a bridge only once no request waits on
+    it, or when it drops one, and then sends its requests again.
+    """
+    write_lock = threading.Lock()
+
+    def reply(response: str) -> None:
+        with write_lock:
+            sys.stdout.buffer.write(response.encode("utf-8") + b"\n")
+            sys.stdout.buffer.flush()
+
+    def forward(request_data: dict[str, Any], request_json_str: str) -> None:
+        reply(_bridge_reply(request_data, request_json_str, max_frame_bytes))
+
+    reply(_BRIDGE_READY)
+    while line := sys.stdin.buffer.readline(max_frame_bytes):
+        if not line.endswith(b"\n"):
+            raise ValueError("Bridge request is longer than the frame limit")
+        request_json_str = line.decode("utf-8").strip()
+        request_data = json.loads(request_json_str)
+        _request_method(request_data)
+        if "id" not in request_data:
+            raise ValueError("Bridge requests must have an ID")
+        threading.Thread(
+            target=forward, args=(request_data, request_json_str), daemon=True
+        ).start()
+    # Requests still running are abandoned, and a thread writing a reply now
+    # would make interpreter shutdown abort.
+    os._exit(0)
+
+
+# Creating a private directory sets the process umask for a moment, and a server
+# started meanwhile would keep that umask for every command it runs. So `bridge`
+# threads take turns at the steps that can do either.
+_BRIDGE_SETUP_LOCK = threading.Lock()
+
+
+def _bridge_reply(
+    request_data: dict[str, Any], request_json_str: str, max_frame_bytes: int
+) -> str:
+    """Answer one request read by `bridge` with a line of at most the frame limit."""
+    method = request_data["method"]
+    params = request_data.get("params")
+    try:
+        if method == JSON_RPC_RESPONSE_CHUNK_METHOD:
+            return handle_json_rpc_response_chunk_request(request_data, max_frame_bytes)
+        if method in _IN_PROCESS_TOOLS or (
+            isinstance(params, dict) and "_run_as" in params
+        ):
+            raise ValueError(f"{method} cannot be sent over the bridge")
+        with _BRIDGE_SETUP_LOCK:
+            _ensure_server_is_running()
+        response = _json_rpc_unix_call(str(SOCKET_PATH), request_json_str)
+        with _BRIDGE_SETUP_LOCK:
+            return chunk_json_rpc_response_if_needed(
+                request_data, response, max_frame_bytes
+            )
+    except Exception as ex:
+        return _bridge_error(
+            request_data["id"], f"{type(ex).__name__}: {ex}", max_frame_bytes
+        )
+
+
+def _bridge_error(request_id: Any, error: str, max_frame_bytes: int) -> str:
+    """A reply carrying `error`, shortened until the line fits in a frame."""
+    while True:
+        reply = json.dumps(
+            {"jsonrpc": "2.0", "id": request_id, _BRIDGE_ERROR_FIELD: error}
+        )
+        if len(reply) + 1 <= max_frame_bytes or not error:
+            return reply
+        error = error[: len(error) // 2]
+
+
 def _request_method(request_data: Any) -> str:
     """Return the method of a request that JSONRPCIncoming would accept.
 
@@ -408,6 +509,9 @@ def _ensure_server_is_running_locked() -> None:
                 # Dev/test mode: use Python interpreter with module invocation
                 else [sys.executable, "-m", "inspect_sandbox_tools._cli.main", "server"]
             ),
+            # Not this process's stdin: under `bridge` it carries the host's
+            # requests, and commands started without input inherit the server's.
+            stdin=subprocess.DEVNULL,
             stdout=stdout_log,
             stderr=stderr_log,
             env={**os.environ, SERVER_DIR_ENV: str(SERVER_DIR)},
@@ -547,6 +651,8 @@ def _parse_args() -> argparse.Namespace:
     )
     exec_parser = subparsers.add_parser("exec")
     exec_parser.add_argument(dest="request", type=str, nargs="?")
+    bridge_parser = subparsers.add_parser("bridge")
+    bridge_parser.add_argument("--max-frame-bytes", type=int, required=True)
     subparsers.add_parser("start-server")
     subparsers.add_parser("stop-server")
     subparsers.add_parser("server")

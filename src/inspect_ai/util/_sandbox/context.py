@@ -215,7 +215,7 @@ async def sandbox_with_injection(
 
     # belt and suspenders in case subclasses forget to call __init__
     if not hasattr(target_sandbox, "_inject_lock"):
-        target_sandbox._inject_lock = anyio.Lock()
+        target_sandbox._inject_lock = anyio.Lock(fast_acquire=True)
 
     async with target_sandbox._inject_lock:
         # refresh the needed injections
