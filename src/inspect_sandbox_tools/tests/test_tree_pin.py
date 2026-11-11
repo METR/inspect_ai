@@ -4,6 +4,7 @@ import importlib
 import io
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -59,6 +60,12 @@ def test_a_tree_opened_to_other_users_counts_as_replaced(tree: Path) -> None:
     assert tree_pin.tree_replaced()
 
 
+def test_a_deleted_tree_counts_as_replaced(tree: Path) -> None:
+    shutil.rmtree(tree)
+
+    assert tree_pin.tree_replaced()
+
+
 def test_a_tree_not_private_at_start_is_not_taken_for_a_replaced_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -73,35 +80,47 @@ def test_a_tree_not_private_at_start_is_not_taken_for_a_replaced_one(
     importlib.import_module("colorsys")  # any module not imported yet
 
 
-def test_no_server_is_started_from_a_replaced_tree(
-    tree: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.fixture
+def server_dir_in_tree(tree: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The server's files inside the tree, as for a frozen bundle."""
+    server_dir = tree / ".server"
+    paths = {
+        "SERVER_DIR": server_dir,
+        "SOCKET_PATH": server_dir / "sandbox-tools.sock",
+        "SERVER_PID_PATH": server_dir / "server.pid",
+        "SHUTDOWN_STATUS_PATH": server_dir / "shutdown-status.json",
+        "_SERVER_START_LOCK_PATH": server_dir / "server-start.lock",
+        "_SERVER_STDOUT_LOG": server_dir / "server-stdout.log",
+        "_SERVER_STDERR_LOG": server_dir / "server-stderr.log",
+    }
+    for name, path in paths.items():
+        monkeypatch.setattr(main_module, name, path)
+    importlib.import_module("psutil")  # as in a bridge that started a server before
+    return server_dir
+
+
+def test_nothing_in_a_replaced_tree_is_touched_to_start_a_server(
+    tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[object] = []
-    monkeypatch.setattr(main_module.subprocess, "Popen", started.append)
+    monkeypatch.setattr(subprocess, "Popen", started.append)
     _replace(tree, {})
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running()
     assert started == []
+    assert list(tree.iterdir()) == []
 
 
 def test_a_tree_replaced_while_waiting_to_start_the_server_is_refused(
-    tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Waiting for another starter can take seconds, so it is checked again."""
-    importlib.import_module("psutil")  # as in a bridge that started the server before
     started: list[object] = []
-    monkeypatch.setattr(main_module.subprocess, "Popen", started.append)
-    for name in ("SOCKET_PATH", "SERVER_PID_PATH", "SHUTDOWN_STATUS_PATH"):
-        monkeypatch.setattr(main_module, name, tmp_path / name)
-    for name in ("_SERVER_STDOUT_LOG", "_SERVER_STDERR_LOG"):
-        monkeypatch.setattr(main_module, name, tmp_path / name)
-
-    def replaced_meanwhile() -> bool:
-        _replace(tree, {})
-        return False
-
-    monkeypatch.setattr(main_module, "_can_connect_to_socket", replaced_meanwhile)
+    monkeypatch.setattr(subprocess, "Popen", started.append)
+    main_module._ensure_private_server_dirs()
+    _replace(tree, {})
+    main_module._ensure_private_server_dirs()  # an earlier starter made them again
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running_locked()
@@ -119,16 +138,15 @@ def test_the_bridge_ends_once_its_tree_is_replaced(
     def exit_process(status: int) -> None:
         raise Exited(status)
 
-    taken: list[object] = []
-    monkeypatch.setattr(main_module, "_bridge_reply", lambda *args: taken.append(args))
     monkeypatch.setattr(os, "_exit", exit_process)
     request = b'{"jsonrpc": "2.0", "method": "remote_version", "id": 1}\n'
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(request)))
-    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO()))
+    stdout = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(stdout))
     _replace(tree, {})
 
     with pytest.raises(Exited) as exited:
         main_module._bridge(65536)
 
     assert exited.value.args == (1,)
-    assert taken == []
+    assert stdout.getvalue().splitlines() == [main_module._BRIDGE_READY.encode()]

@@ -21,7 +21,7 @@ def pin_tree(path: str) -> None:
     """Pin the tree at `path`, and refuse imports once the path names another one."""
     global _tree
     # Kept open for the life of the process, so no other directory can take the inode.
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     _tree = (path, os.fstat(fd))
     sys.meta_path.insert(0, _TreeGuard())
 

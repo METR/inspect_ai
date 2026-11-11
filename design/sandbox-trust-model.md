@@ -555,8 +555,8 @@ opens; the bridge ends with the container it runs in. A tools process that
 outlives its launch (the server, a bridge, the model proxy) keeps reading the
 tree by path, so it holds the directory it started from open, and before each
 later import, and before starting a server, checks that the path still names
-that directory with the owner and mode the launch check wants
-(`inspect_sandbox_tools/_util/tree_pin.py`). A bridge whose tree was replaced
+that directory, with the owner and mode it had at start, which the launch check
+required (`guest/_util/tree_pin.py`). A bridge whose tree was replaced
 ends, and the host's next launch through the check is refused; an import or a
 server start fails instead of reading the new tree. The bundle's library path
 also points into the tree for the life of each process, so the server loads
