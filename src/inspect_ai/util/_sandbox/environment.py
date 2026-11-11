@@ -193,17 +193,20 @@ class SandboxEnvironment(abc.ABC):
     # than an `__init__` assignment because several providers do not call
     # `SandboxEnvironment.__init__`.
     _root_access: RootAccess | None = None
+    # True once a check on this object found a trustworthy sandbox-tools install,
+    # so later calls skip the check (see `_sandbox_tools_installed`). Class-level
+    # for the same reason as `_root_access`.
+    _tools_injected: bool = False
     _exec_remote_wait_supported: bool | None = None
     _exec_remote_acks: tuple[str, ...] = ()
     _json_rpc_bridges: _Bridges | None = None
 
     def __init__(self) -> None:
         self._inject_lock = anyio.Lock()
-        self._tools_injected: bool = False
         self._tools_user: str | None = None
         # True once the sandbox-tools user has been recorded for this object (root
         # or, for a rootless sandbox, the default user), so the detector checks as
-        # that user without re-deriving it on every tool call. `_tools_user is
+        # that user without re-deriving it each time it runs. `_tools_user is
         # None` alone cannot say this because None also means "default user".
         self._tools_user_resolved: bool = False
         self._tools_default_user: SandboxDefaultUser | None = None
@@ -482,10 +485,8 @@ class SandboxEnvironment(abc.ABC):
             sandbox_with_injected_tools,
         )
 
-        # inject tools (use flag for fast path)
-        if not self._tools_injected:
-            await sandbox_with_injected_tools(sandbox=self)
-            self._tools_injected = True
+        # Cheap once the tools are verified, and waits out an injection in progress.
+        await sandbox_with_injected_tools(sandbox=self)
 
         return await (exec_remote_streaming if stream else exec_remote_awaitable)(
             self, cmd, self.default_polling_interval(), options

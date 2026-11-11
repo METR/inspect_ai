@@ -47,7 +47,8 @@ When a tool needs to run in a container, the system automatically injects the ap
    decides once per sandbox at sample init, before solver/agent execution, or on
    first use outside that lifecycle. Whichever user the tools are
    found (or installed) under becomes the tools user. A merely readable launcher is
-   not enough.
+   not enough. The check runs until it passes once on a sandbox object, and never
+   again on that object.
 3. If missing, the injection process:
    - Detects container architecture (amd64/arm64) and libc (glibc/musl)
    - Selects the matching pre-built artifact from local binaries, S3, or a local Docker build
@@ -73,7 +74,12 @@ Tools communicate through a two-layer RPC architecture:
 
 **Layer 1 - Host to Container (stateless):**
 1. Tool creates JSON-RPC request on host
-2. `SandboxJSONRPCTransport` executes: `sandbox.exec(["/var/tmp/.da7be258e003d428/inspect-sandbox-tools", "exec"], input=json_rpc_request)`
+2. `SandboxJSONRPCTransport` executes `sandbox.exec(tools_cli_command("exec", user=tools_user), input=json_rpc_request)`:
+   `/bin/sh` runs a short check (shell builtins and `stat`) that the tools directory is still a real one,
+   owned by the user running it (uid 0 for a root tools user), mode 0700, then execs `/var/tmp/.da7be258e003d428/inspect-sandbox-tools exec`. If the
+   check refuses, nothing runs and the call fails with an error naming a replaced sandbox (a restarted
+   container, or a VM that died). The tools are never installed again on that sandbox, so later calls fail
+   too while the directory stays missing
 3. JSON-RPC payload passed via stdin to the injected executable
 4. Response returns via stdout. A response larger than the host's exec output limit is
    spilled to a chunk file in `.server/chunks` (private to the tools user) and fetched

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .environment import SandboxEnvironment
 
 from .._subprocess import ExecResult
-from ._cli import SANDBOX_CLI
+from ._cli import SANDBOX_CLI, SANDBOX_TOOLS_DIR, TOOLS_DIR_REFUSED, tools_cli_command
 from ._json_rpc_bridge import (
     BRIDGE_METHODS,
     BridgeUnavailable,
@@ -32,6 +32,15 @@ from ._json_rpc_bridge import (
     bridge_request,
 )
 from .limits import SandboxEnvironmentLimits
+
+
+class SandboxReplacedError(RuntimeError):
+    """A launch of the sandbox tools was refused after their install check passed.
+
+    The tools tree went away since, so the sandbox was most likely replaced and
+    lost the sample's state. Not a tool error: the sample fails.
+    """
+
 
 _JSON_RPC_RESPONSE_CHUNK_METHOD = "__inspect_json_rpc_response_chunk__"
 _JSON_RPC_RESPONSE_CHUNK_FIELD = "__inspect_json_rpc_response_chunk__"
@@ -178,15 +187,30 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             if max_response_bytes is not None
             else None
         )
+        tools_cli = self.cli == SANDBOX_CLI
+        user = transport_extra_args.get("user", None)
         exec_result = await self.sandbox.exec(
-            [self.cli, "exec"],
+            tools_cli_command("exec", user=user) if tools_cli else [self.cli, "exec"],
             input=request,
             env=env,
             timeout=transport_extra_args.get("timeout", None),
             timeout_retry=transport_extra_args.get("timeout_retry", True),
-            user=transport_extra_args.get("user", None),
+            user=user,
             concurrency=transport_extra_args.get("concurrency", True),
         )
+        if tools_cli and exec_result.stdout.strip() == TOOLS_DIR_REFUSED:
+            # The install check passed on this sandbox object before any launch, so
+            # the tree went away since. Installing it again would let the sample carry
+            # on in a container that lost its state.
+            reason = exec_result.stderr.strip()
+            raise SandboxReplacedError(
+                "The sandbox was most likely replaced (its container restarted, or its"
+                " VM died) and lost the sample's state: the sandbox tools directory"
+                f" installed earlier ({SANDBOX_TOOLS_DIR}) is missing or no longer the"
+                " one installed, unless something in the sandbox removed or changed it."
+                f" The tools are not installed again. Failed call: {description}"
+                + (f". The check reported: {reason}" if reason else "")
+            )
 
         if not exec_result.success:
             # Prefer stderr, but fall back to stdout — some failures

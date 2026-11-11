@@ -11,6 +11,7 @@ import anyio.lowlevel
 import pytest
 from anyio.abc import ByteStream, TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from test_helpers.sandbox import CannedSandbox
 from typing_extensions import override
 
 from inspect_ai._eval.task.sandbox import sandboxenv_context
@@ -20,7 +21,11 @@ from inspect_ai.event import SandboxEvent
 from inspect_ai.log._transcript import Transcript, init_transcript, transcript
 from inspect_ai.util import sandbox as current_sandbox
 from inspect_ai.util._sandbox import _json_rpc_bridge as json_rpc_bridge
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import (
+    SANDBOX_CLI,
+    TOOLS_DIR_REFUSED,
+    tools_cli_command,
+)
 from inspect_ai.util._sandbox._json_rpc_bridge import BridgeDropped, close_bridges
 from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
 from inspect_ai.util._sandbox.environment import (
@@ -241,6 +246,24 @@ async def test_legacy_sandbox_transport_does_not_enable_chunk_protocol() -> None
     transport = SandboxJSONRPCTransport(FakeSandbox(), "inspect-tool-support")  # type: ignore[arg-type]
 
     assert await transport("legacy", {}, False) == response
+
+
+async def test_sandbox_tools_cli_is_launched_after_the_directory_check() -> None:
+    sandbox = CannedSandbox.returning(ExecResult(True, 0, _success_response(), ""))
+    for cli in (SANDBOX_CLI, "inspect-tool-support"):
+        await SandboxJSONRPCTransport(sandbox, cli)("m", {}, False)
+
+    assert [cmd for cmd, _ in sandbox.exec_calls] == [
+        tools_cli_command("exec", user=None),
+        ["inspect-tool-support", "exec"],
+    ]
+
+
+async def test_a_reply_that_carries_the_refusal_marker_is_a_reply() -> None:
+    """Only the check's own output, the marker alone, is a refusal."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": TOOLS_DIR_REFUSED})
+    sandbox = CannedSandbox.returning(ExecResult(True, 0, reply, ""))
+    assert await SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)("m", {}, False) == reply
 
 
 async def test_sandbox_exec_error_uses_stdout_when_stderr_is_empty() -> None:

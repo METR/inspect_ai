@@ -24,7 +24,10 @@ from inspect_ai.tool._sandbox_tools_utils._error_mapper import (
 )
 from inspect_ai.tool._sandbox_tools_utils.sandbox import sandbox_with_injected_tools
 from inspect_ai.util._sandbox._cli import SANDBOX_CLI, tools_user_param
-from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
+from inspect_ai.util._sandbox._json_rpc_transport import (
+    SandboxJSONRPCTransport,
+    SandboxReplacedError,
+)
 
 from ._compat import (
     JSONRPC_MESSAGE_VALIDATOR,
@@ -44,6 +47,11 @@ DEFAULT_SANDBOX_TIMEOUT = 180
 # `sandbox_client` teardown. Kept short and independent of the per-request
 # timeout so a slow/broken transport cannot stall teardown.
 _KILL_SERVER_TIMEOUT = 30
+
+# The error code for a request a replaced sandbox refused. It is outside the codes
+# `_local.py` maps to a ToolError, so the call raises a RuntimeError instead, which
+# fails the sample, and outside the ranges JSON-RPC, LSP and MCP use.
+_SANDBOX_REPLACED_CODE = -32900
 
 
 # Pardon the type: ignore's here. This code is a modified clone of Anthropic code
@@ -128,7 +136,8 @@ async def sandbox_client(  # type: ignore
                             # which surfaces as a bare CancelledError on call_tool.
                             # Turn it into a JSON-RPC error on the same request id
                             # so ClientSession raises McpError and _local.py maps
-                            # it to ToolError. (Cancelled / KeyboardInterrupt
+                            # it to ToolError, or, for a replaced sandbox, to a
+                            # RuntimeError. (Cancelled / KeyboardInterrupt
                             # inherit from BaseException and still propagate.)
                             if isinstance(ex, TimeoutError):
                                 error_message = (
@@ -143,7 +152,9 @@ async def sandbox_client(  # type: ignore
                                             jsonrpc="2.0",
                                             id=root.id,
                                             error=ErrorData(
-                                                code=INTERNAL_ERROR,
+                                                code=_SANDBOX_REPLACED_CODE
+                                                if isinstance(ex, SandboxReplacedError)
+                                                else INTERNAL_ERROR,
                                                 message=error_message,
                                                 data=None,
                                             ),
