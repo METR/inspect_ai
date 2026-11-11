@@ -90,7 +90,7 @@ class _Bridge:
         self._reading = False
         self._read_scope: anyio.CancelScope | None = None
         self._turn = anyio.Event()
-        self._send_lock = anyio.Lock()
+        self._send_lock = anyio.Lock(fast_acquire=True)  # free: no turn of the loop
         self.dropped: str | None = None
         """Why the bridge can take no more requests, once it cannot."""
 
@@ -199,7 +199,7 @@ class _Bridge:
 class _Bridges:
     """A sandbox's bridges, by tools user and frame limit."""
 
-    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    lock: anyio.Lock = field(default_factory=lambda: anyio.Lock(fast_acquire=True))
     by_key: dict[tuple[str | None, int], _Bridge | None] = field(default_factory=dict)
     """An open bridge, or None when the sandbox cannot run one."""
     closed: bool = False

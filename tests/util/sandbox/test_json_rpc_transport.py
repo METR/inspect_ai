@@ -528,6 +528,39 @@ async def test_bridge_matches_out_of_order_replies_by_id() -> None:
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_request_over_an_open_bridge_is_sent_without_a_turn_of_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each turn of a busy runner's event loop is a burst of other work."""
+    turns = 0
+    turns_at_send: list[int] = []
+    send = _Pipe.send
+
+    async def counted_send(self: _Pipe, item: bytes) -> None:
+        turns_at_send.append(turns)
+        await send(self, item)
+
+    async def other_work() -> None:
+        nonlocal turns
+        while True:
+            turns += 1
+            await anyio.lowlevel.checkpoint()
+
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        await _result(transport, "exec_remote_poll_wait")  # opens the bridge
+        monkeypatch.setattr(_Pipe, "send", counted_send)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(other_work)
+            await anyio.lowlevel.checkpoint()  # it runs once
+            before = turns
+            await _result(transport, "exec_remote_poll_wait")
+            tg.cancel_scope.cancel()
+
+    assert turns_at_send[0] == before
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_bridge_resends_a_request_lost_with_a_dropped_bridge() -> None:
     async def serve(bridge: _FakeBridge) -> None:
         await bridge.ready()
