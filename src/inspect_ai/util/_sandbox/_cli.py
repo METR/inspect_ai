@@ -39,16 +39,32 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # only if the directory is still a real one, owned by the user running this, mode
 # 0700 (and owned by uid 0 when root runs it, see `tools_cli_command`). In a
 # subshell, with shell builtins and `stat` (two program starts), so the command
-# keeps the caller's PATH, environment and working directory. The final `exec`
+# keeps the caller's PATH and working directory. The final `exec`
 # looks the path up again, which is safe once the check passed: only the owner can
 # move that directory out of its parent, which the full check required to be
 # sticky or closed to others. A refusal exits 0 because k8s_sandbox
 # raises, hiding the output, when an exec fails right after a container restart,
 # which is when refusals happen.
+#
+# The subshell prints the directory's physical path, from which the launch sets the
+# environment the PyInstaller bootloader would set and then re-exec itself to apply
+# (the onedir restart in pyi_main.c of 6.22.3, which built the bundled CLI), so the
+# CLI starts as one program, not two. `_PYI_ARCHIVE_FILE` has to be the launcher's
+# real path, as /proc/self/exe resolves it, or the bootloader restarts anyway with
+# the bundle's library path saved as the caller's. `_cli/main.py` drops these for
+# every child it starts. `test_a_launch_starts_the_bundled_cli_once` checks the
+# bundled bootloader still takes them.
 _TOOLS_DIR_CHECK = (
-    '(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
-    ' && [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$(stat -c @FORMAT@ .)" = @WANT@ ])'
+    'd=$(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
+    ' && [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$(stat -c @FORMAT@ .)" = @WANT@ ]'
+    ' && printf %s "$PWD")'
     f" || {{ echo {TOOLS_DIR_REFUSED}; exit 0; }}; shift 2;"
+    " unset PYINSTALLER_RESET_ENVIRONMENT _PYI_APPLICATION_HOME_DIR _PYI_SPLASH_IPC"
+    " _PYI_LINUX_PROCESS_NAME;"
+    f' export _PYI_ARCHIVE_FILE="$d/{SANDBOX_TOOLS_BASE_NAME}" _PYI_PARENT_PROCESS_LEVEL=-1;'
+    ' case $LD_LIBRARY_PATH in "") export LD_LIBRARY_PATH="$d/_internal" ;;'
+    ' *) export LD_LIBRARY_PATH_ORIG="$LD_LIBRARY_PATH"'
+    ' LD_LIBRARY_PATH="$d/_internal:$LD_LIBRARY_PATH" ;; esac;'
     ' exec "$@"'
 )
 
