@@ -1410,13 +1410,15 @@ async def test_a_kept_command_is_dropped_once_its_process_ends(
         await _ack(controller, later)
 
         assert job_refs[0]() is None
-        with contextlib.suppress(psutil.NoSuchProcess):
-            psutil.Process(int(later_pid.read_text())).kill()
     finally:
+        for file in (tmp_path / "pid", tmp_path / "later"):
+            with contextlib.suppress(FileNotFoundError, psutil.NoSuchProcess):
+                psutil.Process(int(file.read_text())).kill()
+            if not reaped:  # ours to reap as the subreaper
+                with contextlib.suppress(ChildProcessError, FileNotFoundError):
+                    os.waitpid(int(file.read_text()), 0)
         if not reaped:
             libc.prctl(36, 0, 0, 0, 0)
-            with contextlib.suppress(ChildProcessError, FileNotFoundError):
-                os.waitpid(int(pid_file.read_text()), 0)
 
 
 async def test_retention_limits_do_not_evict_running_jobs(
