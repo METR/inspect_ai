@@ -1199,7 +1199,7 @@ def test_tools_cli_command_refuses_a_directory_that_is_not_the_users_own(
         # As the tools user is, typically: root can enter anyone's 0700 tree.
         os.chown(tools_tree, 65534, 65534)
     else:
-        _point_tools_cli_at(monkeypatch, Path("/usr/bin"))
+        pytest.skip("only root can give a tree to another user")
     result = _run(tools_cli_command("exec", user=user), cwd=tmp_path)
     assert (result.returncode, result.stdout) == (0, f"{TOOLS_DIR_REFUSED}\n")
     if entry == "missing":

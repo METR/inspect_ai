@@ -101,7 +101,7 @@ class _Bridge:
         raises `SandboxReplacedError` instead.
         """
         line = await self._read_line()
-        if line == TOOLS_DIR_REFUSED.encode():
+        if line.strip() == TOOLS_DIR_REFUSED.encode():
             from ._json_rpc_transport import sandbox_replaced_error
 
             raise sandbox_replaced_error("starting the sandbox tools bridge")
