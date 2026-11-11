@@ -520,7 +520,7 @@ def test_tools_cli_launches_go_through_the_directory_check() -> None:
             if not (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("exec", "exec_stdio")
+                and node.func.attr in ("exec", "exec_stdio", "exec_remote")
             ):
                 continue
             argv = _literal_argv(node)

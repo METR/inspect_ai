@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import asyncio
+import contextlib
+import grp
 import json
 import os
+import pwd
 import signal
 import socket
 import sys
@@ -103,6 +106,7 @@ def main() -> None:
     # internal location to user commands spawned by remote tools.
     os.environ.pop(SERVER_DIR_ENV, None)
     load_tools("inspect_sandbox_tools._remote_tools")
+    _load_user_lookups()
 
     ensure_private_server_dir(SERVER_DIR)
     from inspect_sandbox_tools._remote_tools._exec_remote.json_rpc_methods import (
@@ -159,6 +163,22 @@ def main() -> None:
                 _write_shutdown_status()
         finally:
             _remove_own_pid_file()
+
+
+def _load_user_lookups() -> None:
+    """Have glibc load its user and group lookup modules (NSS) now, at start.
+
+    It loads one the first time a lookup needs it, searching the library path,
+    which a frozen bundle points into its tree for the life of the process. Lookups
+    of a name that doesn't exist reach every configured module, so later lookups,
+    including those of the commands it starts before they switch user, load none.
+    """
+    name = "inspect-sandbox-tools-no-such-name"
+    for lookup in (pwd.getpwnam, grp.getgrnam):
+        with contextlib.suppress(KeyError):
+            lookup(name)
+    with contextlib.suppress(OSError):
+        os.getgrouplist(name, 0)
 
 
 def _remove_own_pid_file() -> None:
