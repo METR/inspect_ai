@@ -45,8 +45,8 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # sticky or closed to others. A refusal exits 0 because k8s_sandbox
 # raises, hiding the output, when an exec fails right after a container restart,
 # which is when refusals happen. A check that cannot run (`stat` or a fork
-# failing, as under a full process table) is no refusal: it exits 125, runs
-# nothing, and fails as an exec does.
+# failing, as under a full process table) is no refusal: it exits non-zero (125,
+# or the shell's own status), runs nothing, and fails as an exec does.
 _TOOLS_DIR_CHECK = (
     '(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2" || exit 1;'
     " s=$(stat -c @FORMAT@ .) || exit 2;"
@@ -72,7 +72,7 @@ def tools_cli_command(*args: str, user: str | None) -> list[str]:
     ``TOOLS_DIR_REFUSED``, and ``SandboxJSONRPCTransport`` fails the call with an
     error naming a replaced sandbox. Nothing installs the tools again on that sandbox
     object, so later calls fail the same way while the directory stays missing. A
-    check that cannot run exits 125 instead, running nothing.
+    check that cannot run exits non-zero instead, running nothing.
 
     ``user`` is the user the command runs as. For ``"root"`` the directory must also
     be owned by uid 0, as the full check required, so a provider that stops running
