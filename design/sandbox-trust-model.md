@@ -136,7 +136,7 @@ never revisited. In an eval, sample init calls it for every sandbox after the
 sample's files are copied and its setup script has run, and before solver or
 agent execution begins (`ai/util/_sandbox/context.py:293-297`); a sandbox used
 outside sample init is probed on first use. The verdict
-(`ai/util/_sandbox/environment.py:152-174`) is one of:
+(`ai/util/_sandbox/environment.py:157-179`) is one of:
 
 - `usable`: the tools install and run as root;
 - `unusable` (the provider refused root, or root cannot switch users): the
@@ -551,8 +551,10 @@ Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
 tools user's authority, so each of those launches is checked too, cheaply.
 Requests sent over a bridge share its one launch, checked when the bridge
-opens; the bridge ends with the container it runs in. The full check runs until
-it first passes on a sandbox object. Each launch then goes through
+opens; the bridge ends with the container it runs in. The server and the
+bridge load code from the tree for as long as they run, so these checks assume
+nothing running as root deletes the tree while its container runs on. The full
+check runs until it first passes on a sandbox object. Each launch then goes through
 `tools_cli_command` (`ai/util/_sandbox/_cli.py:35-97`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
