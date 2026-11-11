@@ -479,6 +479,7 @@ class ExecRemoteProcess:
         self._initial_result: _PollResult | None = None
         self._wait_until = 0.0
         self._held = False  # whether the server held the last request
+        self._replaced: SandboxReplacedError | None = None  # a refused kill
         rpc_timeout = (
             options.poll_timeout if options.poll_timeout is not None else RPC_TIMEOUT
         )
@@ -1055,7 +1056,9 @@ class ExecRemoteProcess:
                 )
             self._last_seq = result.seq
             self._enqueue_output(result.stdout, result.stderr)
-        except Exception:
+        except Exception as ex:
+            if isinstance(ex, SandboxReplacedError):
+                self._replaced = ex
             logging.debug(
                 f"exec_remote kill RPC failed for pid {self._pid}", exc_info=True
             )
@@ -1180,6 +1183,8 @@ async def exec_remote_awaitable(
             # Cleanup also covers an ambiguous start whose recovery request failed.
             with anyio.CancelScope(shield=True):
                 await proc.kill()
+            if isinstance(ex, TimeoutError) and proc._replaced is not None:
+                raise proc._replaced from ex  # the command timed out as it was lost
         raise
 
     # If we get here, the process was killed (no Completed event)

@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 import re
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -291,7 +290,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             "timeout": 5,
             "timeout_retry": False,
         }
-        with suppress(Exception):
+        try:
             await self._sandbox_exec(
                 _JSON_RPC_RESPONSE_CHUNK_METHOD,
                 create_json_rpc_request(
@@ -303,6 +302,10 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 cleanup_args,
                 max_response_bytes,
             )
+        except SandboxReplacedError:
+            raise
+        except Exception:
+            pass  # best effort: the server drops stale chunks itself
 
     def _record_bridged(
         self,

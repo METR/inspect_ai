@@ -227,7 +227,7 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:74-226`); over a bridge, each request
+(`ai/util/_sandbox/_json_rpc_transport.py:73-225`); over a bridge, each request
 is a line on a long-lived exec's stdin and each reply a line on its stdout. On
 this path the sandbox has no channel of its own to the host; untrusted output
 crosses the boundary only as the response to a request the host made. The host
@@ -569,7 +569,7 @@ state, so the call raises a `SandboxReplacedError` (a `RuntimeError`) that says
 so, which fails the sample, through a sandbox MCP session too. Nothing installs
 the tools again or clears the passing check, so later tools calls on that
 sandbox object fail the same way while the directory stays missing
-(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:45-54,202-214`,
+(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:44-53,201-213`,
 `ai/util/_sandbox/_json_rpc_bridge.py:97-107`). A
 replacement that leaves a valid tree in place is not noticed here: a tree in a
 volume that outlives the container, or one the sandbox's own setup puts back,

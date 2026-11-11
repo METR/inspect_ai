@@ -101,6 +101,24 @@ async def test_sandbox_json_rpc_transport_reassembles_large_unicode_response() -
     assert json.loads(exec_inputs[-1]["input"])["params"]["release"] is True
 
 
+async def test_a_chunked_reply_whose_release_is_refused_fails_as_a_replaced_sandbox() -> (
+    None
+):
+    """The reply came in whole, but the sandbox was replaced before its release."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 100}).encode()
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        request = json.loads(sandbox.inputs[-1] or "")
+        if request.get("params", {}).get("release"):
+            return ExecResult(True, 0, f"{TOOLS_DIR_REFUSED}\n", "")
+        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, 0, 100), "")
+
+    sandbox = CannedSandbox(policy)
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    with override_max_exec_output_size(64), pytest.raises(SandboxReplacedError):
+        await transport("big", {}, False)
+
+
 async def test_sandbox_json_rpc_transport_leaves_plain_response() -> None:
     response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "ok"})
 

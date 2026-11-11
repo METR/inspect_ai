@@ -246,6 +246,23 @@ class TestReplacedSandbox:
             _ = [event async for event in proc]
         assert [m for m, _ in sandbox.requests].count("exec_remote_poll") == 1
 
+    async def test_a_timeout_whose_kill_is_refused_fails_as_a_replaced_sandbox(
+        self,
+    ) -> None:
+        """The command timed out as its sandbox was replaced: the refused kill says so."""
+        sandbox = _make_scripted_sandbox([_start_response(), _poll_response("running")])
+        scripted = sandbox.exec.side_effect
+
+        async def exec_(*args: Any, **kwargs: Any) -> ExecResult[str]:
+            if json.loads(kwargs["input"])["method"].startswith("exec_remote_kill"):
+                return ExecResult(True, 0, f"{TOOLS_DIR_REFUSED}\n", "")
+            return await scripted(*args, **kwargs)
+
+        sandbox.exec = AsyncMock(side_effect=exec_)
+        options = ExecRemoteAwaitableOptions(timeout=0.2)
+        with pytest.raises(SandboxReplacedError):
+            await exec_remote_awaitable(sandbox, ["sleep", "60"], 0.01, options)
+
 
 class TestPollRetryExhaustion:
     async def test_poll_retry_exhaustion_reraises_underlying_error(self) -> None:
