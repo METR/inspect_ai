@@ -8,6 +8,7 @@ Docker container to verify the full host-to-container path.
 import ast
 import contextlib
 import json
+import shlex
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -33,7 +34,12 @@ from inspect_ai.tool._sandbox_tools_utils.sandbox import (
     SandboxInjectionError,
     _inject_container_tools_code,
 )
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import (
+    SANDBOX_CLI,
+    TOOLS_DIR_REFUSED,
+    tools_cli_command,
+)
+from inspect_ai.util._sandbox._json_rpc_transport import SandboxReplacedError
 from inspect_ai.util._sandbox.docker.docker import DockerSandboxEnvironment
 from inspect_ai.util._sandbox.environment import SandboxDefaultUser
 from inspect_ai.util._sandbox.events import (
@@ -226,6 +232,19 @@ class TestSingleUseIterator:
 # ============================================================================
 # Kill behavior
 # ============================================================================
+
+
+class TestReplacedSandbox:
+    async def test_a_refused_poll_fails_without_retries(self) -> None:
+        """A sandbox replaced under a running command fails it at the first poll.
+
+        Retrying would only be refused again, for up to 30 seconds.
+        """
+        sandbox = _make_scripted_sandbox([_start_response(), f"{TOOLS_DIR_REFUSED}\n"])
+        proc = await exec_remote_streaming(sandbox, ["cmd"], 5)
+        with pytest.raises(SandboxReplacedError):
+            _ = [event async for event in proc]
+        assert [m for m, _ in sandbox.requests].count("exec_remote_poll") == 1
 
 
 class TestPollRetryExhaustion:
@@ -1288,7 +1307,7 @@ class TestAwaitableWaitProtocol:
         ]
         assert (event.action, event.cmd, event.result, event.output) == (
             "exec",
-            f"{SANDBOX_CLI} exec",
+            shlex.join(tools_cli_command("exec", user=None)),
             0,
             None,
         )
@@ -1851,7 +1870,7 @@ class TestAwaitableWaitProtocol:
             del kwargs["input"]["id"]
         assert sent == [
             (
-                ([SANDBOX_CLI, "exec"],),
+                (tools_cli_command("exec", user="root"),),
                 {
                     **exec_kwargs,
                     "input": {"jsonrpc": "2.0", "method": method, "params": params},
@@ -1949,7 +1968,7 @@ def test_start_event_without_output_reads_back_from_a_log(
     [event] = [event for event in sample.events if isinstance(event, SandboxEvent)]
     assert (event.action, event.cmd, event.result, event.output) == (
         "exec",
-        f"{SANDBOX_CLI} exec",
+        shlex.join(tools_cli_command("exec", user=None)),
         0,
         None,
     )

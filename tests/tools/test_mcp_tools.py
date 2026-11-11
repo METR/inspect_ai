@@ -341,6 +341,46 @@ async def test_sandbox_writer_synthesizes_jsonrpc_error_for_non_timeout(monkeypa
 
 
 @skip_if_no_mcp_package
+async def test_a_replaced_sandbox_fails_the_mcp_tool_call(monkeypatch):
+    """A sandbox replaced after its tools were installed fails the sample.
+
+    The writer sends the refusal under its own code, which the client raises as a
+    RuntimeError instead of the ToolError the model would see.
+    """
+    from mcp.shared.message import SessionMessage
+    from mcp.types import JSONRPCError
+    from mcp.types import Tool as MCPTool
+
+    from inspect_ai.model._call_tools import tool_call_error
+    from inspect_ai.tool._mcp._compat import jsonrpc_message, jsonrpc_message_root
+    from inspect_ai.tool._mcp._local import MCPServerLocalSession
+    from inspect_ai.util._anyio import inner_exception
+    from inspect_ai.util._sandbox._json_rpc_transport import SandboxReplacedError
+
+    async def _replaced_exec_model_request(*args: Any, **kwargs: Any) -> Any:
+        raise SandboxReplacedError("The sandbox was most likely replaced")
+
+    sandbox_module = _patch_sandbox_module(monkeypatch, _replaced_exec_model_request)
+    error = jsonrpc_message_root((await _drive_sandbox_request(sandbox_module)).message)
+    assert isinstance(error, JSONRPCError)
+
+    def on_tool_call(root: Any) -> SessionMessage:
+        reply = JSONRPCError(jsonrpc="2.0", id=root.id, error=error.error)
+        return SessionMessage(message=jsonrpc_message(reply))
+
+    client = _make_simulated_mcp_client(on_tool_call, unexpected_methods=[])
+    session = MCPServerLocalSession(client, name="test-replaced", events=False)
+    tool = MCPTool.model_validate(
+        {"name": "t", "inputSchema": {"type": "object", "properties": {}}}
+    )
+    with pytest.raises(Exception) as raised:
+        await session._tool_def_from_mcp_tool(tool).tool()
+    ex = inner_exception(raised.value)
+    assert "most likely replaced" in str(ex)
+    assert tool_call_error(ex, "t") is None
+
+
+@skip_if_no_mcp_package
 async def test_sandbox_writer_uses_friendly_message_for_timeout(monkeypatch):
     """TimeoutError gets the friendlier 'timed out' wording the model expects."""
     from mcp.types import INTERNAL_ERROR, JSONRPCError

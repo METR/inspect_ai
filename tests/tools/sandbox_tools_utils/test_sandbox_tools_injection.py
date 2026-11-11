@@ -1,9 +1,13 @@
 """Tests for sandbox tools injection."""
 
+import contextlib
 import os
+import shutil
+import subprocess
 import sys
 import warnings
 from contextlib import asynccontextmanager
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator, BinaryIO, Iterator
@@ -28,9 +32,17 @@ from inspect_ai.dataset import Sample
 from inspect_ai.event import LoggerEvent
 from inspect_ai.event._sandbox import SandboxEvent
 from inspect_ai.log._transcript import Transcript, init_transcript
+from inspect_ai.model._call_tools import tool_call_error
 from inspect_ai.solver import generate
 from inspect_ai.tool._sandbox_tools_utils import sandbox as sandbox_tools
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI, SANDBOX_TOOLS_DIR
+from inspect_ai.util._sandbox import _cli as cli_module
+from inspect_ai.util._sandbox._cli import (
+    SANDBOX_CLI,
+    SANDBOX_TOOLS_DIR,
+    TOOLS_DIR_REFUSED,
+    is_tools_cli_command,
+    tools_cli_command,
+)
 from inspect_ai.util._sandbox._framework_directory import (
     _MISSING_MARKER,
     _STAT_ENTRY,
@@ -40,6 +52,7 @@ from inspect_ai.util._sandbox._framework_directory import (
     _VIOLATION_MARKER,
     FrameworkDirectoryError,
 )
+from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
 from inspect_ai.util._sandbox._privileged import SHELL_PATH, SYSTEM_PATH
 from inspect_ai.util._sandbox.context import init_sandbox_environments_sample
 from inspect_ai.util._sandbox.environment import (
@@ -250,7 +263,7 @@ async def test_inject_falls_back_with_warning_when_root_probe_gives_no_verdict(
     # Root was probed exactly once, and never with a bare mkdir.
     root_calls = [cmd for cmd, user in sandbox.exec_calls if user == "root"]
     assert len(root_calls) == 1 and is_root_probe(root_calls[0])
-    assert ([SANDBOX_CLI, "start-server"], None) in sandbox.exec_calls
+    assert (tools_cli_command("start-server", user=None), None) in sandbox.exec_calls
     assert root_access_warned(_warn_once_messages)
 
 
@@ -340,7 +353,7 @@ async def test_inject_errors_on_root_failure_after_usable_verdict(
     assert not any(
         user is None and is_framework_dir_call(cmd) for cmd, user in sandbox.exec_calls
     )
-    assert not any(cmd[:1] == [SANDBOX_CLI] for cmd, _ in sandbox.exec_calls)
+    assert not any(is_tools_cli_command(cmd) for cmd, _ in sandbox.exec_calls)
     assert _warn_once_messages == []
 
 
@@ -358,7 +371,7 @@ async def test_inject_installs_rootless_quietly_when_root_unusable(
     assert sandbox._tools_user is None
     assert sandbox._tools_user_resolved is True
     assert stub_artifact["extracted_as"] is None
-    assert ([SANDBOX_CLI, "start-server"], None) in sandbox.exec_calls
+    assert (tools_cli_command("start-server", user=None), None) in sandbox.exec_calls
     assert not any(is_root_probe(cmd) for cmd, _ in sandbox.exec_calls)
     assert _warn_once_messages == []
 
@@ -378,7 +391,10 @@ async def test_inject_warns_once_per_process_when_root_access_ambiguous(
         await sandbox_tools._inject_container_tools_code(sandbox)
         assert sandbox._tools_user is None
         assert sandbox._tools_user_resolved is True
-        assert ([SANDBOX_CLI, "start-server"], None) in sandbox.exec_calls
+        assert (
+            tools_cli_command("start-server", user=None),
+            None,
+        ) in sandbox.exec_calls
 
     assert _warn_once_messages == [sandbox_tools._AMBIGUOUS_ROOT_ACCESS_WARNING]
 
@@ -441,7 +457,9 @@ async def test_inject_uses_root_and_verifies_before_start(
     assert stub_artifact["extracted_as"] == "root"
     # Verified before extraction and again immediately before the launcher starts,
     # the latter without creating anything.
-    start = sandbox.exec_calls.index(([SANDBOX_CLI, "start-server"], "root"))
+    start = sandbox.exec_calls.index(
+        (tools_cli_command("start-server", user="root"), "root")
+    )
     verifications = [
         i
         for i, (cmd, user) in enumerate(sandbox.exec_calls)
@@ -463,6 +481,20 @@ async def test_inject_uses_root_and_verifies_before_start(
     assert all(flags.mode == "700" for flags in root_flags)
     # No path-based chmod: the directory is created 0700 and verified, not repaired.
     assert not any(cmd[:1] == ["chmod"] for cmd, _ in sandbox.exec_calls)
+
+
+async def test_inject_fails_when_the_server_start_is_refused(
+    stub_artifact: dict[str, object],
+) -> None:
+    """The tree verified a moment before changed before the server started from it."""
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        if cmd == tools_cli_command("start-server", user="root"):
+            return REFUSED
+        return helper_ok(cmd, user)
+
+    with pytest.raises(sandbox_tools.SandboxInjectionError, match="Failed to start"):
+        await sandbox_tools._inject_container_tools_code(CannedSandbox(policy))
 
 
 async def test_inject_falls_back_when_provider_runs_root_as_default_user(
@@ -488,7 +520,7 @@ async def test_inject_falls_back_when_provider_runs_root_as_default_user(
     assert sandbox._tools_user is None
     assert sandbox._tools_user_resolved is True
     assert stub_artifact["extracted_as"] is None
-    assert ([SANDBOX_CLI, "start-server"], None) in sandbox.exec_calls
+    assert (tools_cli_command("start-server", user=None), None) in sandbox.exec_calls
     assert _warn_once_messages == []
     # Default-user checks carry no uid expectation (the host cannot know it). Only
     # the install step repairs a wrong-mode directory the default user owns; the
@@ -531,7 +563,7 @@ async def test_inject_aborts_on_root_verdict_without_downgrading(
     assert stub_artifact["extracted"] is False
     # Never tried the default user, never started a launcher.
     assert all(user == "root" for _, user in sandbox.exec_calls)
-    assert not any(cmd[:1] == [SANDBOX_CLI] for cmd, _ in sandbox.exec_calls)
+    assert not any(is_tools_cli_command(cmd) for cmd, _ in sandbox.exec_calls)
 
 
 async def test_inject_aborts_on_rootless_contract_violation(
@@ -548,7 +580,7 @@ async def test_inject_aborts_on_rootless_contract_violation(
         await sandbox_tools._inject_container_tools_code(sandbox)
 
     assert stub_artifact["extracted"] is False
-    assert not any(cmd[:1] == [SANDBOX_CLI] for cmd, _ in sandbox.exec_calls)
+    assert not any(is_tools_cli_command(cmd) for cmd, _ in sandbox.exec_calls)
 
 
 @pytest.mark.parametrize(
@@ -580,7 +612,7 @@ async def test_inject_aborts_when_reverification_before_start_fails(
         await sandbox_tools._inject_container_tools_code(sandbox)
 
     assert stub_artifact["extracted"] is True
-    assert not any(cmd[:1] == [SANDBOX_CLI] for cmd, _ in sandbox.exec_calls)
+    assert not any(is_tools_cli_command(cmd) for cmd, _ in sandbox.exec_calls)
 
 
 async def test_inject_names_a_message_less_exception(
@@ -735,7 +767,7 @@ async def test_detector_adopts_default_user_install_when_root_unusable(
 
     # The adopted rootless install is remembered.
     assert await sandbox_tools._sandbox_tools_installed(sandbox) is True
-    assert [user for _, user in sandbox.exec_calls] == [None, None]
+    assert [user for _, user in sandbox.exec_calls] == [None]
     assert _warn_once_messages == []
 
 
@@ -753,7 +785,7 @@ async def test_detector_adopts_default_user_install_with_warning_when_ambiguous(
     assert sandbox._tools_user_resolved is True
 
     assert await sandbox_tools._sandbox_tools_installed(sandbox) is True
-    assert [user for _, user in sandbox.exec_calls] == [None, None]
+    assert [user for _, user in sandbox.exec_calls] == [None]
     assert _warn_once_messages == [sandbox_tools._AMBIGUOUS_ROOT_ACCESS_WARNING]
 
 
@@ -804,7 +836,7 @@ async def test_root_failure_after_usable_verdict_never_consults_default_user(
     assert not any(
         user is None and is_framework_dir_call(cmd) for cmd, user in sandbox.exec_calls
     )
-    assert not any(cmd[:1] == [SANDBOX_CLI] for cmd, _ in sandbox.exec_calls)
+    assert not any(is_tools_cli_command(cmd) for cmd, _ in sandbox.exec_calls)
 
 
 @pytest.mark.parametrize(
@@ -905,7 +937,7 @@ async def test_detector_treats_unreadable_launcher_as_not_installed(
 
 
 async def test_detector_records_no_transcript_events() -> None:
-    """The per-tool-call probe must not add its script to the transcript each time."""
+    """The install check must not add its script to the transcript."""
     transcript = Transcript()
     init_transcript(transcript)
     inner = CannedSandbox(
@@ -921,6 +953,278 @@ async def test_detector_records_no_transcript_events() -> None:
     await proxy.exec(["echo", "hi"])
     [event] = [e for e in transcript.events if isinstance(e, SandboxEvent)]
     assert event.cmd == "echo hi"
+
+
+ANSWER = '{"jsonrpc": "2.0", "id": 1, "result": "ok"}'
+LAUNCH = tools_cli_command("exec", user="root")
+"""A request's launch of the CLI when root is usable."""
+REFUSED = ExecResult(
+    True, 0, f"{TOOLS_DIR_REFUSED}\n", f"sh: cd: can't cd to {SANDBOX_TOOLS_DIR}\n"
+)
+"""What the CLI launch prints when its directory check fails."""
+
+
+def installed(cmd: list[str], user: str | None) -> ExecResult[str]:
+    """`helper_ok` with the launcher in place, and a CLI that answers `ANSWER`."""
+    if cmd == LAUNCH:
+        return ExecResult(True, 0, ANSWER, "")
+    return REGULAR_FILE if is_framework_dir_call(cmd) else helper_ok(cmd, user)
+
+
+async def _sample(**policies: ExecPolicy) -> dict[str, SandboxEnvironment]:
+    """A sample's sandboxes, set up as an eval sets them up."""
+    init_transcript(Transcript())
+    return await init_sandbox_environments_sample(
+        provider(**policies), "task", None, files={}, setup=None, metadata={}
+    )
+
+
+def _launches(sandbox: SandboxEnvironment) -> int:
+    calls = sandbox.as_type(CannedSandbox).exec_calls
+    return sum(cmd == LAUNCH for cmd, _ in calls)
+
+
+async def test_tools_check_the_install_once_per_sandbox() -> None:
+    """Calls after a sandbox's first skip the full check.
+
+    `bash_session()` and `text_editor()` look their sandbox up before every
+    request: by name, or unnamed, the first that holds the tools.
+    """
+    environments = await _sample(default=installed, other=installed)
+    for name, sandbox in environments.items():
+        for _ in range(2):
+            target = await sandbox_tools.sandbox_with_injected_tools(
+                sandbox_name=None if name == "default" else name
+            )
+            await SandboxJSONRPCTransport(target, SANDBOX_CLI)(
+                "m", {}, False, user="root"
+            )
+        calls = sandbox.as_type(CannedSandbox).exec_calls
+        assert sum(is_framework_dir_call(cmd) for cmd, _ in calls) == 1, name
+        assert _launches(sandbox) == 2
+
+
+class ContainerRestartedError(Exception):
+    """Like k8s_sandbox's, raised from an exec that failed after a restart."""
+
+
+@pytest.mark.parametrize(
+    "dying_exec",
+    [
+        pytest.param(ExecResult(False, 255, "", ""), id="exit-255"),
+        pytest.param(ContainerRestartedError("container restarted"), id="raised"),
+    ],
+)
+async def test_a_sandbox_replaced_after_install_fails_every_tools_call(
+    stub_artifact: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    dying_exec: ExecResult[str] | Exception,
+) -> None:
+    """A tools tree gone after it was installed means the sandbox was replaced.
+
+    As when a sample's VM dies: the exec in flight fails, and the next ones run in
+    a fresh container with neither the tools nor the sample's files. Installing the
+    tools there would let the sample carry on until scoring fails, so every tools
+    call fails the sample instead, saying why.
+    """
+    tree, extractions = False, 0
+    dying: list[ExecResult[str] | Exception] = []
+
+    async def extract(*_: object) -> None:
+        nonlocal tree, extractions
+        tree, extractions = True, extractions + 1
+
+    monkeypatch.setattr(sandbox_tools, "_extract_tools_tree", extract)
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        if cmd == LAUNCH and dying:
+            result = dying.pop()
+            if isinstance(result, Exception):
+                raise result
+            return result
+        if cmd == LAUNCH and not tree:
+            return REFUSED
+        if is_framework_dir_call(cmd) and wrapped_command(cmd) and not tree:
+            return MISSING
+        return installed(cmd, user)
+
+    sandbox = (await _sample(default=policy))["default"]
+    calls = sandbox.as_type(CannedSandbox).exec_calls
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    assert await sandbox_tools.sandbox_with_injected_tools() is sandbox
+    assert await transport("m", {}, False, user="root") == ANSWER
+    checks = sum(is_framework_dir_call(cmd) for cmd, _ in calls)
+
+    dying.append(dying_exec)  # the VM dies under this call
+    with pytest.raises((RuntimeError, ContainerRestartedError)):
+        await transport("m", {}, False, user="root")
+    tree = False  # and the next calls reach a fresh container
+
+    for _ in range(2):
+        assert await sandbox_tools.sandbox_with_injected_tools() is sandbox
+        with pytest.raises(RuntimeError, match="sandbox was most likely replaced"):
+            await transport("m", {}, False, user="root")
+    monkeypatch.setenv("INSPECT_EXEC_REMOTE_SERVER_WAIT", "1")  # as Hawk runs
+    with pytest.raises(RuntimeError, match="or its VM died") as raised:
+        await sandbox.exec_remote(["true"], stream=False)
+    assert "can't cd to" in str(raised.value)  # the check's reason
+    inputs = sandbox.as_type(CannedSandbox).inputs
+    starts = [i for i in inputs if "exec_remote_start" in str(i)]
+    assert len(starts) == 1  # not sent again
+    assert not any("exec_remote_kill" in str(i) for i in inputs)  # nothing ran
+    # Not a tool error shown to the model: it fails the sample.
+    assert tool_call_error(raised.value, "bash") is None
+    assert extractions == 1
+    assert sum(is_framework_dir_call(cmd) for cmd, _ in calls) == checks
+
+
+async def test_exec_remote_waits_for_an_injection_in_progress(
+    stub_artifact: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that passes mid-injection does not let `exec_remote` launch into it.
+
+    `bash_session()` and `text_editor()` run the check outside the injection lock
+    to pick their sandbox, so it can see (and record) a launcher still being written.
+    """
+    tree, release = anyio.Event(), anyio.Event()
+
+    async def extract(*_: object) -> None:
+        tree.set()  # the launcher is in place; the rest of the tree is not
+        await release.wait()
+
+    monkeypatch.setattr(sandbox_tools, "_extract_tools_tree", extract)
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        if is_framework_dir_call(cmd) and wrapped_command(cmd) and not tree.is_set():
+            return MISSING
+        return installed(cmd, user)
+
+    sandbox = CannedSandbox(policy)
+    sandbox._root_access = ROOT_USABLE
+
+    async def call_exec_remote() -> None:
+        with contextlib.suppress(Exception):  # only when it launches matters here
+            await sandbox.exec_remote(["true"], stream=False)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            partial(sandbox_tools.sandbox_with_injected_tools, sandbox=sandbox)
+        )
+        await tree.wait()
+        assert await sandbox_tools._sandbox_tools_installed(sandbox) is True
+        tg.start_soon(call_exec_remote)
+        await anyio.wait_all_tasks_blocked()
+        assert _launches(sandbox) == 0
+        release.set()
+    assert _launches(sandbox) >= 1
+
+
+@pytest.fixture
+def tools_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A stand-in CLI where `tools_cli_command` launches it, owned by the test user.
+
+    The caller's `PATH` starts with a `stat` that passes any mode check.
+    """
+    if sys.platform != "linux":
+        pytest.skip("the launch check requires GNU/BusyBox stat")
+    tools = tmp_path / "parent" / "tools"
+    tools.mkdir(parents=True, mode=0o700)
+    cli = tools / "inspect-sandbox-tools"
+    cli.write_text('#!/bin/sh\npwd -P\nprintf "[%s]" "$@"\necho\necho "$PATH"\n')
+    cli.chmod(0o700)
+    (tmp_path / "hostile").mkdir()
+    (tmp_path / "hostile" / "stat").write_text("#!/bin/sh\necho 700\n")
+    (tmp_path / "hostile" / "stat").chmod(0o755)
+    _point_tools_cli_at(monkeypatch, tools)
+    return tools
+
+
+def _point_tools_cli_at(monkeypatch: pytest.MonkeyPatch, tools: Path) -> None:
+    monkeypatch.setattr(cli_module, "SANDBOX_TOOLS_DIR", str(tools))
+    monkeypatch.setattr(cli_module, "SANDBOX_CLI", f"{tools}/inspect-sandbox-tools")
+
+
+def _caller_path(cwd: Path) -> str:
+    return f"{cwd / 'hostile'}:{os.environ['PATH']}"
+
+
+def _run(cmd: list[str], cwd: Path) -> "subprocess.CompletedProcess[str]":
+    env = {**os.environ, "PATH": _caller_path(cwd)}
+    return subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+
+
+def test_tools_cli_command_runs_the_cli_in_the_users_own_directory(
+    tools_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI gets its arguments, the caller's directory and `PATH`; a linked parent works."""
+    (tmp_path / "link").symlink_to(tools_tree.parent)
+    for tools in (tools_tree, tmp_path / "link" / tools_tree.name):
+        _point_tools_cli_at(monkeypatch, tools)
+        result = _run(tools_cli_command("exec", "a b", user=None), cwd=tmp_path)
+        assert result.stdout.splitlines() == [
+            str(tmp_path.resolve()),
+            "[exec][a b]",
+            _caller_path(tmp_path),
+        ]
+
+
+@pytest.mark.parametrize(
+    "entry", ["missing", "symlink", "writable", "other-owner", "root-not-root"]
+)
+def test_tools_cli_command_refuses_a_directory_that_is_not_the_users_own(
+    tools_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    """A tree re-created by someone else, writable by others, or a link, never runs.
+
+    Others could put a launcher of their own in a writable one, even one the
+    user owns (root, moved into place). The caller's `stat` is not trusted. Only a
+    root run can tell the owner check apart: other users' 0700 trees can't be entered.
+    """
+    user = None
+    if entry == "missing":
+        shutil.rmtree(tools_tree)
+    elif entry == "symlink":
+        tools_tree.rename(tmp_path / "elsewhere")
+        tools_tree.symlink_to(tmp_path / "elsewhere")
+    elif entry == "writable":
+        tools_tree.chmod(0o777)
+    elif entry == "root-not-root":
+        # Meant for root but run as someone else, as by a provider that stopped
+        # running root's commands as uid 0: that user's own tree is refused.
+        user = "root"
+        if os.geteuid() == 0:
+            os.chown(tools_tree, 65534, 65534)
+    elif os.geteuid() == 0:
+        # As the tools user is, typically: root can enter anyone's 0700 tree.
+        os.chown(tools_tree, 65534, 65534)
+    else:
+        _point_tools_cli_at(monkeypatch, Path("/usr/bin"))
+    result = _run(tools_cli_command("exec", user=user), cwd=tmp_path)
+    assert (result.returncode, result.stdout) == (0, f"{TOOLS_DIR_REFUSED}\n")
+    if entry == "missing":
+        assert str(tools_tree) in result.stderr  # the reason, for the error
+
+
+async def test_tools_inject_into_a_provider_that_skips_the_base_init(
+    stub_artifact: dict[str, object],
+) -> None:
+    """Several providers never call `SandboxEnvironment.__init__`."""
+
+    class BareSandbox(CannedSandbox):
+        def __init__(self) -> None:
+            self.policy = installed
+            self.exec_calls = []
+            self.inputs = []
+            self.envs = []
+            self.concurrency = []
+            self.timeouts = []
+            self.written = []
+
+    sandbox = BareSandbox()
+    assert await sandbox_tools.sandbox_with_injected_tools(sandbox=sandbox) is sandbox
+    execs = len(sandbox.exec_calls)
+    assert await sandbox_tools.sandbox_with_injected_tools(sandbox=sandbox) is sandbox
+    assert len(sandbox.exec_calls) == execs
 
 
 @pytest.mark.parametrize(

@@ -471,9 +471,8 @@ def test_framework_exec_calls_never_pass_a_literal_argv() -> None:
     The name-first sites in ``src`` at this writing, each checked by hand:
     ``agent/_human/install.py`` (its script pins ``PATH`` and passes ``pinned_env``),
     ``util/_sandbox/_framework_directory.py`` (``@PATH@`` substituted at import,
-    ``pinned_env`` passed), ``tool/_sandbox_tools_utils/sandbox.py`` and
-    ``util/_sandbox/local.py`` (absolute ``SANDBOX_CLI``), the computer, grep and
-    list_files tools (agent-facing, allowlisted), and
+    ``pinned_env`` passed), ``util/_sandbox/local.py`` (absolute ``SANDBOX_CLI``),
+    the computer, grep and list_files tools (agent-facing, allowlisted), and
     ``util/_sandbox/_json_rpc_transport.py`` (the legacy ``inspect-tool-support``
     launcher by bare name, tracked as a follow-up with the k8s and proxmox wrappers).
     """
@@ -497,6 +496,37 @@ def test_framework_exec_calls_never_pass_a_literal_argv() -> None:
             first = argv.elts[0]
             if isinstance(first, ast.Constant) and isinstance(first.value, str):
                 offenders.append(f"{rel}:{node.lineno}: {ast.unparse(argv)[:70]}")
+    assert offenders == []
+
+
+# The one site that launches the tools CLI directly rather than through
+# `tools_cli_command`: the local sandbox stops its server on the host.
+_DIRECT_TOOLS_CLI_ALLOWED = {"util/_sandbox/local.py"}
+
+
+def test_tools_cli_launches_go_through_the_directory_check() -> None:
+    """No ``[SANDBOX_CLI, ...]`` argv outside the allowed sites.
+
+    It would skip the check that the tree is still the tools user's, so it could
+    run a launcher planted after the tree disappeared.
+    """
+    offenders: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        rel = path.relative_to(_SRC).as_posix()
+        if "ts-mono" in rel or rel in _DIRECT_TOOLS_CLI_ALLOWED:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("exec", "exec_stdio")
+            ):
+                continue
+            argv = _literal_argv(node)
+            first = argv.elts[0] if argv is not None else None
+            if isinstance(first, ast.Name) and first.id == "SANDBOX_CLI":
+                offenders.append(f"{rel}:{node.lineno}: {ast.unparse(node)[:70]}")
     assert offenders == []
 
 

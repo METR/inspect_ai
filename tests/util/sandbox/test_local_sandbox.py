@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from inspect_ai.util import SandboxUserUnsupportedError
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import SANDBOX_CLI, tools_cli_command
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 from inspect_ai.util._subprocess import ExecResult
 
@@ -64,14 +64,15 @@ async def test_local_exec_requires_current_user(
         sandbox.directory.cleanup()
 
 
-async def test_local_sandbox_scopes_server_dir_per_instance() -> None:
+@pytest.mark.parametrize("user", [None, "root"])  # both forms of the checked command
+async def test_local_sandbox_scopes_server_dir_per_instance(user: str | None) -> None:
     sandbox_a = LocalSandboxEnvironment()
     sandbox_b = LocalSandboxEnvironment()
     try:
         run = AsyncMock(return_value=ExecResult(True, 0, "", ""))
         with patch("inspect_ai.util._sandbox.local.subprocess", run):
             await sandbox_a.exec([SANDBOX_CLI, "start-server"])
-            await sandbox_b.exec([SANDBOX_CLI, "start-server"])
+            await sandbox_b.exec(tools_cli_command("exec", user=user))
 
         expected_a = str(Path(sandbox_a.directory.name) / "sandbox-tools")
         expected_b = str(Path(sandbox_b.directory.name) / "sandbox-tools")
@@ -115,7 +116,7 @@ async def test_local_sandbox_does_not_inject_server_dir_into_user_commands(
     sandbox = LocalSandboxEnvironment()
     try:
         result = await sandbox.exec(
-            ["sh", "-c", 'printf %s "${INSPECT_SANDBOX_TOOLS_DIR-unset}"']
+            ["/bin/sh", "-c", 'printf %s "${INSPECT_SANDBOX_TOOLS_DIR-unset}"']
         )
 
         assert result.stdout == "unset"
