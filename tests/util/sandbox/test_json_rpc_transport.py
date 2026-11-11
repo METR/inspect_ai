@@ -134,7 +134,7 @@ async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
     over_the_limit: bool,
 ) -> None:
     """Its first chunk declares the size; one over the limit fails only that call."""
-    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 100}).encode()
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 5000}).encode()
     requests: list[dict[str, Any]] = []
 
     def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
@@ -143,22 +143,23 @@ async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
         if params.get("release"):
             return ExecResult(True, 0, _success_response(), "")
         offset = params.get("offset", 0)
-        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, offset, 40), "")
+        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, offset, 2048), "")
 
     sandbox = CannedSandbox(policy)
     transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
     with (
-        override_max_exec_output_size(128),
+        override_max_exec_output_size(4096),
         override_max_read_file_size(len(reply) - over_the_limit),
     ):
         if over_the_limit:
-            with pytest.raises(OutputLimitExceededError):
+            with pytest.raises(OutputLimitExceededError) as raised:
                 await transport("big", {}, False)
+            assert raised.value.limit_str == f"{len(reply) - 1} bytes"
         else:
             assert await transport("big", {}, False) == reply.decode()
 
     fetched = [r["params"].get("offset") for r in requests[1:-1]]
-    assert fetched == ([] if over_the_limit else list(range(40, len(reply), 40)))
+    assert fetched == ([] if over_the_limit else list(range(2048, len(reply), 2048)))
     assert requests[-1]["params"] == {"handle": "c" * 32, "release": True}
 
 
