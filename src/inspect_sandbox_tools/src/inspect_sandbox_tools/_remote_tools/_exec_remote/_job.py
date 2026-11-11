@@ -56,11 +56,14 @@ def _leader_handle(process: AsyncIOProcess) -> psutil.Process | None:
 
 
 def retain_running(retired: list["Job"], job: "Job") -> list["Job"]:
-    """The retired jobs, `job` included, that left a process running.
+    """The retired jobs to keep once `job` retires: those that left a process running.
 
     Server shutdown stops what a retired job left running, and only that, so a job
-    that left nothing need not be kept: most commands leave nothing.
+    that left nothing need not be kept: most commands leave nothing. Kept jobs are
+    checked again only when another is kept, not on every call.
     """
+    if not job.left_running:
+        return retired
     return [kept for kept in (*retired, job) if kept.left_running]
 
 

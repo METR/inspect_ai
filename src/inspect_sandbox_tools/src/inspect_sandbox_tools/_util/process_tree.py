@@ -179,6 +179,12 @@ def _refresh_processes(
 def process_group_members(
     process_group: int, *, exclude_pid: int | None = None
 ) -> list[psutil.Process]:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return []  # an empty group: no need to look at every process
+    except PermissionError:
+        pass
     members: list[psutil.Process] = []
     for process in psutil.process_iter():
         if process.pid == exclude_pid:

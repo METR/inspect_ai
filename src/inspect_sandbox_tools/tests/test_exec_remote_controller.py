@@ -14,7 +14,7 @@ import sys
 import time
 import weakref
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
@@ -167,12 +167,34 @@ async def test_a_finished_job_is_kept_only_while_it_left_a_process_running(
         with anyio.fail_after(30):
             while live_processes([left]):
                 await anyio.sleep(0.01)
-        await run("true")
-        assert [job() is not None for job in jobs] == [False] * 4
+        # Kept jobs are checked again when another is kept.
+        await run(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
+        later = psutil.Process(int(pid_file.read_text()))
+        assert [job() is not None for job in jobs] == [False, False, False, True]
     finally:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            left.kill()
+        for process in (left, *([later] if "later" in locals() else [])):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                process.kill()
         await controller.shutdown()
+
+
+def test_kept_jobs_are_checked_again_only_when_another_is_kept() -> None:
+    """Each check reads /proc for every process a kept job left; most calls keep none."""
+    checked: list[bool] = []
+
+    class Retired:
+        def __init__(self, running: bool) -> None:
+            self._running = running
+
+        @property
+        def left_running(self) -> bool:
+            checked.append(self._running)
+            return self._running
+
+    kept = [cast(Job, Retired(True)) for _ in range(3)]
+
+    assert job_module.retain_running(kept, cast(Job, Retired(False))) == kept
+    assert checked == [False]
 
 
 @pytest.mark.asyncio

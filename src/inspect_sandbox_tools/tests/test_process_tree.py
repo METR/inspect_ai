@@ -1,8 +1,10 @@
 import asyncio
+import subprocess
 import sys
 
 import psutil
 import pytest
+from inspect_sandbox_tools._util import process_tree
 from inspect_sandbox_tools._util.process_tree import terminate_process_tree
 
 
@@ -189,3 +191,18 @@ async def test_terminate_process_tree_finds_children_spawned_during_grace_period
         await _ensure_stopped(process)
         if child_pid is not None and psutil.pid_exists(child_pid):
             psutil.Process(child_pid).kill()
+
+
+def test_the_members_of_an_empty_group_are_found_without_a_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished command's group is usually empty; every retire asks for it."""
+    process = subprocess.Popen(["true"], start_new_session=True)
+    process.wait()
+
+    def scan() -> None:
+        raise AssertionError("looked at every process")
+
+    monkeypatch.setattr(process_tree.psutil, "process_iter", scan)
+
+    assert process_tree.process_group_members(process.pid) == []

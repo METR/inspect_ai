@@ -1403,11 +1403,15 @@ async def test_a_kept_command_is_dropped_once_its_process_ends(
         with anyio.fail_after(30):
             while live_processes([left]):
                 await anyio.sleep(0.01)
-        later = _params("true")
+        # Kept commands are checked again when another is kept.
+        later_pid = tmp_path / "later"
+        later = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {later_pid}")
         await _finish(controller, later)
         await _ack(controller, later)
 
         assert job_refs[0]() is None
+        with contextlib.suppress(psutil.NoSuchProcess):
+            psutil.Process(int(later_pid.read_text())).kill()
     finally:
         if not reaped:
             libc.prctl(36, 0, 0, 0, 0)
