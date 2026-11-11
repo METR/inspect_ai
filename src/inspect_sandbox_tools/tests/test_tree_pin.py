@@ -177,7 +177,7 @@ def test_nothing_is_sent_to_a_server_in_a_replaced_tree(tree: Path) -> None:
             main_module._json_rpc_unix_call(path, "{}")
         server.join(30)
         listener.close()
-    assert received in ([], [b""])
+    assert received == [b""]  # it connected, then sent nothing
 
 
 def test_the_bridge_ends_once_its_tree_is_replaced(

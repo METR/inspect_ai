@@ -167,10 +167,10 @@ server's private state directory (see
 one per call, unless the host runs with `INSPECT_EXEC_REMOTE_BRIDGE` and the
 sandbox provider implements `exec_stdio`: then `exec_remote`'s server-wait
 requests share one long-lived `bridge` CLI per sandbox, tools user and frame limit
-(`guest/_cli/main.py:285-372`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
+(`guest/_cli/main.py:288-369`, `ai/util/_sandbox/_json_rpc_bridge.py`). The
 bridge's stdin carries the host's requests, so the server it starts gets
 `/dev/null` as stdin rather than inheriting it, and commands the server runs
-without input cannot read that stream (`guest/_cli/main.py:514`).
+without input cannot read that stream (`guest/_cli/main.py:534`).
 
 Plain `bash()` and `python()` (`ai/tool/_tools/_execute.py:65-176`) call
 `sandbox.exec()` directly and never involve the injected tools. Tools are
@@ -558,8 +558,9 @@ later import, before starting a server and after connecting to one, checks
 that the path still names that directory, with the owner and mode it had at
 start, which the launch check required (`guest/_util/tree_pin.py`). A bridge
 whose tree was replaced ends, and the host's next launch through the check is
-refused; an import, a server start or a request to a server fails instead of
-using the new tree. The bundle's library path
+refused; an import, a server start or a request to a server fails once the
+path names another tree. Each check runs just before its read, so like the launch
+check it narrows the window rather than closing it. The bundle's library path
 also points into the tree for the life of each process, so the server loads
 glibc's user and group lookup modules when it starts, while the tree is the
 checked one. The full check runs until it first passes on a sandbox object. Each launch then goes through
