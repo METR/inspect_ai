@@ -26,12 +26,14 @@ from inspect_ai.tool._tools._web_search._web_search import (
 )
 from inspect_ai.util._anyio import inner_exception
 from inspect_ai.util._checkpoint.checkpointer import Checkpointer
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import TOOLS_DIR_REFUSED, tools_cli_command
+from inspect_ai.util._sandbox._json_rpc_transport import sandbox_replaced_error
 from inspect_ai.util._sandbox.exec_remote import (
     ExecCompleted,
     ExecRemoteProcess,
     ExecRemoteStreamingOptions,
     ExecStderr,
+    ExecStdout,
 )
 from inspect_ai.util._sandbox.service import find_control_flow
 
@@ -280,7 +282,7 @@ async def sandbox_agent_bridge(
 
             # proxy server that runs in container and forwards to sandbox service
             proxy = await sandbox_env.exec_remote(
-                cmd=[SANDBOX_CLI, "model_proxy"],
+                cmd=tools_cli_command("model_proxy", user=sandbox_env._tools_user),
                 options=ExecRemoteStreamingOptions(
                     concurrency=False,
                     user=sandbox_env._tools_user,
@@ -373,6 +375,8 @@ async def _monitor_proxy(proxy: ExecRemoteProcess) -> None:
     """Monitor the proxy process event stream and raise if it dies unexpectedly."""
     stderr: list[str] = []
     async for event in proxy:
+        if isinstance(event, ExecStdout) and event.data.strip() == TOOLS_DIR_REFUSED:
+            raise sandbox_replaced_error("model_proxy")
         if isinstance(event, ExecStderr):
             stderr.append(event.data)
             logger.debug("model_proxy stderr: %s", event.data.rstrip())

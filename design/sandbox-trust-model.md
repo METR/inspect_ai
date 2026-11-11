@@ -554,10 +554,17 @@ Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
 tools user's authority, so each of those launches is checked too, cheaply.
 Requests sent over a bridge share its one launch, checked when the bridge
-opens; the bridge ends with the container it runs in. The server and the
-bridge load code from the tree for as long as they run, so these checks assume
-nothing running as root deletes the tree while its container runs on. The full
-check runs until it first passes on a sandbox object. Each launch then goes through
+opens; the bridge ends with the container it runs in. A tools process that
+outlives its launch (the server, a bridge, the model proxy) keeps reading the
+tree by path, so it holds the directory it started from open, and before each
+later import, and before starting a server, checks that the path still names
+that directory, with the owner and mode it had at start, which the launch check
+required (`guest/_util/tree_pin.py`). A bridge whose tree was replaced
+ends, and the host's next launch through the check is refused; an import or a
+server start fails instead of reading the new tree. The bundle's library path
+also points into the tree for the life of each process, so the server loads
+glibc's user and group lookup modules when it starts, while the tree is the
+checked one. The full check runs until it first passes on a sandbox object. Each launch then goes through
 `tools_cli_command` (`ai/util/_sandbox/_cli.py:35-120`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
@@ -580,9 +587,9 @@ replacement that leaves a valid tree in place is not noticed here: a tree in a
 volume that outlives the container, or one the sandbox's own setup puts back,
 such as tools pre-staged by an init container, which runs again in a new VM.
 Injection starts the server through the same check, after re-verifying the tree
-as above. A guard test fails on any `exec` or `exec_stdio` call in
-`src/inspect_ai` outside the local sandbox that passes a literal argv starting
-with `SANDBOX_CLI` (`tests/util/sandbox/test_privileged.py:502-530`).
+as above, and the agent bridge starts the model proxy through it. A guard test
+fails on any `exec`, `exec_stdio` or `exec_remote` call in `src/inspect_ai`
+outside the local sandbox that passes a literal argv starting with `SANDBOX_CLI` (`tests/util/sandbox/test_privileged.py:502-530`).
 
 Commands Inspect issues on its own behalf, as any user, follow the same rule
 for programs: `ai/util/_sandbox/_privileged.py` launches `/bin/sh` by absolute

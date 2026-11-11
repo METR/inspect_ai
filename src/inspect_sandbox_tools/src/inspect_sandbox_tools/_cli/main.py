@@ -35,6 +35,7 @@ from inspect_sandbox_tools._util.server_dir import (
     read_private_text,
     write_private_text,
 )
+from inspect_sandbox_tools._util.tree_pin import pin_tree, tree_replaced
 
 # When running as a PyInstaller bundle, the bootloader prepends the bundle's
 # lib directory to LD_LIBRARY_PATH so the daemon's native dependencies can be
@@ -68,6 +69,8 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 
     for _key in [k for k in os.environ if k.startswith(("_PYI", "_MEI"))]:
         del os.environ[_key]
+
+    pin_tree(os.path.dirname(os.path.realpath(sys.executable)))
 
 # Resource shutdown has a 30s graceful budget plus a 5s post-SIGKILL wait.
 # This 45s CLI deadline also leaves time for HTTP shutdown; LocalSandbox's 55s
@@ -314,6 +317,10 @@ def _bridge(max_frame_bytes: int) -> None:
 
     reply(_BRIDGE_READY)
     while line := sys.stdin.buffer.readline(max_frame_bytes):
+        if tree_replaced():
+            # The host sends its requests again over a new bridge, whose launch
+            # check then refuses the replaced directory.
+            os._exit(1)
         if not line.endswith(b"\n"):
             raise ValueError("Bridge request is longer than the frame limit")
         request_json_str = line.decode("utf-8").strip()
@@ -466,12 +473,21 @@ def _ensure_private_server_dirs() -> None:
         ensure_private_server_dir(SOCKET_PATH.parent)
 
 
+def _check_tree() -> None:
+    if tree_replaced():
+        raise RuntimeError(
+            "The sandbox tools directory was replaced after this process started"
+        )
+
+
 def _ensure_server_is_running() -> None:
     """Start one server for this directory, waiting for a concurrent starter."""
+    _check_tree()
     _ensure_private_server_dirs()
     with open_private_append(_SERVER_START_LOCK_PATH) as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         _ensure_server_is_running_locked()
+    _check_tree()  # the waits above can take seconds, and the caller connects next
 
 
 def _ensure_server_is_running_locked() -> None:
@@ -499,6 +515,7 @@ def _ensure_server_is_running_locked() -> None:
         open_private_append(_SERVER_STDOUT_LOG) as stdout_log,
         open_private_append(_SERVER_STDERR_LOG) as stderr_log,
     ):
+        _check_tree()  # again: waiting for a concurrent starter can take seconds
         process = subprocess.Popen(
             (
                 # Frozen onedir bundle: sys.executable is the stable launcher on
