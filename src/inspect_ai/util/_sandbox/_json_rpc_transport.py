@@ -240,7 +240,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         expected_offset = 0
         whole = False
         try:
-            # The reply is held whole in the runner's memory, at whatever size the
+            # The reply is held whole in the host's memory, at whatever size the
             # sandbox declares, so it gets the limit on reading a file into memory.
             if total_size > SandboxEnvironmentLimits.MAX_READ_FILE_SIZE:
                 raise OutputLimitExceededError(
