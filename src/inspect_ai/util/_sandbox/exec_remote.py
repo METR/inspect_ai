@@ -249,7 +249,8 @@ class ExecRemoteAwaitableOptions(ExecRemoteCommonOptions):
     `poll_timeout` (a provider's own retries of a timed-out exec do not apply),
     and a request lost when the process's stream drops is sent once more.
     Sandboxes whose provider or sandbox tools build cannot run the process use
-    an exec per request.
+    an exec per request, and a request over 64 KiB (a start with a large
+    `input`, for one) takes its own exec.
     """
 
 

@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import itertools
 import json
 import sys
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -15,7 +16,9 @@ from test_helpers.sandbox import CannedSandbox
 from typing_extensions import override
 
 from inspect_ai._eval.task.sandbox import sandboxenv_context
+from inspect_ai._util import _json_rpc as json_rpc
 from inspect_ai._util._async import tg_collect
+from inspect_ai._util._json_rpc import create_json_rpc_request
 from inspect_ai.dataset import Sample
 from inspect_ai.event import SandboxEvent
 from inspect_ai.log._transcript import Transcript, init_transcript, transcript
@@ -498,10 +501,12 @@ class _Pipe(ByteStream):
         self.send_fails = False
         self.receive_fails = False
         self.write_seconds = 0.0
+        self.writes: list[int] = []  # the length of each write
 
     async def send(self, item: bytes) -> None:
         if self.send_fails:
             raise RuntimeError("the connection failed")
+        self.writes.append(len(item))
         # a byte stream may deliver one write in pieces
         half = len(item) // 2
         await self._send.send(item[:half])
@@ -1045,6 +1050,69 @@ async def test_request_too_long_for_a_frame_is_sent_in_its_own_exec() -> None:
         assert json.loads(reply)["result"] == "per-call"
 
     assert sandbox.stdio_calls == []
+
+
+_NITRO_MAX_STDIN = 64 * 1024
+"""Nitro Sandboxes reorder exec stdin above this, so no bridge write may be longer."""
+
+
+@pytest.mark.parametrize(
+    "extra", [-1, 0, 1], ids=["just under 64 KiB", "exactly 64 KiB", "one byte over"]
+)
+@pytest.mark.usefixtures("bridge_on")
+async def test_request_over_64_kib_is_sent_in_its_own_exec(
+    extra: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(json_rpc, "id_generator", itertools.count(1000))  # 4 digits
+    method = "exec_remote_start_wait"
+    envelope = len(create_json_rpc_request(method, {"input": ""}, False)) + 1
+    params: dict[str, object] = {"input": "x" * (_NITRO_MAX_STDIN + extra - envelope)}
+
+    async with _bridge_sandbox(_serve_forever) as sandbox:
+        transport = _bridged_transport(sandbox)
+        await _result(transport, "exec_remote_poll_wait")  # opens the bridge
+        reply = await transport(method, params, False, timeout=_BUDGET)
+
+    over = extra > 0
+    assert json.loads(reply)["result"] == ("per-call" if over else "bridged")
+    assert sandbox.execs == ([method] if over else [])
+    [bridge] = sandbox.bridges
+    # after the poll's write, one write of the whole frame if it fits, else none
+    assert bridge.host.writes[1:] == ([] if over else [_NITRO_MAX_STDIN + extra])
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_exec_remote_input_over_64_kib_is_sent_in_its_own_exec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs: list[str] = []
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        while True:
+            await bridge.reply(await bridge.next_request(), _COMPLETED)
+
+    async def exec(cmd: list[str], **kwargs: Any) -> ExecResult[str]:
+        request = json.loads(kwargs["input"])
+        inputs.append(request["params"]["input"])
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": _COMPLETED}
+        return ExecResult(True, 0, json.dumps(reply), "")
+
+    async with _bridge_sandbox(serve) as sandbox:
+        monkeypatch.setattr(sandbox, "exec", exec)
+        proxy = SandboxEnvironmentProxy(sandbox)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
+        await exec_remote_awaitable(proxy, ["ls"], 5, options)  # opens the bridge
+        big = "x" * (2 * _NITRO_MAX_STDIN)
+        options = ExecRemoteAwaitableOptions(
+            input=big, server_wait=True, poll_timeout=_BUDGET
+        )
+        assert (await exec_remote_awaitable(proxy, ["cat"], 5, options)).success
+
+    assert inputs == [big]
+    [bridge] = sandbox.bridges
+    assert [request["params"]["command"] for request in bridge.requests] == ["ls"]
+    assert max(bridge.host.writes) <= _NITRO_MAX_STDIN
 
 
 @pytest.mark.usefixtures("bridge_on")

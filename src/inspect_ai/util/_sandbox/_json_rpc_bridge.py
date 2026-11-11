@@ -48,6 +48,9 @@ sent again."""
 OPEN_TIMEOUT = 60.0
 """Seconds a new bridge has to report that it is ready."""
 
+MAX_REQUEST_BYTES = 64 * 1024
+"""Nitro Sandboxes reorder exec stdin above 64 KiB, so a longer request takes its own exec."""
+
 _CLOSE_TIMEOUT = 5.0
 
 # Also defined in inspect_sandbox_tools._cli.main — keep in sync.
@@ -229,10 +232,10 @@ async def bridge_request(
 
     Returns None, so the request is sent in its own exec, when there is no bridge:
     the provider does not implement `exec_stdio`, the bridge did not start (an
-    older sandbox tools build, for one), or the request does not fit in a frame.
-    Another error starting a bridge is raised for the request that started it: the
-    provider's, or `SandboxReplacedError` when the tools directory check refused the
-    launch.
+    older sandbox tools build, for one), or the request with its newline is longer
+    than a frame or `MAX_REQUEST_BYTES`. Another error starting a bridge is raised
+    for the request that started it: the provider's, or `SandboxReplacedError` when
+    the tools directory check refused the launch.
 
     A request lost with a dropped bridge is sent once more over a new bridge, or
     in its own exec (None) if no new bridge starts; a second loss raises
@@ -244,7 +247,7 @@ async def bridge_request(
     from .events import SandboxTimeoutError
 
     frame = request.encode("utf-8") + b"\n"
-    if len(frame) > max_frame_bytes:
+    if len(frame) > min(max_frame_bytes, MAX_REQUEST_BYTES):
         return None
     request_id = json.loads(request)["id"]
     for attempt in (1, 2):
