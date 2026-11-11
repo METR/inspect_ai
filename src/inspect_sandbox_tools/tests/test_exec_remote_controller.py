@@ -5,15 +5,19 @@ subprocesses to exercise kill and shutdown behaviour.
 """
 
 import asyncio
+import gc
 import os
 import shlex
 import signal
 import sys
 import time
+import weakref
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
+import psutil
 import pytest
 from inspect_sandbox_tools._remote_tools._exec_remote import _job as job_module
 from inspect_sandbox_tools._remote_tools._exec_remote._controller import Controller
@@ -126,6 +130,42 @@ async def test_shutdown_reports_failures_from_every_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_finished_job_is_kept_only_while_it_left_a_process_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shutdown stops what a job left running; other finished jobs are not kept."""
+    jobs: list[weakref.ref[Job]] = []
+    init = Job.__init__
+
+    def record(job: Job, *args: Any) -> None:
+        init(job, *args)
+        jobs.append(weakref.ref(job))
+
+    monkeypatch.setattr(Job, "__init__", record)
+    controller = Controller()
+
+    async def run(command: str) -> None:
+        pid = await controller.submit(command)
+        with anyio.fail_after(30):
+            while (await controller.poll(pid, 0)).state == "running":
+                await anyio.sleep(0.01)
+        gc.collect()
+
+    pid_file = tmp_path / "pid"
+    await run(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
+    await run("true")
+    assert [job() is not None for job in jobs] == [True, False]
+
+    left = psutil.Process(int(pid_file.read_text()))
+    left.kill()
+    with anyio.fail_after(30):
+        while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
+            await anyio.sleep(0.01)
+    await run("true")
+    assert [job() is not None for job in jobs] == [False, False, False]
+    await controller.shutdown()
+
+
 async def test_retired_job_shutdown_uses_only_its_captured_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

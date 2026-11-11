@@ -34,7 +34,7 @@ async def terminate_process_tree(
         except psutil.NoSuchProcess:
             pass
     descendants = _merge_processes(
-        _live_processes(known_descendants),
+        live_processes(known_descendants),
         _merge_processes(
             _children(root) if root is not None else [],
             process_group_members(pid, exclude_pid=pid) if process_group else [],
@@ -116,7 +116,7 @@ async def _wait_for_processes(
     processes: list[psutil.Process], *, timeout: float, force_terminated: bool = False
 ) -> list[psutil.Process]:
     deadline = time.monotonic() + timeout
-    alive = _live_processes(processes)
+    alive = live_processes(processes)
     while alive:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -124,7 +124,7 @@ async def _wait_for_processes(
         _, pending = await asyncio.to_thread(
             psutil.wait_procs, alive, timeout=min(remaining, 0.1)
         )
-        alive = _live_processes(pending)
+        alive = live_processes(pending)
     if alive and not force_terminated:
         for process in alive:
             _kill(process)
@@ -139,7 +139,7 @@ def _children(process: psutil.Process) -> list[psutil.Process]:
         return []
 
 
-def _live_processes(processes: Iterable[psutil.Process]) -> list[psutil.Process]:
+def live_processes(processes: Iterable[psutil.Process]) -> list[psutil.Process]:
     live: list[psutil.Process] = []
     for process in processes:
         try:

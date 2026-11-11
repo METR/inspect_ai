@@ -3,7 +3,7 @@ import asyncio
 from inspect_sandbox_tools._util.common_types import ToolException
 from inspect_sandbox_tools._util.user_switch import RunAs
 
-from ._job import Job
+from ._job import Job, retain_running
 from .tool_types import CloseStdinResult, KillResult, PollResult, WriteStdinResult
 
 
@@ -61,7 +61,7 @@ class Controller:
         if result.state in ("completed", "killed"):
             if self._jobs.pop(pid, None) is not None:
                 job.retire()
-                self._retired_jobs.append(job)
+                self._retired_jobs = retain_running(self._retired_jobs, job)
                 await job.cleanup()
 
         return result
@@ -74,7 +74,7 @@ class Controller:
         # job between our await and here.
         if self._jobs.pop(pid, None) is not None:
             job.retire()
-            self._retired_jobs.append(job)
+            self._retired_jobs = retain_running(self._retired_jobs, job)
             await job.cleanup()
         return KillResult(seq=seq, stdout=stdout, stderr=stderr)
 

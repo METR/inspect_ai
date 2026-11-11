@@ -1,16 +1,19 @@
 """Awaitable exec tests own their controller and never start the shared server."""
 
+import gc
 import os
 import shlex
 import shutil
 import sys
 import time
+import weakref
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import anyio
+import psutil
 import pytest
 from inspect_sandbox_tools._remote_tools._exec_remote import _job as job_module
 from inspect_sandbox_tools._remote_tools._exec_remote import (
@@ -1301,6 +1304,40 @@ async def test_acknowledged_entry_count_is_bounded(
     assert acknowledged.result.stdout == ""
     unacknowledged = await controller.poll(requests[2].request_id, 0, 0.0)
     assert unacknowledged.result.stdout == "done"
+
+
+async def test_a_finished_command_is_kept_only_while_it_left_a_process_running(
+    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A command that left nothing running is not kept once its reply is acknowledged.
+
+    Shutdown stops what a command left running, so that one is kept; keeping every
+    command made the server grow with each call.
+    """
+    monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
+    jobs: list[weakref.ref[Job]] = []
+    init = Job.__init__
+
+    def record(job: Job, *args: Any) -> None:
+        init(job, *args)
+        jobs.append(weakref.ref(job))
+
+    monkeypatch.setattr(Job, "__init__", record)
+    pid_file = tmp_path / "pid"
+    lingering = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
+    finished = [_params("true") for _ in range(3)]
+    for params in [lingering, *finished]:
+        assert (await controller.start(params)).result.state == "completed"
+    await controller.start(
+        _params("true", acks=[p.request_id for p in [lingering, *finished]])
+    )
+    gc.collect()
+
+    assert [job() is not None for job in jobs[:4]] == [True, False, False, False]
+    left = psutil.Process(int(pid_file.read_text()))
+    with anyio.fail_after(30):
+        await controller.shutdown()
+    assert not left.is_running() or left.status() == psutil.STATUS_ZOMBIE
 
 
 async def test_retention_limits_do_not_evict_running_jobs(
