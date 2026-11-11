@@ -1561,12 +1561,30 @@ async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind() -> No
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_poll_wait") == "bridged"
-        sandbox.bridges[0].host.write_seconds = 0.2  # the next send holds the lock
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_result, transport, "exec_remote_poll_wait")
-            await anyio.wait_all_tasks_blocked()
-            with anyio.move_on_after(0.05):  # cancelled as it waits for the lock
+        host = sandbox.bridges[0].host
+        written = anyio.Event()
+        send = host.send
+
+        async def held_send(item: bytes) -> None:
+            await written.wait()
+            await send(item)
+
+        queued = anyio.CancelScope()
+
+        async def request_queued_behind() -> None:
+            with queued:
                 await _result(transport, "exec_remote_poll_wait")
+
+        host.send = held_send  # type: ignore[method-assign]
+        with anyio.fail_after(30):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_result, transport, "exec_remote_poll_wait")
+                await anyio.wait_all_tasks_blocked()  # it holds the send lock
+                tg.start_soon(request_queued_behind)
+                await anyio.wait_all_tasks_blocked()  # it waits for the lock
+                queued.cancel()
+                await anyio.wait_all_tasks_blocked()
+                written.set()
         bridges = sandbox._json_rpc_bridges
 
     assert bridges is not None
