@@ -4,7 +4,6 @@ import contextlib
 import json
 import os
 import platform
-import resource
 import shutil
 import subprocess
 import sys
@@ -1236,6 +1235,8 @@ def test_tools_cli_command_under_bash_runs_nothing_when_its_check_cannot_start(
     tools_tree: Path, tmp_path: Path
 ) -> None:
     """Bash reads a command substitution it can't start (no pipe) as empty and status 0."""
+    import resource  # POSIX only, like the fixture
+
     tools_tree.chmod(0o777)  # a tree the check refuses
     spare = os.open(os.devnull, os.O_RDONLY)
 
