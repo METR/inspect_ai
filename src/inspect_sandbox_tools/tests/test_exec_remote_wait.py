@@ -1,5 +1,6 @@
 """Awaitable exec tests own their controller and never start the shared server."""
 
+import contextlib
 import gc
 import os
 import shlex
@@ -1306,38 +1307,87 @@ async def test_acknowledged_entry_count_is_bounded(
     assert unacknowledged.result.stdout == "done"
 
 
-async def test_a_finished_command_is_kept_only_while_it_left_a_process_running(
-    controller: WaitController, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A command that left nothing running is not kept once its reply is acknowledged.
-
-    Shutdown stops what a command left running, so that one is kept; keeping every
-    command made the server grow with each call.
-    """
-    monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
-    jobs: list[weakref.ref[Job]] = []
+@pytest.fixture
+def job_refs(monkeypatch: pytest.MonkeyPatch) -> list[weakref.ref[Job]]:
+    """Weak references to every Job created, in order."""
+    refs: list[weakref.ref[Job]] = []
     init = Job.__init__
 
     def record(job: Job, *args: Any) -> None:
         init(job, *args)
-        jobs.append(weakref.ref(job))
+        refs.append(weakref.ref(job))
 
     monkeypatch.setattr(Job, "__init__", record)
-    pid_file = tmp_path / "pid"
-    lingering = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
-    finished = [_params("true") for _ in range(3)]
-    for params in [lingering, *finished]:
-        assert (await controller.start(params)).result.state == "completed"
-    await controller.start(
-        _params("true", acks=[p.request_id for p in [lingering, *finished]])
-    )
+    return refs
+
+
+async def _finish(controller: WaitController, params: StartWaitParams) -> None:
+    reply = await controller.start(params)
+    with anyio.fail_after(30):
+        while reply.result.state == "running":
+            reply = await controller.poll(params.request_id, reply.result.seq, 1.0)
+
+
+async def _ack(controller: WaitController, *requests: StartWaitParams) -> None:
+    """Acknowledge `requests` with another start, which drops them (none are kept)."""
+    await _finish(controller, _params("true", acks=[r.request_id for r in requests]))
     gc.collect()
 
-    assert [job() is not None for job in jobs[:4]] == [True, False, False, False]
+
+async def test_a_finished_command_is_kept_while_it_left_a_process_running(
+    controller: WaitController,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    job_refs: list[weakref.ref[Job]],
+) -> None:
+    """Shutdown stops what it left; commands that left nothing are not kept.
+
+    Keeping every finished command made the server grow with each call.
+    """
+    monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
+    pid_file = tmp_path / "pid"
+    requests = [
+        _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}"),
+        *(_params("true") for _ in range(2)),
+    ]
+    for params in requests:
+        await _finish(controller, params)
     left = psutil.Process(int(pid_file.read_text()))
+    try:
+        await _ack(controller, *requests)
+
+        assert [job() is not None for job in job_refs[:3]] == [True, False, False]
+        with anyio.fail_after(30):
+            await controller.shutdown()
+        assert not left.is_running() or left.status() == psutil.STATUS_ZOMBIE
+    finally:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            left.kill()
+
+
+async def test_a_kept_command_is_dropped_once_its_process_ends(
+    controller: WaitController,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    job_refs: list[weakref.ref[Job]],
+) -> None:
+    monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
+    pid_file = tmp_path / "pid"
+    lingering = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
+    await _finish(controller, lingering)
+    left = psutil.Process(int(pid_file.read_text()))
+    await _ack(controller, lingering)
+    assert job_refs[0]() is not None
+
+    left.kill()
     with anyio.fail_after(30):
-        await controller.shutdown()
-    assert not left.is_running() or left.status() == psutil.STATUS_ZOMBIE
+        while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
+            await anyio.sleep(0.01)
+    later = _params("true")
+    await _finish(controller, later)
+    await _ack(controller, later)
+
+    assert job_refs[0]() is None
 
 
 async def test_retention_limits_do_not_evict_running_jobs(

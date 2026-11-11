@@ -5,6 +5,7 @@ subprocesses to exercise kill and shutdown behaviour.
 """
 
 import asyncio
+import contextlib
 import gc
 import os
 import shlex
@@ -153,17 +154,24 @@ async def test_a_finished_job_is_kept_only_while_it_left_a_process_running(
 
     pid_file = tmp_path / "pid"
     await run(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
-    await run("true")
-    assert [job() is not None for job in jobs] == [True, False]
-
     left = psutil.Process(int(pid_file.read_text()))
-    left.kill()
-    with anyio.fail_after(30):
-        while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
-            await anyio.sleep(0.01)
-    await run("true")
-    assert [job() is not None for job in jobs] == [False, False, False]
-    await controller.shutdown()
+    try:
+        await run("true")
+        killed = await controller.submit("sleep 60")
+        await controller.kill(killed, 0)
+        gc.collect()
+        assert [job() is not None for job in jobs] == [True, False, False]
+
+        left.kill()
+        with anyio.fail_after(30):
+            while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
+                await anyio.sleep(0.01)
+        await run("true")
+        assert [job() is not None for job in jobs] == [False] * 4
+    finally:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            left.kill()
+        await controller.shutdown()
 
 
 async def test_retired_job_shutdown_uses_only_its_captured_processes(
