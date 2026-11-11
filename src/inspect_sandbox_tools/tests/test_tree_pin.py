@@ -52,12 +52,25 @@ def test_imports_from_the_tree_work_until_it_is_replaced(
 
 
 def test_a_tree_opened_to_other_users_counts_as_replaced(tree: Path) -> None:
-    """As for the launch check, which refuses anything but mode 0700."""
     assert not tree_pin.tree_replaced()
 
     tree.chmod(0o755)
 
     assert tree_pin.tree_replaced()
+
+
+def test_a_tree_not_private_at_start_is_not_taken_for_a_replaced_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside a sandbox, such as a build's smoke test, the tree need not be 0700."""
+    tree = tmp_path / "dist"
+    tree.mkdir(mode=0o755)
+    monkeypatch.setattr(sys, "meta_path", list(sys.meta_path))
+    monkeypatch.setattr(tree_pin, "_tree", None)
+    tree_pin.pin_tree(str(tree))
+
+    assert not tree_pin.tree_replaced()
+    importlib.import_module("colorsys")  # any module not imported yet
 
 
 def test_no_server_is_started_from_a_replaced_tree(

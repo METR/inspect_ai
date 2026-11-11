@@ -5,11 +5,10 @@ imported yet, its extension modules, and the server it starts. Each launch from
 the host is checked, but a long-lived process (the server, a bridge, the model
 proxy) outlives that check. So it keeps the directory it started from open, which
 also stops its inode number being reused, and before each such read checks that
-the path still names that directory, as the launch check would accept it.
+the path still names that directory, with the owner and mode it had at start.
 """
 
 import os
-import stat
 import sys
 from collections.abc import Sequence
 from importlib.machinery import ModuleSpec
@@ -28,7 +27,7 @@ def pin_tree(path: str) -> None:
 
 
 def tree_replaced() -> bool:
-    """Whether the pinned tree's path no longer names it, owned by us with mode 0700."""
+    """Whether the pinned tree's path no longer names it, as it was at start."""
     if _tree is None:
         return False
     path, pinned = _tree
@@ -36,11 +35,12 @@ def tree_replaced() -> bool:
         now = os.lstat(path)
     except OSError:
         return True
-    return (
-        (now.st_dev, now.st_ino) != (pinned.st_dev, pinned.st_ino)
-        or now.st_uid != os.geteuid()
-        or stat.S_IMODE(now.st_mode) != 0o700
-    )
+    return _identity(now) != _identity(pinned)
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    """The directory, its owner and its mode (opening it to others counts as a change)."""
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode)
 
 
 class _TreeGuard:
