@@ -202,7 +202,7 @@ class SandboxEnvironment(abc.ABC):
     _json_rpc_bridges: _Bridges | None = None
 
     def __init__(self) -> None:
-        self._inject_lock = anyio.Lock()
+        self._inject_lock = anyio.Lock(fast_acquire=True)  # free: no turn of the loop
         self._tools_user: str | None = None
         # True once the sandbox-tools user has been recorded for this object (root
         # or, for a rootless sandbox, the default user), so the detector checks as

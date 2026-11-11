@@ -316,6 +316,17 @@ def _success_response() -> str:
 _READY_LINE = (
     b'{"jsonrpc":"2.0","method":"__inspect_bridge_ready__","params":{"version":1}}\n'
 )
+_COMPLETED = {
+    "pid": 42,
+    "result": {
+        "state": "completed",
+        "exit_code": 0,
+        "seq": 1,
+        "stdout": "",
+        "stderr": "",
+    },
+}
+"""An exec_remote start's reply for a command that has exited."""
 
 
 class _Pipe(ByteStream):
@@ -581,6 +592,46 @@ async def test_request_over_an_open_bridge_is_sent_without_a_turn_of_the_loop(
             await anyio.lowlevel.checkpoint()  # it runs once
             before = turns
             await _result(transport, "exec_remote_poll_wait")
+            tg.cancel_scope.cancel()
+
+    assert turns_at_send[0] == before
+
+
+@pytest.mark.usefixtures("bridge_on")
+async def test_exec_remote_over_an_open_bridge_is_sent_without_a_turn_of_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tools are checked once per sandbox, so a later call goes straight out."""
+    turns = 0
+    turns_at_send: list[int] = []
+    send = _Pipe.send
+
+    async def counted_send(self: _Pipe, item: bytes) -> None:
+        turns_at_send.append(turns)
+        await send(self, item)
+
+    async def other_work() -> None:
+        nonlocal turns
+        while True:
+            turns += 1
+            await anyio.lowlevel.checkpoint()
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.ready()
+        while True:
+            await bridge.reply(await bridge.next_request(), _COMPLETED)
+
+    async with _bridge_sandbox(serve) as sandbox:
+        proxy = SandboxEnvironmentProxy(sandbox)
+        proxy._tools_injected = True  # checked earlier in the sample
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        await proxy.exec_remote(["ls"], options, stream=False)  # opens the bridge
+        monkeypatch.setattr(_Pipe, "send", counted_send)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(other_work)
+            await anyio.lowlevel.checkpoint()  # it runs once
+            before = turns
+            await proxy.exec_remote(["ls"], options, stream=False)
             tg.cancel_scope.cancel()
 
     assert turns_at_send[0] == before
