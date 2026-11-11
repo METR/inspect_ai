@@ -1054,14 +1054,16 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
     assert sandbox.execs == []
 
 
+@pytest.mark.parametrize("ending", ["\n", "\r\n"], ids=["LF", "CRLF"])
 @pytest.mark.parametrize("calls_before", [0, 1], ids=["first open", "reopen"])
 @pytest.mark.usefixtures("bridge_on")
 async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refused(
-    calls_before: int,
+    calls_before: int, ending: str
 ) -> None:
     """The tools directory went away since the install check, so the launch is refused.
 
-    On a reopen, the bridge before it ended with its container.
+    On a reopen, the bridge before it ended with its container. A provider may end
+    lines with CRLF, as the exec path allows.
     """
     refused_closed = anyio.Event()
 
@@ -1071,7 +1073,7 @@ async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refuse
             await bridge.reply(await bridge.next_request(), _COMPLETED)
             await bridge.stream.aclose()  # its container restarted
         else:
-            await bridge.stream.send(f"{TOOLS_DIR_REFUSED}\n".encode())
+            await bridge.stream.send(f"{TOOLS_DIR_REFUSED}{ending}".encode())
             await bridge.wait_closed()  # left to the host to close
             refused_closed.set()
 
