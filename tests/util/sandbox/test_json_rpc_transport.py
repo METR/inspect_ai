@@ -27,7 +27,10 @@ from inspect_ai.util._sandbox._cli import (
     tools_cli_command,
 )
 from inspect_ai.util._sandbox._json_rpc_bridge import BridgeDropped, close_bridges
-from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
+from inspect_ai.util._sandbox._json_rpc_transport import (
+    SandboxJSONRPCTransport,
+    SandboxReplacedError,
+)
 from inspect_ai.util._sandbox.environment import (
     RootAccess,
     SandboxEnvironment,
@@ -545,7 +548,7 @@ async def test_bridge_matches_out_of_order_replies_by_id() -> None:
 
     assert results == ["exec_remote_start_wait", "exec_remote_poll_wait"]
     assert sandbox.stdio_calls == [
-        [SANDBOX_CLI, "bridge", "--max-frame-bytes", "10485760"]
+        tools_cli_command("bridge", "--max-frame-bytes", "10485760", user=None)
     ]
     assert sandbox.execs == []
 
@@ -960,6 +963,29 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refused() -> (
+    None
+):
+    """The tools directory went away since the install check, so the launch is refused."""
+
+    async def serve(bridge: _FakeBridge) -> None:
+        await bridge.stream.send(f"{TOOLS_DIR_REFUSED}\n".encode())
+        await bridge.stream.aclose()
+
+    async with _bridge_sandbox(serve) as sandbox:
+        with pytest.raises(SandboxReplacedError, match="the sandbox tools bridge"):
+            await exec_remote_awaitable(
+                SandboxEnvironmentProxy(sandbox),
+                ["ls"],
+                5,
+                ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10),
+            )
+
+    # not taken for an older build, nor resent or killed in an exec
+    assert (len(sandbox.stdio_calls), sandbox.execs) == (1, [])
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_each_frame_limit_gets_its_own_bridge() -> None:
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
@@ -1061,6 +1087,10 @@ async def test_each_tools_user_gets_its_own_bridge() -> None:
         await _result(transport, "exec_remote_poll_wait", user="root")
 
     assert sandbox.stdio_users == ["root", None]
+    assert sandbox.stdio_calls == [
+        tools_cli_command("bridge", "--max-frame-bytes", "10485760", user=user)
+        for user in ("root", None)
+    ]
     assert [len(bridge.requests) for bridge in sandbox.bridges] == [2, 1]
 
 

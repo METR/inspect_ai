@@ -23,7 +23,7 @@ from anyio.streams.buffered import BufferedByteStream
 
 from inspect_ai._util.logger import warn_once
 
-from ._cli import SANDBOX_CLI
+from ._cli import TOOLS_DIR_REFUSED, tools_cli_command
 
 if TYPE_CHECKING:
     from .environment import SandboxEnvironment
@@ -95,7 +95,16 @@ class _Bridge:
         """Why the bridge can take no more requests, once it cannot."""
 
     async def wait_ready(self) -> None:
+        """Wait for the ready line; anything else drops the bridge.
+
+        A launch the tools directory check refused (see `tools_cli_command`)
+        raises `SandboxReplacedError` instead.
+        """
         line = await self._read_line()
+        if line == TOOLS_DIR_REFUSED.encode():
+            from ._json_rpc_transport import sandbox_replaced_error
+
+            raise sandbox_replaced_error("starting the sandbox tools bridge")
         try:
             ready = json.loads(line)
         except ValueError:
@@ -219,8 +228,9 @@ async def bridge_request(
     Returns None, so the request is sent in its own exec, when there is no bridge:
     the provider does not implement `exec_stdio`, the bridge did not start (an
     older sandbox tools build, for one), or the request does not fit in a frame.
-    Another error starting a bridge is raised, as the provider raised it, for the
-    request that started it.
+    Another error starting a bridge is raised for the request that started it: the
+    provider's, or `SandboxReplacedError` when the tools directory check refused the
+    launch.
 
     A request lost with a dropped bridge is sent once more over a new bridge, or
     in its own exec (None) if no new bridge starts; a second loss raises
@@ -317,7 +327,9 @@ async def _bridge(
         try:
             with anyio.fail_after(OPEN_TIMEOUT):
                 stream = await sandbox.exec_stdio(
-                    [SANDBOX_CLI, "bridge", "--max-frame-bytes", str(max_frame_bytes)],
+                    tools_cli_command(
+                        "bridge", "--max-frame-bytes", str(max_frame_bytes), user=user
+                    ),
                     user=user,
                 )
                 bridge = _Bridge(stream, max_frame_bytes)

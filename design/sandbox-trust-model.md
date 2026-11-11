@@ -227,14 +227,14 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:62-225`); over a bridge, each request
+(`ai/util/_sandbox/_json_rpc_transport.py:79-231`); over a bridge, each request
 is a line on a long-lived exec's stdin and each reply a line on its stdout. On
 this path the sandbox has no channel of its own to the host; untrusted output
 crosses the boundary only as the response to a request the host made. The host
 reads a bridge only while a request waits on it, bounds each line by the exec
 output limit, and drops a bridge that sends a reply no request waits for (a
 late reply to a request that stopped waiting is dropped instead)
-(`ai/util/_sandbox/_json_rpc_bridge.py:106-123,160-195`).
+(`ai/util/_sandbox/_json_rpc_bridge.py:115-132,169-204`).
 
 ### Pattern 2: agent inside the sandbox
 
@@ -549,8 +549,10 @@ operation that acts on a trusted directory with elevated authority:
 
 Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
-tools user's authority, so each of those launches is checked too, cheaply. The
-full check runs once per sandbox object. Each launch then goes through
+tools user's authority, so each of those launches is checked too, cheaply.
+Requests sent over a bridge share its one launch, checked when the bridge
+opens; the bridge ends with the container it runs in. The full check runs once
+per sandbox object. Each launch then goes through
 `tools_cli_command` (`ai/util/_sandbox/_cli.py:35-93`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
@@ -567,7 +569,8 @@ state, so the call raises a `SandboxReplacedError` (a `RuntimeError`) that says
 so, which fails the sample, through a sandbox MCP session too. Nothing installs
 the tools again or clears the passing check, so later tools calls on that
 sandbox object fail the same way while the directory stays missing
-(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:190-213`). A
+(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:45-59,207-219`,
+`ai/util/_sandbox/_json_rpc_bridge.py:97-107`). A
 replacement that leaves a valid tree in place is not noticed here: a tree in a
 volume that outlives the container, or one the sandbox's own setup puts back,
 such as tools pre-staged by an init container, which runs again in a new VM.

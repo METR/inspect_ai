@@ -42,6 +42,23 @@ class SandboxReplacedError(RuntimeError):
     """
 
 
+def sandbox_replaced_error(failed: str, reason: str = "") -> SandboxReplacedError:
+    """The error for a launch of the tools CLI that printed `TOOLS_DIR_REFUSED`.
+
+    The install check passed on this sandbox object before any launch, so the tree
+    went away since. Installing it again would let the sample carry on in a
+    container that lost its state.
+    """
+    return SandboxReplacedError(
+        "The sandbox was most likely replaced (its container restarted, or its"
+        " VM died) and lost the sample's state: the sandbox tools directory"
+        f" installed earlier ({SANDBOX_TOOLS_DIR}) is missing or no longer the"
+        " one installed, unless something in the sandbox removed or changed it."
+        f" The tools are not installed again. Failed call: {failed}"
+        + (f". The check reported: {reason}" if reason else "")
+    )
+
+
 _JSON_RPC_RESPONSE_CHUNK_METHOD = "__inspect_json_rpc_response_chunk__"
 _JSON_RPC_RESPONSE_CHUNK_FIELD = "__inspect_json_rpc_response_chunk__"
 _JSON_RPC_RESPONSE_CHUNK_VERSION = 1
@@ -199,18 +216,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
             concurrency=transport_extra_args.get("concurrency", True),
         )
         if tools_cli and exec_result.stdout.strip() == TOOLS_DIR_REFUSED:
-            # The install check passed on this sandbox object before any launch, so
-            # the tree went away since. Installing it again would let the sample carry
-            # on in a container that lost its state.
-            reason = exec_result.stderr.strip()
-            raise SandboxReplacedError(
-                "The sandbox was most likely replaced (its container restarted, or its"
-                " VM died) and lost the sample's state: the sandbox tools directory"
-                f" installed earlier ({SANDBOX_TOOLS_DIR}) is missing or no longer the"
-                " one installed, unless something in the sandbox removed or changed it."
-                f" The tools are not installed again. Failed call: {description}"
-                + (f". The check reported: {reason}" if reason else "")
-            )
+            raise sandbox_replaced_error(description, exec_result.stderr.strip())
 
         if not exec_result.success:
             # Prefer stderr, but fall back to stdout — some failures
