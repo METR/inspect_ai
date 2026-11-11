@@ -46,26 +46,27 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # raises, hiding the output, when an exec fails right after a container restart,
 # which is when refusals happen.
 #
-# The subshell prints the directory's physical path, from which the launch sets the
+# The subshell prints the launcher's physical path, from which the launch sets the
 # environment the PyInstaller bootloader would set and then re-exec itself to apply
 # (the onedir restart in pyi_main.c of 6.22.3, which built the bundled CLI), so the
 # CLI starts as one program, not two. `_PYI_ARCHIVE_FILE` has to be the launcher's
 # real path, as /proc/self/exe resolves it, or the bootloader restarts anyway with
-# the bundle's library path saved as the caller's. `_cli/main.py` drops these for
-# every child it starts. `test_a_launch_starts_the_bundled_cli_once` checks the
-# bundled bootloader still takes them.
+# the bundle's library path saved as the caller's. An inherited
+# `PYINSTALLER_RESET_ENVIRONMENT` would restart it too, and an inherited
+# `_PYI_LINUX_PROCESS_NAME` rename it. The launch sets no other variable, and
+# `_cli/main.py` drops these for every child it starts.
+# `test_a_launch_starts_the_bundled_cli_once` checks the bundled bootloader still
+# takes them.
 _TOOLS_DIR_CHECK = (
-    'd=$(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
+    '_PYI_ARCHIVE_FILE=$(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
     ' && [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$(stat -c @FORMAT@ .)" = @WANT@ ]'
-    ' && printf %s "$PWD")'
+    f' && printf %s "$PWD/{SANDBOX_TOOLS_BASE_NAME}")'
     f" || {{ echo {TOOLS_DIR_REFUSED}; exit 0; }}; shift 2;"
-    " unset PYINSTALLER_RESET_ENVIRONMENT _PYI_APPLICATION_HOME_DIR _PYI_SPLASH_IPC"
-    " _PYI_LINUX_PROCESS_NAME;"
-    f' export _PYI_ARCHIVE_FILE="$d/{SANDBOX_TOOLS_BASE_NAME}" _PYI_PARENT_PROCESS_LEVEL=-1;'
-    ' case $LD_LIBRARY_PATH in "") export LD_LIBRARY_PATH="$d/_internal" ;;'
-    ' *) export LD_LIBRARY_PATH_ORIG="$LD_LIBRARY_PATH"'
-    ' LD_LIBRARY_PATH="$d/_internal:$LD_LIBRARY_PATH" ;; esac;'
-    ' exec "$@"'
+    " unset PYINSTALLER_RESET_ENVIRONMENT _PYI_LINUX_PROCESS_NAME;"
+    ' [ -z "$LD_LIBRARY_PATH" ] || export LD_LIBRARY_PATH_ORIG="$LD_LIBRARY_PATH";'
+    " export _PYI_ARCHIVE_FILE _PYI_PARENT_PROCESS_LEVEL=-1"
+    ' LD_LIBRARY_PATH="${_PYI_ARCHIVE_FILE%/*}/_internal'
+    '${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; exec "$@"'
 )
 
 
