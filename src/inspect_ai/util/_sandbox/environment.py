@@ -352,8 +352,9 @@ class SandboxEnvironment(abc.ABC):
         Inspect uses this to keep one sandbox tools process per sandbox for many
         requests, instead of an `exec()` for each (see `INSPECT_EXEC_REMOTE_BRIDGE`).
         Sending writes to the command's stdin, and receiving reads its stdout,
-        raising `anyio.EndOfStream` once stdout closes; either raises
-        `anyio.BrokenResourceError` when the connection to the command breaks.
+        raising `anyio.EndOfStream` once stdout closes or the command exits;
+        either raises `anyio.BrokenResourceError` when the connection to the
+        command breaks.
         A cancelled `receive()` loses no data. Stderr is not part of the stream.
         Inspect sends nothing until the command has written a line, so a
         provider may start the command through a shell reading the same stdin.
