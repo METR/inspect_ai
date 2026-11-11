@@ -1207,9 +1207,13 @@ def test_tools_cli_command_refuses_a_directory_that_is_not_the_users_own(
         assert str(tools_tree) in result.stderr  # the reason, for the error
 
 
-# A caller's environment the bootloader would act on: a forced fresh start, and the
-# process name a restart passes to itself.
-_INHERITED_PYI = {"PYINSTALLER_RESET_ENVIRONMENT": "1", "_PYI_LINUX_PROCESS_NAME": "x"}
+# A caller's environment the bootloader would act on: a forced fresh start, the
+# process name a restart passes to itself, and a restart's markers gone stale.
+_CLEARED_PYI = {"PYINSTALLER_RESET_ENVIRONMENT": "1", "_PYI_LINUX_PROCESS_NAME": "x"}
+_INHERITED_PYI = _CLEARED_PYI | {
+    "_PYI_ARCHIVE_FILE": "/stale/inspect-sandbox-tools",
+    "_PYI_PARENT_PROCESS_LEVEL": "0",
+}
 
 
 @pytest.mark.parametrize("library_path", [None, "", "/opt/lib"])
@@ -1232,7 +1236,11 @@ def test_a_launch_exports_what_the_bootloader_sets_when_it_restarts(
     env = _caller_env(library_path, inherited=True) | {"d": "mine", "p": "mine"}
 
     result = subprocess.run(
-        tools_cli_command("exec", user=None), env=env, capture_output=True, text=True
+        tools_cli_command("exec", user=None),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
 
     got = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
@@ -1243,7 +1251,7 @@ def test_a_launch_exports_what_the_bootloader_sets_when_it_restarts(
         part for part in (f"{real}/_internal", library_path) if part
     )
     assert got.get("LD_LIBRARY_PATH_ORIG") == (library_path or None)
-    assert not got.keys() & _INHERITED_PYI.keys()
+    assert not got.keys() & _CLEARED_PYI.keys()
     assert (got["d"], got["p"]) == ("mine", "mine")
 
 
@@ -1299,6 +1307,7 @@ def test_a_launch_starts_the_bundled_cli_once(
         env=_caller_env(None, inherited) | {"LD_DEBUG": "files"},
         capture_output=True,
         text=True,
+        timeout=60,
     )
 
     assert "result" in json.loads(result.stdout), result.stderr[-2000:]
