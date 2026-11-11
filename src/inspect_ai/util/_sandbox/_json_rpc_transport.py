@@ -252,6 +252,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                     expected_handle=handle,
                     expected_offset=expected_offset,
                     expected_total_size=total_size,
+                    max_response_bytes=max_response_bytes,
                 )
                 response_bytes.extend(chunk.data)
                 if chunk.done:
@@ -419,6 +420,7 @@ def _validate_response_chunk(
     expected_handle: str,
     expected_offset: int,
     expected_total_size: int,
+    max_response_bytes: int,
 ) -> None:
     if chunk.handle != expected_handle:
         raise RuntimeError("Chunked JSON-RPC response handle changed")
@@ -432,3 +434,10 @@ def _validate_response_chunk(
         raise RuntimeError("Chunked JSON-RPC response exceeded its declared size")
     if chunk.done != (chunk.next_offset == chunk.total_size):
         raise RuntimeError("Chunked JSON-RPC response completion metadata was invalid")
+    # Each piece costs a sandbox exec and an event, so a reply may not come in many
+    # more than the tools make: they fill each frame, up to 512 KiB. The 1 KiB is
+    # room for the piece's envelope.
+    if not chunk.done and len(chunk.data) < min(
+        64 * 1024, max(max_response_bytes - 1024, 0) // 8
+    ):
+        raise RuntimeError("Chunked JSON-RPC response came in too many pieces")
