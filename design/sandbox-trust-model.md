@@ -65,7 +65,7 @@ crosses a boundary described below is held to them:
 The evaluated model, and any code it runs, is the untrusted principal. Inspect
 itself (the host process) is trusted. Inside the sandbox, Inspect's injected
 tools run as the **tools user**, recorded on the sandbox object as
-`_tools_user` (`ai/util/_sandbox/environment.py:195`).
+`_tools_user` (`ai/util/_sandbox/environment.py:200`).
 
 The number of distinct principals inside a sandbox is a runtime property. It
 depends on whether root is usable and on the user the agent's code actually
@@ -80,7 +80,7 @@ no `user`, that is the sandbox's default user:
 | Root not usable | default user | default user (`None`) | Absent: same uid |
 
 "Root usable" means a `user="root"` exec runs as uid 0 with `CAP_SETUID`,
-`CAP_SETGID` and `setgroups` allowed (`ai/tool/_sandbox_tools_utils/sandbox.py:398-424`).
+`CAP_SETGID` and `setgroups` allowed (`ai/tool/_sandbox_tools_utils/sandbox.py:413-439`).
 The privilege boundary between the agent and the tools is a property of the
 actual identities: it exists when every model-facing tool runs as a uid that
 is neither root nor the tools user's uid. With no overrides that is only the
@@ -131,7 +131,7 @@ flowchart TB
 ### Root access is decided before the agent runs
 
 Whether the tools may run as root is decided once per sandbox by
-`resolve_root_access` (`ai/tool/_sandbox_tools_utils/sandbox.py:343-373`) and
+`resolve_root_access` (`ai/tool/_sandbox_tools_utils/sandbox.py:358-388`) and
 never revisited. In an eval, sample init calls it for every sandbox after the
 sample's files are copied and its setup script has run, and before solver or
 agent execution begins (`ai/util/_sandbox/context.py:293-297`); a sandbox used
@@ -143,9 +143,9 @@ outside sample init is probed on first use. The verdict
   tools install and run as the default user;
 - `ambiguous` (no verdict could be read): the tools fall back to the default
   user and Inspect warns once that they run as the same user as the agent's
-  own commands when those use the default user (`sandbox.py:215-244`);
+  own commands when those use the default user (`sandbox.py:226-255`);
 - `failed` (the probe did not run or timed out): tool injection fails
-  (`sandbox.py:179-198`).
+  (`sandbox.py:190-209`).
 
 ### Processes in a sandbox
 
@@ -188,21 +188,23 @@ The tools are not baked into images. On first use the host:
    user and hold the launcher as a regular file. The check runs as the tools
    user that the root-access decision selects; when root is usable the default
    user's view is never consulted, so a tree planted under the agent's uid is
-   never adopted (`sandbox.py:125-176`, `:247-269`).
+   never adopted (`sandbox.py:126-187`, `:258-280`). A sandbox object runs
+   this check until it passes and never again; each launch of the tools CLI
+   is checked more cheaply instead (see [Verify before use](#verify-before-use)).
 2. Selects the artifact for the sandbox's architecture and libc: the copy
    bundled in the installed package, a download from S3, or a local build
-   (`sandbox.py:608-660`). A downloaded artifact is checked against the
+   (`sandbox.py:623-675`). A downloaded artifact is checked against the
    SHA-256 digest vendored in `SHA256SUMS` before it is used; a mismatch or a
    missing digest entry raises and nothing is written to the binaries
-   directory (`sandbox.py:685-756`). Bundled artifacts are trusted as part of
+   directory (`sandbox.py:700-771`). Bundled artifacts are trusted as part of
    the installed package (see BINARY_INTEGRITY.md).
 3. Creates or adopts the tools tree as a verified framework directory owned by
-   the tools user (`sandbox.py:285-292`).
+   the tools user (`sandbox.py:296-303`).
 4. Streams the gzipped archive on stdin into `tar` running with the verified
    directory as its working directory, so no copy of the archive exists at a
-   path another principal could write to (`sandbox.py:478-530`).
+   path another principal could write to (`sandbox.py:493-545`).
 5. Re-verifies the tree immediately before starting the server from it by
-   absolute path (`sandbox.py:297-311`).
+   absolute path (`sandbox.py:308-326`).
 
 ### Pattern 1: host-driven agent
 
@@ -217,7 +219,7 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:43-125`). On this path the sandbox
+(`ai/util/_sandbox/_json_rpc_transport.py:52-160`). On this path the sandbox
 has no channel of its own to the host; untrusted output crosses the boundary
 only as the response to a request the host made.
 
@@ -265,8 +267,8 @@ Omitting `user` means the sandbox's default user for every one of these
 tools. For plain `bash()` and `python()` the omitted user goes to
 `sandbox.exec()` unchanged. For the injected tools, when the tools user is
 root the host captures the default exec identity (uid, gid, groups and
-`HOME`, `sandbox.py:427-470`) at injection and supplies it with every call
-that names no user (`ai/util/_sandbox/_cli.py:36-49`); the tools switch to it
+`HOME`, `sandbox.py:442-485`) at injection and supplies it with every call
+that names no user (`ai/util/_sandbox/_cli.py:96-109`); the tools switch to it
 before running the tool's work, a no-op when they already run as that
 identity. In a sandbox whose default user is non-root, running a tool as
 root therefore requires an explicit grant from the eval author:
@@ -524,13 +526,42 @@ operation that acts on a trusted directory with elevated authority:
   guest verified, rather than re-resolving the pathname later;
 - **re-verifies immediately before execution** when code from the directory
   is about to run with the tools user's authority, as injection does before it
-  starts the server (`sandbox.py:297-305`);
+  starts the server (`sandbox.py:308-316`);
 - **receives content on stdin**, or publishes it with
   `write_file_in_framework_directory`, rather than staging it at a path
-  another principal can write (`sandbox.py:478-530`);
+  another principal can write (`sandbox.py:493-545`);
 - **reads only entries of the expected kind**: `stat_in_framework_directory`
   reports a symbolic link as one, and the guest's `_open_private` accepts only
   regular files owned by the tools user.
+
+Each request of the injected tools (`bash_session`, `text_editor`,
+`exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
+tools user's authority, so each of those launches is checked too, cheaply. The
+full check runs once per sandbox object. Each launch then goes through
+`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-93`): shell builtins and
+`stat`, in the shell that then execs the CLI, that check the one property that
+can change once verified, that the directory is still a real one, at its
+physical path, owned by the user running the launch (uid 0 when the tools user
+is root, as the full check required), mode `0700`. While the tree exists only
+root or the tools user can change it, since it is theirs and `0700` in a parent
+no other principal can rename it out of; that is also why the final `exec` may
+look the path up again. A tree that disappears mid-sample, with a restarted
+container or a sandbox VM that died, can be replaced at the same path by anyone
+who can write to `/var/tmp`, with a directory of their own or one they can write
+to. A refused launch runs nothing from the tree. Since the full check passed on
+that sandbox object, the sandbox was most likely replaced and lost the sample's
+state, so the call raises a `SandboxReplacedError` (a `RuntimeError`) that says
+so, which fails the sample, through a sandbox MCP session too. Nothing installs
+the tools again or clears the passing check, so later tools calls on that
+sandbox object fail the same way while the directory stays missing
+(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:125-148`). A
+replacement that leaves a valid tree in place is not noticed here: a tree in a
+volume that outlives the container, or one the sandbox's own setup puts back,
+such as tools pre-staged by an init container, which runs again in a new VM.
+Injection starts the server through the same check, after re-verifying the tree
+as above. A guard test fails on any `exec` or `exec_stdio` call in
+`src/inspect_ai` outside the local sandbox that passes a literal argv starting
+with `SANDBOX_CLI` (`tests/util/sandbox/test_privileged.py:502-530`).
 
 Commands Inspect issues on its own behalf, as any user, follow the same rule
 for programs: `ai/util/_sandbox/_privileged.py` launches `/bin/sh` by absolute

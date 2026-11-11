@@ -25,9 +25,10 @@ from inspect_ai._util.trace import trace_message
 from inspect_ai.util import input_screen
 from inspect_ai.util._concurrency import concurrency
 from inspect_ai.util._sandbox._cli import (
-    SANDBOX_CLI,
     SANDBOX_TOOLS_BASE_NAME,
     SANDBOX_TOOLS_DIR,
+    TOOLS_DIR_REFUSED,
+    tools_cli_command,
 )
 from inspect_ai.util._sandbox._framework_directory import (
     FrameworkDirectoryError,
@@ -140,18 +141,25 @@ async def _sandbox_tools_installed(sandbox: SandboxEnvironment) -> bool:
     user, so a tree the agent planted under its own uid can never be adopted
     because root happened to fail.
 
-    The check records no transcript events: it repeats on every tool call and its
-    argv carries the whole verification script, so logging it would add kilobytes
-    of identical shell to the transcript per call. Injection events are still
-    recorded; root-probe recording is described in ``resolve_root_access``.
+    A passing check is recorded in ``_tools_injected`` and never repeated; each
+    launch of the CLI is checked instead (see ``tools_cli_command``). Nothing
+    clears the record: a tree that goes away after it passed means a replaced
+    sandbox, so its tool calls fail rather than install the tools again.
+
+    The check records no transcript events: its argv carries the whole
+    verification script, so logging it would add kilobytes of identical shell to
+    the transcript each time it runs. Injection events are still recorded;
+    root-probe recording is described in ``resolve_root_access``.
 
     Raises:
         SandboxDefaultUserError: A trustworthy root installation was found but the
             default exec identity could not be read (see the handler below).
     """
+    if sandbox._tools_injected:
+        return True
     try:
         with _without_sandbox_events(sandbox):
-            return await _detect_sandbox_tools(sandbox)
+            installed = await _detect_sandbox_tools(sandbox)
     except SandboxDefaultUserError:
         # The install is healthy, so reinjecting cannot fix this, and running the
         # tools with no identity would misreport as a permission error. Nothing is
@@ -163,6 +171,9 @@ async def _sandbox_tools_installed(sandbox: SandboxEnvironment) -> bool:
         # as "not installed"; injection then surfaces any real failure.
         trace_message(logger, TRACE_SANDBOX_TOOLS, f"tools detection failed: {ex}")
         return False
+    if installed:
+        sandbox._tools_injected = True
+    return installed
 
 
 async def _detect_sandbox_tools(sandbox: SandboxEnvironment) -> bool:
@@ -306,9 +317,13 @@ async def _inject_container_tools_code(sandbox: SandboxEnvironment) -> None:
 
         # As root the server can setuid to any user for exec_remote; as the
         # default user, user-switching is disabled (auto-detected by the server).
-        result = await sandbox.exec([SANDBOX_CLI, "start-server"], user=user)
-        if not result.success:
-            raise RuntimeError(f"Failed to start sandbox tools server: {result.stderr}")
+        result = await sandbox.exec(
+            tools_cli_command("start-server", user=user), user=user
+        )
+        if not result.success or result.stdout.strip() == TOOLS_DIR_REFUSED:
+            raise RuntimeError(
+                f"Failed to start sandbox tools server: {result.stderr or result.stdout}"
+            )
     except SandboxInjectionError:
         raise
     except Exception as e:

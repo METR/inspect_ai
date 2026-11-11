@@ -7,7 +7,7 @@ from typing import Literal, Union, overload
 from typing_extensions import override
 
 from .._subprocess import ExecResult, subprocess
-from ._cli import SANDBOX_CLI
+from ._cli import SANDBOX_CLI, is_tools_cli_command
 from .environment import (
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
@@ -93,7 +93,7 @@ class LocalSandboxEnvironment(SandboxEnvironment):
             final_cwd = self.directory.name / final_cwd
 
         final_env = env
-        if cmd and cmd[0] == SANDBOX_CLI:
+        if is_tools_cli_command(cmd):
             self._sandbox_tools_used = True
             final_env = {
                 **(env or {}),

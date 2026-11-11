@@ -41,7 +41,7 @@ from inspect_ai.util._concurrency import (
 )
 
 from ._cli import SANDBOX_CLI, tools_user_param
-from ._json_rpc_transport import SandboxJSONRPCTransport
+from ._json_rpc_transport import SandboxJSONRPCTransport, SandboxReplacedError
 
 if TYPE_CHECKING:
     from .._subprocess import ExecResult
@@ -606,8 +606,9 @@ class ExecRemoteProcess:
             except JSONRPCMethodNotFoundError:
                 self._sandbox._exec_remote_wait_supported = False
                 self._request_id = None
-            except _ServerReplyError:
-                # The server answered, so it runs nothing that needs a kill.
+            except (_ServerReplyError, SandboxReplacedError):
+                # The server answered, or the launch was refused, so nothing runs
+                # that needs a kill.
                 self._request_id = None
                 raise
             else:
@@ -626,11 +627,20 @@ class ExecRemoteProcess:
         """Whether a failed `server_wait` start may be sent again.
 
         Only a failure that leaves unknown whether the server launched the command
-        (a lost connection or reply) is resent, not an error the server returned.
+        (a lost connection or reply) is resent, not an error the server returned or
+        a launch refused because the sandbox was replaced.
         Timeouts are resent unless `poll_timeout_retry` is False. Nothing is resent
         `START_RESEND_SECONDS` after the first attempt.
         """
-        if isinstance(ex, (_ServerReplyError, JSONRPCMethodNotFoundError, ValueError)):
+        if isinstance(
+            ex,
+            (
+                _ServerReplyError,
+                JSONRPCMethodNotFoundError,
+                ValueError,
+                SandboxReplacedError,
+            ),
+        ):
             return False
         if isinstance(ex, TimeoutError) and self._options.poll_timeout_retry is False:
             return False
@@ -814,7 +824,9 @@ class ExecRemoteProcess:
 
         def retryable(ex: BaseException) -> bool:
             nonlocal retried_repoll_error
-            if not isinstance(ex, RuntimeError) or isinstance(ex, _ServerReplyError):
+            if not isinstance(ex, RuntimeError) or isinstance(
+                ex, (_ServerReplyError, SandboxReplacedError)
+            ):
                 return False
             if recovery_deadline is not None:
                 # a re-issued poll is not retried once kill() has been called

@@ -5,9 +5,14 @@ from typing import Any
 
 import anyio
 import pytest
+from test_helpers.sandbox import CannedSandbox
 
 from inspect_ai._util._async import tg_collect
-from inspect_ai.util._sandbox._cli import SANDBOX_CLI
+from inspect_ai.util._sandbox._cli import (
+    SANDBOX_CLI,
+    TOOLS_DIR_REFUSED,
+    tools_cli_command,
+)
 from inspect_ai.util._sandbox._json_rpc_transport import SandboxJSONRPCTransport
 from inspect_ai.util._sandbox.limits import override_max_exec_output_size
 from inspect_ai.util._subprocess import ExecResult
@@ -215,6 +220,24 @@ async def test_legacy_sandbox_transport_does_not_enable_chunk_protocol() -> None
     transport = SandboxJSONRPCTransport(FakeSandbox(), "inspect-tool-support")  # type: ignore[arg-type]
 
     assert await transport("legacy", {}, False) == response
+
+
+async def test_sandbox_tools_cli_is_launched_after_the_directory_check() -> None:
+    sandbox = CannedSandbox.returning(ExecResult(True, 0, _success_response(), ""))
+    for cli in (SANDBOX_CLI, "inspect-tool-support"):
+        await SandboxJSONRPCTransport(sandbox, cli)("m", {}, False)
+
+    assert [cmd for cmd, _ in sandbox.exec_calls] == [
+        tools_cli_command("exec", user=None),
+        ["inspect-tool-support", "exec"],
+    ]
+
+
+async def test_a_reply_that_carries_the_refusal_marker_is_a_reply() -> None:
+    """Only the check's own output, the marker alone, is a refusal."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": TOOLS_DIR_REFUSED})
+    sandbox = CannedSandbox.returning(ExecResult(True, 0, reply, ""))
+    assert await SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)("m", {}, False) == reply
 
 
 async def test_sandbox_exec_error_uses_stdout_when_stderr_is_empty() -> None:

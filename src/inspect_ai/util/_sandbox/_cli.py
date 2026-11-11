@@ -32,6 +32,66 @@ SANDBOX_TOOLS_DIR = "/var/tmp/.da7be258e003d428"
 
 SANDBOX_CLI = f"{SANDBOX_TOOLS_DIR}/{SANDBOX_TOOLS_BASE_NAME}"
 
+TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
+"""All the check prints to stdout when it refuses the launch; why goes to stderr."""
+
+# Runs the command after `$1` (the parent of SANDBOX_TOOLS_DIR) and `$2` (its name)
+# only if the directory is still a real one, owned by the user running this, mode
+# 0700 (and owned by uid 0 when root runs it, see `tools_cli_command`). In a
+# subshell, with shell builtins and `stat` (two program starts), so the command
+# keeps the caller's PATH, environment and working directory. The final `exec`
+# looks the path up again, which is safe once the check passed: only the owner can
+# move that directory out of its parent, which the full check required to be
+# sticky or closed to others. A refusal exits 0 because k8s_sandbox
+# raises, hiding the output, when an exec fails right after a container restart,
+# which is when refusals happen.
+_TOOLS_DIR_CHECK = (
+    '(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
+    ' && [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$(stat -c @FORMAT@ .)" = @WANT@ ])'
+    f" || {{ echo {TOOLS_DIR_REFUSED}; exit 0; }}; shift 2;"
+    ' exec "$@"'
+)
+
+
+def tools_cli_command(*args: str, user: str | None) -> list[str]:
+    """Command that runs the sandbox tools CLI with ``args`` after a check.
+
+    The full install check (``_sandbox_tools_installed``) runs once per sandbox.
+    Of what it verified, only the directory itself can change for the worse: a tree
+    that disappears (with a restarted container) can be re-created at the same path
+    by anyone who can write to its parent. So each launch checks, in the shell
+    that then runs the CLI, that the directory is still a real one owned by the
+    tools user with mode 0700. Only that user or root can create such a directory
+    or write into it, and nobody else can move one into place: moving a directory
+    into the parent needs write access to it, and within the parent, which the full
+    check required to be sticky or closed to others, only the entry's owner can
+    rename it. If the check fails, the command prints only ``TOOLS_DIR_REFUSED``,
+    and ``SandboxJSONRPCTransport`` fails the call with an error naming a replaced
+    sandbox. Nothing installs the tools again on that sandbox object, so later calls
+    fail the same way while the directory stays missing.
+
+    ``user`` is the user the command runs as. For ``"root"`` the directory must also
+    be owned by uid 0, as the full check required, so a provider that stops running
+    root's commands as uid 0 cannot launch a tree owned by the uid it uses instead.
+    """
+    from ._privileged import SHELL_PATH, SYSTEM_PATH
+
+    parent, _, name = SANDBOX_TOOLS_DIR.rpartition("/")
+    stat_format, want = ("%u:%a", "0:700") if user == "root" else ("%a", "700")
+    check = (
+        _TOOLS_DIR_CHECK.replace("@PATH@", SYSTEM_PATH)
+        .replace("@FORMAT@", stat_format)
+        .replace("@WANT@", want)
+    )
+    return [SHELL_PATH, "-c", check, "sh", parent, name, SANDBOX_CLI, *args]
+
+
+def is_tools_cli_command(cmd: list[str]) -> bool:
+    """Whether ``cmd`` runs the sandbox tools CLI, directly or after the check."""
+    return cmd[:1] == [SANDBOX_CLI] or any(
+        cmd[:3] == tools_cli_command(user=user)[:3] for user in ("root", None)
+    )
+
 
 def tools_user_param(
     sandbox: "SandboxEnvironment", user: str | None
