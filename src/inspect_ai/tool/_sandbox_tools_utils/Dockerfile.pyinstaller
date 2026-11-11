@@ -33,7 +33,7 @@ ENV LD_LIBRARY_PATH="/opt/conda/envs/build/lib"
 
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN python -m pip install --no-cache-dir \
-        pyinstaller \
+        pyinstaller==6.22.3 \
         psutil \
         jsonrpcserver \
         pydantic

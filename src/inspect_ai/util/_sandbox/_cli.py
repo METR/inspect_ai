@@ -61,9 +61,8 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # expands a substitution it cannot start (no pipe to read it from) to nothing, with
 # status 0: so a pass also needs the path, and an empty `stat` is a failure too.
 # `test_a_launch_starts_the_bundled_cli_once` checks that the bundled glibc amd64
-# bootloader still takes them; the other three bundles share its release. The
-# builder Dockerfiles don't pin PyInstaller yet: they are inputs to the bundles'
-# source digest, so the next tools release pins `pyinstaller==6.22.3` in both.
+# bootloader still takes them; the other three bundles share its release, which
+# both builder Dockerfiles pin.
 _TOOLS_DIR_CHECK = (
     '_PYI_ARCHIVE_FILE=$(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
     ' || exit 1; s=$(stat -c @FORMAT@ .) && [ -n "$s" ] || exit 2;'

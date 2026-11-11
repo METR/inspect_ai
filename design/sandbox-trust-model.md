@@ -284,7 +284,7 @@ tools. For plain `bash()` and `python()` the omitted user goes to
 `sandbox.exec()` unchanged. For the injected tools, when the tools user is
 root the host captures the default exec identity (uid, gid, groups and
 `HOME`, `sandbox.py:442-485`) at injection and supplies it with every call
-that names no user (`ai/util/_sandbox/_cli.py:123-136`); the tools switch to it
+that names no user (`ai/util/_sandbox/_cli.py:122-135`); the tools switch to it
 before running the tool's work, a no-op when they already run as that
 identity. In a sandbox whose default user is non-root, running a tool as
 root therefore requires an explicit grant from the eval author:
@@ -565,7 +565,7 @@ server start fails instead of reading the new tree. The bundle's library path
 also points into the tree for the life of each process, so the server loads
 glibc's user and group lookup modules when it starts, while the tree is the
 checked one. The full check runs until it first passes on a sandbox object. Each launch then goes through
-`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-120`): shell builtins and
+`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-119`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
 physical path, owned by the user running the launch (uid 0 when the tools user
