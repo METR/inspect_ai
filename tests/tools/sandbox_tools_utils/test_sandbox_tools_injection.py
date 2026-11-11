@@ -1,7 +1,9 @@
 """Tests for sandbox tools injection."""
 
 import contextlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -1218,6 +1220,158 @@ def test_tools_cli_command_that_cannot_check_refuses_nothing_and_runs_nothing(
     result = _run(tools_cli_command("exec", user=None), cwd=tmp_path)
 
     assert (result.returncode, result.stdout) == (125, "")
+
+
+# A caller's environment the bootloader would act on: a forced fresh start, the
+# process name a restart passes to itself, and a restart's markers gone stale.
+_CLEARED_PYI = {"PYINSTALLER_RESET_ENVIRONMENT": "1", "_PYI_LINUX_PROCESS_NAME": "x"}
+_INHERITED_PYI = _CLEARED_PYI | {
+    "_PYI_ARCHIVE_FILE": "/stale/inspect-sandbox-tools",
+    "_PYI_PARENT_PROCESS_LEVEL": "0",
+}
+
+
+@pytest.mark.parametrize("library_path", [None, "", "/opt/lib"])
+def test_a_launch_exports_what_the_bootloader_sets_when_it_restarts(
+    tools_tree: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    library_path: str | None,
+) -> None:
+    """A launch sets what the bootloader would set before re-executing itself.
+
+    The archive is named by its real path, through a linked parent too. A caller's
+    non-empty `LD_LIBRARY_PATH` follows the bundle's and is kept for the CLI's children.
+    The caller's own variables reach the CLI as they were.
+    """
+    (tools_tree / "inspect-sandbox-tools").write_text("#!/bin/sh\nexec env\n")
+    (tmp_path / "link").symlink_to(tools_tree.parent)
+    _point_tools_cli_at(monkeypatch, tmp_path / "link" / tools_tree.name)
+    # Names as short as the launch's shell might use for its own.
+    env = _caller_env(library_path, inherited=True) | {"d": "mine", "p": "mine"}
+
+    result = subprocess.run(
+        tools_cli_command("exec", user=None),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    got = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    real = tools_tree.resolve()
+    assert got["_PYI_ARCHIVE_FILE"] == f"{real}/inspect-sandbox-tools"
+    assert got["_PYI_PARENT_PROCESS_LEVEL"] == "-1"
+    assert got["LD_LIBRARY_PATH"] == ":".join(
+        part for part in (f"{real}/_internal", library_path) if part
+    )
+    assert got.get("LD_LIBRARY_PATH_ORIG") == (library_path or None)
+    assert not got.keys() & _CLEARED_PYI.keys()
+    assert (got["d"], got["p"]) == ("mine", "mine")
+
+
+@pytest.fixture
+def bundled_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """This build's own glibc x86_64 tools tree, where `tools_cli_command` launches it.
+
+    Its server keeps its state in the tree, not where the runner's points.
+    """
+    bundle = sandbox_tools._binaries_dir() / sandbox_tools._get_executable_name(
+        "amd64", dev=False, musl=False
+    )
+    host = (sys.platform, platform.machine(), platform.libc_ver()[0])
+    if host != ("linux", "x86_64", "glibc"):
+        pytest.skip("runs this build's glibc x86_64 sandbox tools")
+    if not bundle.exists():
+        pytest.skip(f"{bundle.name} is not built")
+    monkeypatch.delenv("INSPECT_SANDBOX_TOOLS_DIR", raising=False)
+    tools = tmp_path / "parent" / "tools"
+    tools.mkdir(parents=True, mode=0o700)
+    subprocess.run(["tar", "xzf", str(bundle), "-C", str(tools)], check=True)
+    _point_tools_cli_at(monkeypatch, tools)
+    return tools
+
+
+def _caller_env(library_path: str | None, inherited: bool) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LD_LIBRARY_PATH")}
+    if library_path is not None:
+        env["LD_LIBRARY_PATH"] = library_path
+    return env | (_INHERITED_PYI if inherited else {})
+
+
+@pytest.mark.parametrize("inherited", [False, True], ids=["clean", "inherited"])
+@pytest.mark.parametrize("via", ["parent", "link"])
+def test_a_launch_starts_the_bundled_cli_once(
+    bundled_tools: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+    inherited: bool,
+) -> None:
+    """This build's CLI starts as one program, not two.
+
+    Its bootloader takes the launch's environment for that of its own restart, so it
+    does not exec itself again, and loads the bundle's libraries, not the host's.
+    """
+    if via == "link":
+        (tmp_path / "link").symlink_to(bundled_tools.parent)
+        _point_tools_cli_at(monkeypatch, tmp_path / "link" / bundled_tools.name)
+    request = json.dumps({"jsonrpc": "2.0", "method": "version", "id": 1})
+
+    # glibc's loader logs each program it starts and each library it loads.
+    result = subprocess.run(
+        tools_cli_command("exec", request, user=None),
+        env=_caller_env(None, inherited) | {"LD_DEBUG": "files"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "result" in json.loads(result.stdout), result.stderr[-2000:]
+    starts = [
+        line
+        for line in result.stderr.splitlines()
+        if line.endswith(f"transferring control: {cli_module.SANDBOX_CLI}")
+    ]
+    assert len(starts) == 1
+    real = bundled_tools.resolve()
+    assert f"calling init: {real}/_internal/libz.so.1\n" in result.stderr
+
+
+@pytest.mark.parametrize("library_path", [None, "/opt/lib"])
+def test_a_command_the_bundled_cli_runs_keeps_the_callers_library_path(
+    bundled_tools: Path, library_path: str | None
+) -> None:
+    """Never the bundle's: its libraries would shadow the sandbox's own."""
+    env = _caller_env(library_path, inherited=False)
+
+    def launch(*args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            tools_cli_command(*args, user=None),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    request = {
+        "jsonrpc": "2.0",
+        "method": "exec_remote_start_wait",
+        "id": 1,
+        "params": {
+            "command": 'printf %s "${LD_LIBRARY_PATH-unset}"',
+            "request_id": "0" * 32,
+            "wait_seconds": 5,
+        },
+    }
+    try:
+        assert launch("start-server").returncode == 0
+        result = launch("exec", json.dumps(request))
+    finally:
+        assert launch("stop-server").returncode == 0
+
+    output = json.loads(result.stdout)["result"]["result"]["stdout"]
+    assert output == (library_path or "unset")
 
 
 async def test_tools_inject_into_a_provider_that_skips_the_base_init(
