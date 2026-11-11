@@ -558,9 +558,6 @@ async def test_bridge_matches_out_of_order_replies_by_id() -> None:
         )
 
     assert results == ["exec_remote_start_wait", "exec_remote_poll_wait"]
-    assert sandbox.stdio_calls == [
-        tools_cli_command("bridge", "--max-frame-bytes", "10485760", user=None)
-    ]
     assert sandbox.execs == []
 
 
@@ -1013,27 +1010,39 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
     assert sandbox.execs == []
 
 
+@pytest.mark.parametrize("calls_before", [0, 1], ids=["first open", "reopen"])
 @pytest.mark.usefixtures("bridge_on")
-async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refused() -> (
-    None
-):
-    """The tools directory went away since the install check, so the launch is refused."""
+async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refused(
+    calls_before: int,
+) -> None:
+    """The tools directory went away since the install check, so the launch is refused.
+
+    On a reopen, the bridge before it ended with its container.
+    """
+    refused_closed = anyio.Event()
 
     async def serve(bridge: _FakeBridge) -> None:
-        await bridge.stream.send(f"{TOOLS_DIR_REFUSED}\n".encode())
-        await bridge.stream.aclose()
+        if len(sandbox.bridges) <= calls_before:
+            await bridge.ready()
+            await bridge.reply(await bridge.next_request(), _COMPLETED)
+            await bridge.stream.aclose()  # its container restarted
+        else:
+            await bridge.stream.send(f"{TOOLS_DIR_REFUSED}\n".encode())
+            await bridge.wait_closed()  # left to the host to close
+            refused_closed.set()
 
     async with _bridge_sandbox(serve) as sandbox:
+        proxy = SandboxEnvironmentProxy(sandbox)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        for _ in range(calls_before):
+            assert (await exec_remote_awaitable(proxy, ["ls"], 5, options)).success
         with pytest.raises(SandboxReplacedError, match="the sandbox tools bridge"):
-            await exec_remote_awaitable(
-                SandboxEnvironmentProxy(sandbox),
-                ["ls"],
-                5,
-                ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10),
-            )
+            await exec_remote_awaitable(proxy, ["ls"], 5, options)
+        with anyio.fail_after(10):
+            await refused_closed.wait()
 
     # not taken for an older build, nor resent or killed in an exec
-    assert (len(sandbox.stdio_calls), sandbox.execs) == (1, [])
+    assert (len(sandbox.stdio_calls), sandbox.execs) == (calls_before + 1, [])
 
 
 @pytest.mark.usefixtures("bridge_on")

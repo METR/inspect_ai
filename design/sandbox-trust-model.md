@@ -227,7 +227,7 @@ authority, and nothing in this document contains it.
 Work a tool delegates to a sandbox is a host-initiated `exec`: `bash()` and
 `python()` call `sandbox.exec()` directly, and for injected tools the JSON-RPC
 request travels on the exec's stdin and the response on its stdout
-(`ai/util/_sandbox/_json_rpc_transport.py:79-231`); over a bridge, each request
+(`ai/util/_sandbox/_json_rpc_transport.py:74-226`); over a bridge, each request
 is a line on a long-lived exec's stdin and each reply a line on its stdout. On
 this path the sandbox has no channel of its own to the host; untrusted output
 crosses the boundary only as the response to a request the host made. The host
@@ -281,7 +281,7 @@ tools. For plain `bash()` and `python()` the omitted user goes to
 `sandbox.exec()` unchanged. For the injected tools, when the tools user is
 root the host captures the default exec identity (uid, gid, groups and
 `HOME`, `sandbox.py:442-485`) at injection and supplies it with every call
-that names no user (`ai/util/_sandbox/_cli.py:96-109`); the tools switch to it
+that names no user (`ai/util/_sandbox/_cli.py:100-113`); the tools switch to it
 before running the tool's work, a no-op when they already run as that
 identity. In a sandbox whose default user is non-root, running a tool as
 root therefore requires an explicit grant from the eval author:
@@ -551,9 +551,9 @@ Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
 tools user's authority, so each of those launches is checked too, cheaply.
 Requests sent over a bridge share its one launch, checked when the bridge
-opens; the bridge ends with the container it runs in. The full check runs once
-per sandbox object. Each launch then goes through
-`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-93`): shell builtins and
+opens; the bridge ends with the container it runs in. The full check runs until
+it first passes on a sandbox object. Each launch then goes through
+`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-97`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
 physical path, owned by the user running the launch (uid 0 when the tools user
@@ -569,7 +569,7 @@ state, so the call raises a `SandboxReplacedError` (a `RuntimeError`) that says
 so, which fails the sample, through a sandbox MCP session too. Nothing installs
 the tools again or clears the passing check, so later tools calls on that
 sandbox object fail the same way while the directory stays missing
-(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:45-59,207-219`,
+(`sandbox.py:126-176`, `ai/util/_sandbox/_json_rpc_transport.py:45-54,202-214`,
 `ai/util/_sandbox/_json_rpc_bridge.py:97-107`). A
 replacement that leaves a valid tree in place is not noticed here: a tree in a
 volume that outlives the container, or one the sandbox's own setup puts back,

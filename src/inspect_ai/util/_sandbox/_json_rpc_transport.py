@@ -43,12 +43,7 @@ class SandboxReplacedError(RuntimeError):
 
 
 def sandbox_replaced_error(failed: str, reason: str = "") -> SandboxReplacedError:
-    """The error for a launch of the tools CLI that printed `TOOLS_DIR_REFUSED`.
-
-    The install check passed on this sandbox object before any launch, so the tree
-    went away since. Installing it again would let the sample carry on in a
-    container that lost its state.
-    """
+    """The error for a launch of the tools CLI that printed `TOOLS_DIR_REFUSED`."""
     return SandboxReplacedError(
         "The sandbox was most likely replaced (its container restarted, or its"
         " VM died) and lost the sample's state: the sandbox tools directory"
@@ -317,7 +312,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         error: str | None,
         transport_extra_args: dict[str, Any],
     ) -> None:
-        """Record the exec event that sending the request in its own exec would."""
+        """Record the exec event its own exec would, with the command `<cli> bridge`."""
         from .events import SandboxEnvironmentProxy
 
         if isinstance(self.sandbox, SandboxEnvironmentProxy):
