@@ -202,13 +202,13 @@ def test_the_members_of_an_empty_group_are_found_without_a_scan(
     process.wait()
 
     scans: list[None] = []
-    process_iter = process_tree.psutil.process_iter
+    process_iter = psutil.process_iter
 
     def counted() -> Iterator[psutil.Process]:
         scans.append(None)
         return process_iter()
 
-    monkeypatch.setattr(process_tree.psutil, "process_iter", counted)
+    monkeypatch.setattr(psutil, "process_iter", counted)
 
     assert process_tree.process_group_members(process.pid) == []
     assert scans == []
