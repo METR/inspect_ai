@@ -435,9 +435,10 @@ def _validate_response_chunk(
     if chunk.done != (chunk.next_offset == chunk.total_size):
         raise RuntimeError("Chunked JSON-RPC response completion metadata was invalid")
     # Each piece costs a sandbox exec and an event, so a reply may not come in many
-    # more than the tools make: they fill each frame, up to 512 KiB. The 1 KiB is
-    # room for the piece's envelope.
+    # more than the tools make: they fill each frame, up to 512 KiB, after an
+    # envelope of under 512 bytes, with base64 (3 bytes in 4). A frame of 512 bytes
+    # or less leaves no room for a floor.
     if not chunk.done and len(chunk.data) < min(
-        64 * 1024, max(max_response_bytes - 1024, 0) // 8
+        64 * 1024, max(max_response_bytes - 512, 0) * 3 // 8
     ):
         raise RuntimeError("Chunked JSON-RPC response came in too many pieces")
