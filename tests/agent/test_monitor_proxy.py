@@ -3,7 +3,7 @@
 import contextlib
 import json
 from collections.abc import Callable, Iterator
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -74,7 +74,7 @@ async def test_monitor_proxy_refused_launch() -> None:
     )
 
     with pytest.raises(SandboxReplacedError):
-        await _monitor_proxy(proc)  # type: ignore[arg-type]
+        await _monitor_proxy(cast(ExecRemoteProcess, proc))
 
 
 # ============================================================================

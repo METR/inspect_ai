@@ -487,6 +487,7 @@ def _ensure_server_is_running() -> None:
     with open_private_append(_SERVER_START_LOCK_PATH) as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         _ensure_server_is_running_locked()
+    _check_tree()  # the waits above can take seconds, and the caller connects next
 
 
 def _ensure_server_is_running_locked() -> None:

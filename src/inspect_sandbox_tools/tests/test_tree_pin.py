@@ -71,7 +71,8 @@ def test_a_tree_not_private_at_start_is_not_taken_for_a_replaced_one(
 ) -> None:
     """Outside a sandbox, such as a build's smoke test, the tree need not be 0700."""
     tree = tmp_path / "dist"
-    tree.mkdir(mode=0o755)
+    tree.mkdir()
+    tree.chmod(0o755)
     monkeypatch.setattr(sys, "meta_path", list(sys.meta_path))
     monkeypatch.setattr(tree_pin, "_tree", None)
     tree_pin.pin_tree(str(tree))
@@ -103,7 +104,7 @@ def test_nothing_in_a_replaced_tree_is_touched_to_start_a_server(
     tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", started.append)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
     _replace(tree, {})
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
@@ -117,7 +118,7 @@ def test_a_tree_replaced_while_waiting_to_start_the_server_is_refused(
 ) -> None:
     """Waiting for another starter can take seconds, so it is checked again."""
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", started.append)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
     main_module._ensure_private_server_dirs()
     _replace(tree, {})
     main_module._ensure_private_server_dirs()  # an earlier starter made them again
@@ -125,6 +126,23 @@ def test_a_tree_replaced_while_waiting_to_start_the_server_is_refused(
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running_locked()
     assert started == []
+
+
+def test_a_server_found_in_a_replaced_tree_is_not_used(
+    tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starter that waited for the lock may find a socket the new tree's owner bound."""
+
+    def answered_after_replacement() -> bool:
+        _replace(tree, {})
+        return True
+
+    monkeypatch.setattr(
+        main_module, "_can_connect_to_socket", answered_after_replacement
+    )
+
+    with pytest.raises(RuntimeError, match="tools directory was replaced"):
+        main_module._ensure_server_is_running()
 
 
 def test_the_bridge_ends_once_its_tree_is_replaced(
