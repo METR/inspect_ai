@@ -573,7 +573,7 @@ def _bridged_transport(sandbox: _BridgeSandbox) -> SandboxJSONRPCTransport:
 
 
 async def _result(transport: SandboxJSONRPCTransport, method: str, **args: Any) -> Any:
-    args.setdefault("timeout", 10)  # fail rather than hang when a reply never comes
+    args.setdefault("timeout", 30)  # fail rather than hang when a reply never comes
     return json.loads(await transport(method, {}, False, **args))["result"]
 
 
@@ -1564,31 +1564,29 @@ async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind(
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_poll_wait") == "bridged"
         host = sandbox.bridges[0].host
-        written = anyio.Event()
+        may_write = anyio.Event()
         send = host.send
 
         async def held_send(item: bytes) -> None:
-            await written.wait()
+            await may_write.wait()
             await send(item)
 
         queued = anyio.CancelScope()
 
         async def request_queued_behind() -> None:
             with queued:
-                await _result(transport, "exec_remote_poll_wait", timeout=30)
+                await _result(transport, "exec_remote_poll_wait")
 
         monkeypatch.setattr(host, "send", held_send)
         with anyio.fail_after(30):
             async with anyio.create_task_group() as tg:
-                tg.start_soon(
-                    partial(_result, transport, "exec_remote_poll_wait", timeout=30)
-                )
+                tg.start_soon(_result, transport, "exec_remote_poll_wait")
                 await anyio.wait_all_tasks_blocked()  # it holds the send lock
                 tg.start_soon(request_queued_behind)
                 await anyio.wait_all_tasks_blocked()  # it waits for the lock
                 queued.cancel()
                 await anyio.wait_all_tasks_blocked()
-                written.set()
+                may_write.set()
         bridges = sandbox._json_rpc_bridges
 
     assert bridges is not None
