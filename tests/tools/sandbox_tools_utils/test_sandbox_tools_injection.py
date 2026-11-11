@@ -1265,8 +1265,10 @@ def bundled_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "amd64", dev=False, musl=False
     )
     host = (sys.platform, platform.machine(), platform.libc_ver()[0])
-    if host != ("linux", "x86_64", "glibc") or not bundle.exists():
+    if host != ("linux", "x86_64", "glibc"):
         pytest.skip("runs this build's glibc x86_64 sandbox tools")
+    if not bundle.exists():
+        pytest.skip(f"{bundle.name} is not built")
     monkeypatch.delenv("INSPECT_SANDBOX_TOOLS_DIR", raising=False)
     tools = tmp_path / "parent" / "tools"
     tools.mkdir(parents=True, mode=0o700)
@@ -1351,9 +1353,8 @@ def test_a_command_the_bundled_cli_runs_keeps_the_callers_library_path(
         assert launch("start-server").returncode == 0
         result = launch("exec", json.dumps(request))
     finally:
-        stopped = launch("stop-server")
+        assert launch("stop-server").returncode == 0
 
-    assert stopped.returncode == 0
     output = json.loads(result.stdout)["result"]["result"]["stdout"]
     assert output == (library_path or "unset")
 

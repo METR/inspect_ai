@@ -268,7 +268,7 @@ tools. For plain `bash()` and `python()` the omitted user goes to
 `sandbox.exec()` unchanged. For the injected tools, when the tools user is
 root the host captures the default exec identity (uid, gid, groups and
 `HOME`, `sandbox.py:442-485`) at injection and supplies it with every call
-that names no user (`ai/util/_sandbox/_cli.py:113-126`); the tools switch to it
+that names no user (`ai/util/_sandbox/_cli.py:115-128`); the tools switch to it
 before running the tool's work, a no-op when they already run as that
 identity. In a sandbox whose default user is non-root, running a tool as
 root therefore requires an explicit grant from the eval author:
@@ -538,7 +538,7 @@ Each request of the injected tools (`bash_session`, `text_editor`,
 `exec_remote`, sandbox MCP servers) runs the tools CLI from the tree with the
 tools user's authority, so each of those launches is checked too, cheaply. The
 full check runs once per sandbox object. Each launch then goes through
-`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-110`): shell builtins and
+`tools_cli_command` (`ai/util/_sandbox/_cli.py:35-112`): shell builtins and
 `stat`, in the shell that then execs the CLI, that check the one property that
 can change once verified, that the directory is still a real one, at its
 physical path, owned by the user running the launch (uid 0 when the tools user
