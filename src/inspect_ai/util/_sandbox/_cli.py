@@ -57,17 +57,20 @@ TOOLS_DIR_REFUSED = "INSPECT_SANDBOX_TOOLS_DIRECTORY_REFUSED"
 # `PYINSTALLER_RESET_ENVIRONMENT` would restart it too, and an inherited
 # `_PYI_LINUX_PROCESS_NAME` rename it. The launch sets no other variable, and
 # `_cli/main.py` drops these for every child it starts. The assignment's status is
-# its command substitution's (POSIX), so `case` reads the subshell's exit code.
+# its command substitution's (POSIX), so `case` reads the subshell's exit code. bash
+# expands a substitution it cannot start (no pipe to read it from) to nothing, with
+# status 0: so a pass also needs the path, and an empty `stat` is a failure too.
 # `test_a_launch_starts_the_bundled_cli_once` checks that the bundled glibc amd64
 # bootloader still takes them; the other three bundles share its release. The
 # builder Dockerfiles don't pin PyInstaller yet: they are inputs to the bundles'
 # source digest, so the next tools release pins `pyinstaller==6.22.3` in both.
 _TOOLS_DIR_CHECK = (
     '_PYI_ARCHIVE_FILE=$(PATH=@PATH@; cd -P -- "$1" && p=${PWD%/} && cd -P -- "$p/$2"'
-    " || exit 1; s=$(stat -c @FORMAT@ .) || exit 2;"
+    ' || exit 1; s=$(stat -c @FORMAT@ .) && [ -n "$s" ] || exit 2;'
     ' [ "$PWD" = "$p/$2" ] && [ -O . ] && [ "$s" = @WANT@ ] || exit 1;'
     f' printf %s "$PWD/{SANDBOX_TOOLS_BASE_NAME}" || exit 2)'
-    f"; case $? in 0) ;; 1) echo {TOOLS_DIR_REFUSED}; exit 0;; *) exit 125;; esac;"
+    f"; case $?$_PYI_ARCHIVE_FILE in 0/*) ;; 1) echo {TOOLS_DIR_REFUSED}; exit 0;;"
+    " *) exit 125;; esac;"
     " shift 2; unset PYINSTALLER_RESET_ENVIRONMENT _PYI_LINUX_PROCESS_NAME;"
     ' [ -z "$LD_LIBRARY_PATH" ] || export LD_LIBRARY_PATH_ORIG="$LD_LIBRARY_PATH";'
     " export _PYI_ARCHIVE_FILE _PYI_PARENT_PROCESS_LEVEL=-1"

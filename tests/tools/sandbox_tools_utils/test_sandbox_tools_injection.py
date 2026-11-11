@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import platform
+import resource
 import shutil
 import subprocess
 import sys
@@ -1208,16 +1209,53 @@ def test_tools_cli_command_refuses_a_directory_that_is_not_the_users_own(
         assert str(tools_tree) in result.stderr  # the reason, for the error
 
 
+@pytest.mark.parametrize(
+    "stat",
+    [
+        "exit 1",
+        # What bash makes of a `stat` it could not read (no pipe): nothing, status 0.
+        "exit 0",
+    ],
+)
 def test_tools_cli_command_that_cannot_check_refuses_nothing_and_runs_nothing(
-    tools_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tools_tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stat: str
 ) -> None:
     """A failing `stat` (or fork, under a full process table) says nothing of the tree."""
     (tmp_path / "failing").mkdir()
-    (tmp_path / "failing" / "stat").write_text("#!/bin/sh\nexit 1\n")
+    (tmp_path / "failing" / "stat").write_text(f"#!/bin/sh\n{stat}\n")
     (tmp_path / "failing" / "stat").chmod(0o755)
     monkeypatch.setattr(privileged_module, "SYSTEM_PATH", str(tmp_path / "failing"))
 
     result = _run(tools_cli_command("exec", user=None), cwd=tmp_path)
+
+    assert (result.returncode, result.stdout) == (125, "")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_tools_cli_command_under_bash_runs_nothing_when_its_check_cannot_start(
+    tools_tree: Path, tmp_path: Path
+) -> None:
+    """Bash reads a command substitution it can't start (no pipe) as empty and status 0."""
+    tools_tree.chmod(0o777)  # a tree the check refuses
+    spare = os.open(os.devnull, os.O_RDONLY)
+
+    def one_free_descriptor() -> None:
+        os.dup2(spare, 3)  # kept by pass_fds, so 0-3 are open
+        resource.setrlimit(resource.RLIMIT_NOFILE, (5, 5))  # pipe() needs two
+
+    try:
+        result = subprocess.run(
+            ["bash", *tools_cli_command("exec", user=None)[1:]],
+            cwd=tmp_path,
+            env={**os.environ, "PATH": _caller_path(tmp_path)},
+            capture_output=True,
+            text=True,
+            preexec_fn=one_free_descriptor,
+            pass_fds=(3,),
+            timeout=60,
+        )
+    finally:
+        os.close(spare)
 
     assert (result.returncode, result.stdout) == (125, "")
 
