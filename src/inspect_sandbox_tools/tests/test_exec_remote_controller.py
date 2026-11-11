@@ -25,6 +25,7 @@ from inspect_sandbox_tools._remote_tools._exec_remote._controller import Control
 from inspect_sandbox_tools._remote_tools._exec_remote._job import Job
 from inspect_sandbox_tools._remote_tools._exec_remote.tool_types import PollResult
 from inspect_sandbox_tools._util.common_types import ToolException
+from inspect_sandbox_tools._util.process_tree import live_processes
 
 
 class TestControllerConcurrentPollAndKill:
@@ -164,7 +165,7 @@ async def test_a_finished_job_is_kept_only_while_it_left_a_process_running(
 
         left.kill()
         with anyio.fail_after(30):
-            while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
+            while live_processes([left]):
                 await anyio.sleep(0.01)
         await run("true")
         assert [job() is not None for job in jobs] == [False] * 4
@@ -174,6 +175,7 @@ async def test_a_finished_job_is_kept_only_while_it_left_a_process_running(
         await controller.shutdown()
 
 
+@pytest.mark.asyncio
 async def test_retired_job_shutdown_uses_only_its_captured_processes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

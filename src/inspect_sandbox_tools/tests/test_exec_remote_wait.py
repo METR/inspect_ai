@@ -1,6 +1,7 @@
 """Awaitable exec tests own their controller and never start the shared server."""
 
 import contextlib
+import ctypes
 import gc
 import os
 import shlex
@@ -32,6 +33,7 @@ from inspect_sandbox_tools._remote_tools._exec_remote.tool_types import (
     WaitResult,
 )
 from inspect_sandbox_tools._util.common_types import ToolException
+from inspect_sandbox_tools._util.process_tree import live_processes
 from pydantic import ValidationError
 
 
@@ -1359,35 +1361,58 @@ async def test_a_finished_command_is_kept_while_it_left_a_process_running(
         assert [job() is not None for job in job_refs[:3]] == [True, False, False]
         with anyio.fail_after(30):
             await controller.shutdown()
-        assert not left.is_running() or left.status() == psutil.STATUS_ZOMBIE
+        assert not live_processes([left])
     finally:
         with contextlib.suppress(psutil.NoSuchProcess):
             left.kill()
 
 
+@pytest.mark.parametrize(
+    "reaped",
+    [
+        True,
+        pytest.param(
+            False,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="needs PR_SET_CHILD_SUBREAPER"
+            ),
+        ),
+    ],
+)
 async def test_a_kept_command_is_dropped_once_its_process_ends(
     controller: WaitController,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     job_refs: list[weakref.ref[Job]],
+    reaped: bool,
 ) -> None:
+    """Including when nothing reaps it, as in a pod whose first process never does."""
     monkeypatch.setattr(wait_module, "_MAX_ACKNOWLEDGED_ENTRIES", 0)
-    pid_file = tmp_path / "pid"
-    lingering = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
-    await _finish(controller, lingering)
-    left = psutil.Process(int(pid_file.read_text()))
-    await _ack(controller, lingering)
-    assert job_refs[0]() is not None
+    libc = ctypes.CDLL(None)
+    if not reaped:
+        libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER: orphans become ours
+    try:
+        pid_file = tmp_path / "pid"
+        lingering = _params(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}")
+        await _finish(controller, lingering)
+        left = psutil.Process(int(pid_file.read_text()))
+        await _ack(controller, lingering)
+        assert job_refs[0]() is not None
 
-    left.kill()
-    with anyio.fail_after(30):
-        while left.is_running() and left.status() != psutil.STATUS_ZOMBIE:
-            await anyio.sleep(0.01)
-    later = _params("true")
-    await _finish(controller, later)
-    await _ack(controller, later)
+        left.kill()
+        with anyio.fail_after(30):
+            while live_processes([left]):
+                await anyio.sleep(0.01)
+        later = _params("true")
+        await _finish(controller, later)
+        await _ack(controller, later)
 
-    assert job_refs[0]() is None
+        assert job_refs[0]() is None
+    finally:
+        if not reaped:
+            libc.prctl(36, 0, 0, 0, 0)
+            with contextlib.suppress(ChildProcessError, FileNotFoundError):
+                os.waitpid(int(pid_file.read_text()), 0)
 
 
 async def test_retention_limits_do_not_evict_running_jobs(
