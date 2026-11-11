@@ -554,11 +554,12 @@ Requests sent over a bridge share its one launch, checked when the bridge
 opens; the bridge ends with the container it runs in. A tools process that
 outlives its launch (the server, a bridge, the model proxy) keeps reading the
 tree by path, so it holds the directory it started from open, and before each
-later import, and before starting a server, checks that the path still names
-that directory, with the owner and mode it had at start, which the launch check
-required (`guest/_util/tree_pin.py`). A bridge whose tree was replaced
-ends, and the host's next launch through the check is refused; an import or a
-server start fails instead of reading the new tree. The bundle's library path
+later import, before starting a server and after connecting to one, checks
+that the path still names that directory, with the owner and mode it had at
+start, which the launch check required (`guest/_util/tree_pin.py`). A bridge
+whose tree was replaced ends, and the host's next launch through the check is
+refused; an import, a server start or a request to a server fails instead of
+using the new tree. The bundle's library path
 also points into the tree for the life of each process, so the server loads
 glibc's user and group lookup modules when it starts, while the tree is the
 checked one. The full check runs until it first passes on a sandbox object. Each launch then goes through

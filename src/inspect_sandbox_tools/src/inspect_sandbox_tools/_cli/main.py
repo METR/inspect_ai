@@ -424,6 +424,9 @@ def _json_rpc_unix_call(socket_path: str, request_json_str: str) -> JSONRPCRespo
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(100 * 60 * 60)  # Match json_rpc_unix_call
         sock.connect(socket_path)
+        # A tree still in place now was in place for the connect: a deleted
+        # directory never comes back.
+        _check_tree()
         sock.sendall(
             b"POST / HTTP/1.0\r\nContent-Type: application/json\r\n"
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body)

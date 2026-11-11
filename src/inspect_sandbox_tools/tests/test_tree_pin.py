@@ -4,8 +4,11 @@ import importlib
 import io
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -28,6 +31,10 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         sys.modules.pop(name, None)
 
 
+def _never_started(*args: object, **kwargs: object) -> None:
+    pytest.fail("a server was started from a replaced tree")
+
+
 def _replace(tree: Path, files: dict[str, str]) -> None:
     """Delete the tree and create another at its path, as a sandbox user could."""
     shutil.rmtree(tree)
@@ -41,11 +48,16 @@ def test_imports_from_the_tree_work_until_it_is_replaced(
     tree: Path, tmp_path: Path
 ) -> None:
     ran = tmp_path / "ran"
-    (tree / "pinned_module.py").write_text(f"open({str(ran)!r}, 'a').write('pinned')")
+    (tree / "pinned_module.py").write_text(
+        f"with open({str(ran)!r}, 'a') as f: f.write('pinned')"
+    )
     importlib.invalidate_caches()
     importlib.import_module("pinned_module")
 
-    _replace(tree, {"planted_module.py": f"open({str(ran)!r}, 'a').write('planted')"})
+    _replace(
+        tree,
+        {"planted_module.py": f"with open({str(ran)!r}, 'a') as f: f.write('planted')"},
+    )
 
     with pytest.raises(ImportError, match="tools directory was replaced"):
         importlib.import_module("planted_module")
@@ -103,13 +115,11 @@ def server_dir_in_tree(tree: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_nothing_in_a_replaced_tree_is_touched_to_start_a_server(
     tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(subprocess, "Popen", _never_started)
     _replace(tree, {})
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running()
-    assert started == []
     assert list(tree.iterdir()) == []
 
 
@@ -117,15 +127,13 @@ def test_a_tree_replaced_while_waiting_to_start_the_server_is_refused(
     tree: Path, server_dir_in_tree: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Waiting for another starter can take seconds, so it is checked again."""
-    started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    monkeypatch.setattr(subprocess, "Popen", _never_started)
     main_module._ensure_private_server_dirs()
     _replace(tree, {})
     main_module._ensure_private_server_dirs()  # an earlier starter made them again
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running_locked()
-    assert started == []
 
 
 def test_a_server_found_in_a_replaced_tree_is_not_used(
@@ -143,6 +151,33 @@ def test_a_server_found_in_a_replaced_tree_is_not_used(
 
     with pytest.raises(RuntimeError, match="tools directory was replaced"):
         main_module._ensure_server_is_running()
+
+
+def test_nothing_is_sent_to_a_server_in_a_replaced_tree(tree: Path) -> None:
+    """Even when the replacement came just before the connect."""
+    received: list[bytes] = []
+    with tempfile.TemporaryDirectory(dir="/tmp") as short:  # socket paths are short
+        path = os.path.join(short, "server.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen(1)
+
+        def answer() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                received.append(conn.recv(65536))
+                if received[-1]:  # a request came: answer it, as a planted server would
+                    conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+
+        server = threading.Thread(target=answer, daemon=True)
+        server.start()
+        _replace(tree, {})
+
+        with pytest.raises(RuntimeError, match="tools directory was replaced"):
+            main_module._json_rpc_unix_call(path, "{}")
+        server.join(30)
+        listener.close()
+    assert received in ([], [b""])
 
 
 def test_the_bridge_ends_once_its_tree_is_replaced(
