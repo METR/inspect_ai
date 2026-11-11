@@ -1556,7 +1556,9 @@ async def test_held_request_whose_bridge_cannot_restart_takes_a_held_request_slo
 
 
 @pytest.mark.usefixtures("bridge_on")
-async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind() -> None:
+async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Only a request that went out can still get a reply to drop."""
     async with _bridge_sandbox(_serve_forever) as sandbox:
         transport = _bridged_transport(sandbox)
@@ -1573,12 +1575,14 @@ async def test_request_cancelled_before_it_is_sent_leaves_nothing_behind() -> No
 
         async def request_queued_behind() -> None:
             with queued:
-                await _result(transport, "exec_remote_poll_wait")
+                await _result(transport, "exec_remote_poll_wait", timeout=30)
 
-        host.send = held_send  # type: ignore[method-assign]
+        monkeypatch.setattr(host, "send", held_send)
         with anyio.fail_after(30):
             async with anyio.create_task_group() as tg:
-                tg.start_soon(_result, transport, "exec_remote_poll_wait")
+                tg.start_soon(
+                    partial(_result, transport, "exec_remote_poll_wait", timeout=30)
+                )
                 await anyio.wait_all_tasks_blocked()  # it holds the send lock
                 tg.start_soon(request_queued_behind)
                 await anyio.wait_all_tasks_blocked()  # it waits for the lock
