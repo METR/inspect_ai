@@ -572,8 +572,14 @@ def _bridged_transport(sandbox: _BridgeSandbox) -> SandboxJSONRPCTransport:
     return SandboxJSONRPCTransport(sandbox, SANDBOX_CLI, bridge=True)
 
 
+_BUDGET = 30
+"""Seconds a test gives a request or a wait: a CI runner can stall for 5-13 s."""
+
+
 async def _result(transport: SandboxJSONRPCTransport, method: str, **args: Any) -> Any:
-    args.setdefault("timeout", 30)  # fail rather than hang when a reply never comes
+    args.setdefault(
+        "timeout", _BUDGET
+    )  # fail rather than hang when a reply never comes
     return json.loads(await transport(method, {}, False, **args))["result"]
 
 
@@ -665,7 +671,7 @@ async def test_exec_remote_over_an_open_bridge_is_sent_without_a_turn_of_the_loo
     async with _bridge_sandbox(serve) as sandbox:
         proxy = SandboxEnvironmentProxy(sandbox)
         proxy._tools_injected = True  # checked earlier in the sample
-        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
         await proxy.exec_remote(["ls"], options, stream=False)  # opens the bridge
         monkeypatch.setattr(_Pipe, "send", counted_send)
         async with anyio.create_task_group() as tg:
@@ -820,7 +826,7 @@ async def test_bridge_that_does_not_open_in_time_is_not_used(
     async with _bridge_sandbox(_serve_forever) as sandbox:
         sandbox.before_open = anyio.sleep_forever
         transport = _bridged_transport(sandbox)
-        with anyio.fail_after(10):  # the request's timeout does not cover opening
+        with anyio.fail_after(_BUDGET):  # the request's timeout does not cover opening
             assert await _result(transport, "exec_remote_poll_wait") == "per-call"
             assert await _result(transport, "exec_remote_poll_wait") == "per-call"
 
@@ -992,7 +998,7 @@ async def test_close_bridges_ends_the_bridge_for_good() -> None:
         transport = _bridged_transport(sandbox)
         assert await _result(transport, "exec_remote_start_wait") == "bridged"
         await close_bridges(sandbox)
-        with anyio.fail_after(10):
+        with anyio.fail_after(_BUDGET):
             await closed.wait()
         assert await _result(transport, "exec_remote_start_wait") == "per-call"
 
@@ -1006,7 +1012,11 @@ async def test_bridged_request_records_the_exec_event() -> None:
         proxy = SandboxEnvironmentProxy(sandbox)
         transport = SandboxJSONRPCTransport(proxy, SANDBOX_CLI, bridge=True)
         await transport(
-            "exec_remote_start_wait", {"command": "ls"}, False, user="root", timeout=10
+            "exec_remote_start_wait",
+            {"command": "ls"},
+            False,
+            user="root",
+            timeout=_BUDGET,
         )
 
     [event] = [e for e in transcript().events if isinstance(e, SandboxEvent)]
@@ -1016,7 +1026,7 @@ async def test_bridged_request_records_the_exec_event() -> None:
         0,
     )
     assert json.loads(event.input or "")["params"] == {"command": "ls"}
-    assert event.options == {"user": "root", "timeout": 10}
+    assert event.options == {"user": "root", "timeout": _BUDGET}
 
 
 @pytest.mark.usefixtures("bridge_on")
@@ -1045,7 +1055,7 @@ async def test_exec_remote_runs_over_the_bridge() -> None:
             proxy,
             ["ls"],
             5,
-            ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10),
+            ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET),
         )
 
     assert (result.returncode, result.stdout, result.stderr) == (3, "out", "err")
@@ -1062,8 +1072,8 @@ async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refuse
 ) -> None:
     """The tools directory went away since the install check, so the launch is refused.
 
-    On a reopen, the bridge before it ended with its container. A provider may end
-    lines with CRLF, as the exec path allows.
+    On a reopen, the bridge before it ended with its container. The refusal line is
+    compared stripped, as the exec path compares stdout.
     """
     refused_closed = anyio.Event()
 
@@ -1079,12 +1089,12 @@ async def test_exec_remote_fails_as_a_replaced_sandbox_when_its_bridge_is_refuse
 
     async with _bridge_sandbox(serve) as sandbox:
         proxy = SandboxEnvironmentProxy(sandbox)
-        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
         for _ in range(calls_before):
             assert (await exec_remote_awaitable(proxy, ["ls"], 5, options)).success
         with pytest.raises(SandboxReplacedError, match="the sandbox tools bridge"):
             await exec_remote_awaitable(proxy, ["ls"], 5, options)
-        with anyio.fail_after(10):
+        with anyio.fail_after(_BUDGET):
             await refused_closed.wait()
 
     # not taken for an older build, nor resent or killed in an exec
@@ -1134,7 +1144,7 @@ async def test_sample_exit_closes_its_bridges(
             )
             assert await _result(transport, "exec_remote_start_wait") == "bridged"
         if not close_fails:
-            with anyio.fail_after(10):
+            with anyio.fail_after(_BUDGET):
                 await closed.wait()
 
     assert provider.cleanups == ([False] if cleanup else [])
@@ -1217,7 +1227,7 @@ async def test_bridge_that_does_not_start_is_closed(
 
     async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
-        with anyio.fail_after(10):
+        with anyio.fail_after(_BUDGET):
             if serve_ready:
                 assert await _result(transport, "exec_remote_poll_wait") == "per-call"
             else:
@@ -1272,7 +1282,7 @@ async def test_chunked_reply_is_fetched_over_the_bridge() -> None:
     async with _bridge_sandbox(serve) as sandbox:
         with override_max_exec_output_size(1024):
             reply = await _bridged_transport(sandbox)(
-                "exec_remote_poll_wait", {}, False, timeout=10
+                "exec_remote_poll_wait", {}, False, timeout=_BUDGET
             )
 
     assert reply == original.decode()
@@ -1305,7 +1315,7 @@ async def test_held_request_over_an_open_bridge_ignores_the_held_request_limit(
 
     async with _bridge_sandbox(serve) as sandbox:
         proxy = SandboxEnvironmentProxy(sandbox)
-        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
         for _ in range(2):
             await exec_remote_awaitable(proxy, ["ls"], 5, options)
 
@@ -1365,11 +1375,13 @@ async def test_closing_a_bridge_resends_the_requests_waiting_on_it() -> None:
     results: list[Any] = []
 
     async def waiting(transport: SandboxJSONRPCTransport) -> None:
-        results.append(await _result(transport, "exec_remote_poll_wait"))
+        results.append(
+            await _result(transport, "exec_remote_poll_wait", timeout=2 * _BUDGET)
+        )
 
     async with _bridge_sandbox(serve) as sandbox:
         transport = _bridged_transport(sandbox)
-        with anyio.fail_after(5):  # well inside the waiting request's own timeout
+        with anyio.fail_after(_BUDGET):  # well inside the waiting request's own timeout
             async with anyio.create_task_group() as requests:
                 requests.start_soon(waiting, transport)
                 await anyio.wait_all_tasks_blocked()
@@ -1395,12 +1407,16 @@ async def test_closing_a_bridge_fails_its_waiting_requests_even_if_its_stream_st
     results: list[Any] = []
 
     async def waiting(transport: SandboxJSONRPCTransport) -> None:
-        results.append(await _result(transport, "exec_remote_poll_wait"))
+        results.append(
+            await _result(transport, "exec_remote_poll_wait", timeout=2 * _BUDGET)
+        )
 
     async with _bridge_sandbox(serve) as sandbox:
         sandbox.close_fails = True
         transport = _bridged_transport(sandbox)
-        with anyio.fail_after(5):  # well inside the waiting requests' own timeouts
+        with anyio.fail_after(
+            _BUDGET
+        ):  # well inside the waiting requests' own timeouts
             async with anyio.create_task_group() as requests:
                 requests.start_soon(waiting, transport)
                 requests.start_soon(waiting, transport)
@@ -1434,7 +1450,7 @@ async def test_bridge_that_opens_after_the_sample_ends_is_closed() -> None:
     async with _bridge_sandbox(serve) as sandbox:
         sandbox.before_open = slow_open
         transport = _bridged_transport(sandbox)
-        with anyio.fail_after(10):
+        with anyio.fail_after(_BUDGET):
             async with anyio.create_task_group() as requests:
                 requests.start_soon(request, transport)
                 await opening.wait()
@@ -1503,10 +1519,10 @@ async def test_held_request_too_long_for_a_frame_takes_a_held_request_slot(
         monkeypatch.setattr(sandbox, "exec", exec)
         proxy = SandboxEnvironmentProxy(sandbox)
         with override_max_exec_output_size(4096):
-            options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+            options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
             await exec_remote_awaitable(proxy, ["ls"], 5, options)  # opens the bridge
             options = ExecRemoteAwaitableOptions(
-                input="x" * 8192, server_wait=True, poll_timeout=10
+                input="x" * 8192, server_wait=True, poll_timeout=_BUDGET
             )
             await exec_remote_awaitable(proxy, ["cat"], 5, options)
 
@@ -1548,7 +1564,7 @@ async def test_held_request_whose_bridge_cannot_restart_takes_a_held_request_slo
     async with _bridge_sandbox(serve) as sandbox:
         monkeypatch.setattr(sandbox, "exec", exec)
         proxy = SandboxEnvironmentProxy(sandbox)
-        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=10)
+        options = ExecRemoteAwaitableOptions(server_wait=True, poll_timeout=_BUDGET)
         await exec_remote_awaitable(proxy, ["ls"], 5, options)  # opens the bridge
         sandbox.before_open = not_ready
         await exec_remote_awaitable(proxy, ["ls"], 5, options)
