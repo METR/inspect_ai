@@ -238,6 +238,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         handle = chunk.handle
         total_size = chunk.total_size
         expected_offset = 0
+        whole = False
         try:
             while True:
                 _validate_response_chunk(
@@ -253,11 +254,13 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                             "Chunked JSON-RPC response size did not match metadata"
                         )
                     try:
-                        return response_bytes.decode("utf-8")
+                        text = response_bytes.decode("utf-8")
                     except UnicodeDecodeError:
                         raise RuntimeError(
                             "Chunked JSON-RPC response was not valid UTF-8"
                         ) from None
+                    whole = True
+                    return text
 
                 expected_offset = chunk.next_offset
                 next_response = await self._sandbox_exec(
@@ -276,7 +279,7 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 chunk = next_chunk
         finally:
             await self._release_chunked_response(
-                handle, transport_extra_args, max_response_bytes
+                handle, transport_extra_args, max_response_bytes, whole
             )
 
     async def _release_chunked_response(
@@ -284,7 +287,13 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         handle: str,
         transport_extra_args: dict[str, Any],
         max_response_bytes: int,
+        whole: bool,
     ) -> None:
+        """Release a chunked reply's files on the server.
+
+        A refused release fails a reply that came in `whole`; it does not replace an
+        error already on its way (a cancellation, say).
+        """
         cleanup_args = {
             **transport_extra_args,
             "timeout": 5,
@@ -303,7 +312,8 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
                 max_response_bytes,
             )
         except SandboxReplacedError:
-            raise
+            if whole:
+                raise
         except Exception:
             pass  # best effort: the server drops stale chunks itself
 

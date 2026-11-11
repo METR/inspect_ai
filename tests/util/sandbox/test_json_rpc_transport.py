@@ -125,6 +125,26 @@ async def test_a_chunked_reply_whose_release_is_refused_fails_as_a_replaced_sand
     assert offsets == [0, 100]  # every chunk was fetched before the release
 
 
+async def test_a_refused_release_does_not_replace_an_error_on_its_way() -> None:
+    """A cancellation, say: the call fails with what stopped it."""
+    reply = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 100}).encode()
+
+    def policy(cmd: list[str], user: str | None) -> ExecResult[str]:
+        params = json.loads(sandbox.inputs[-1] or "").get("params", {})
+        if params.get("release"):
+            return ExecResult(True, 0, f"{TOOLS_DIR_REFUSED}\n", "")
+        if params.get("offset"):
+            return ExecResult(True, 0, "not a chunk", "")
+        return ExecResult(True, 0, _chunk_response(reply, "c" * 32, 0, 100), "")
+
+    sandbox = CannedSandbox(policy)
+    transport = SandboxJSONRPCTransport(sandbox, SANDBOX_CLI)
+    with override_max_exec_output_size(64), pytest.raises(RuntimeError) as raised:
+        await transport("big", {}, False)
+
+    assert not isinstance(raised.value, SandboxReplacedError)
+
+
 async def test_sandbox_json_rpc_transport_leaves_plain_response() -> None:
     response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "ok"})
 
