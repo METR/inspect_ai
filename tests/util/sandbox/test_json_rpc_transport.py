@@ -175,6 +175,13 @@ async def test_a_chunked_reply_is_capped_at_the_read_file_limit(
         pytest.param(
             None, 512 * 1024, 512 * 1024, True, id="the tools' 512 KiB pieces"
         ),
+        pytest.param(
+            None,
+            48 * 1024,
+            48 * 1024,
+            True,
+            id="the tools' pieces in their 64 KiB frame",
+        ),
     ],
 )
 async def test_a_chunked_reply_in_tiny_pieces_fails_that_call(
