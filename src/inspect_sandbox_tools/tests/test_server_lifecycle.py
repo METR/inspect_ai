@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any, NamedTuple
+from uuid import uuid4
 
 import psutil
 import pytest
@@ -699,6 +700,43 @@ def test_stop_server_without_running_server_is_idempotent() -> None:
         assert not server_dir.exists()
         assert not (server_dir / "shutdown-status.json").exists()
     finally:
+        shutil.rmtree(test_root, ignore_errors=True)
+
+
+def test_commands_do_not_see_the_hosts_reply_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host sets it on each tools exec; the server's commands are the agent's."""
+    monkeypatch.setenv("INSPECT_SANDBOX_JSON_RPC_RESPONSE_MAX_BYTES", "65536")
+    test_root = Path(tempfile.mkdtemp(prefix="ist-private-env-"))
+    server_dir = test_root / "sandbox-tools"
+    request_id = uuid4().hex
+
+    def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request = {"jsonrpc": "2.0", "method": method, "id": 1, "params": params}
+        return _rpc(request, server_dir=server_dir, cwd=test_root)["result"]["result"]
+
+    try:
+        result = call(
+            "exec_remote_start_wait",
+            {
+                "request_id": request_id,
+                "command": "printenv INSPECT_SANDBOX_JSON_RPC_RESPONSE_MAX_BYTES; echo end",
+                "wait_seconds": 5,
+            },
+        )
+        stdout = result["stdout"]
+        deadline = time.monotonic() + 30
+        while result["state"] == "running" and time.monotonic() < deadline:
+            result = call(
+                "exec_remote_poll_wait",
+                {"request_id": request_id, "ack_seq": result["seq"], "wait_seconds": 5},
+            )
+            stdout += result["stdout"]
+
+        assert stdout == "end\n"
+    finally:
+        _run_cli("stop-server", server_dir=server_dir, cwd=test_root, check=False)
         shutil.rmtree(test_root, ignore_errors=True)
 
 

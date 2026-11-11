@@ -17,6 +17,9 @@ from inspect_sandbox_tools._util.constants import (
     SHUTDOWN_STATUS_PATH,
     SOCKET_PATH,
 )
+from inspect_sandbox_tools._util.json_rpc_chunking import (
+    JSON_RPC_RESPONSE_MAX_BYTES_ENV,
+)
 from inspect_sandbox_tools._util.load_tools import load_tools
 from inspect_sandbox_tools._util.server_dir import (
     ensure_private_server_dir,
@@ -100,8 +103,10 @@ def main() -> None:
     _shutdown_errors.clear()
     _shutdown_complete = False
     # The server directory is already resolved at import time. Do not expose the
-    # internal location to user commands spawned by remote tools.
+    # internal location to user commands spawned by remote tools, nor the host's
+    # reply size limit, which only the CLI that answers the host reads.
     os.environ.pop(SERVER_DIR_ENV, None)
+    os.environ.pop(JSON_RPC_RESPONSE_MAX_BYTES_ENV, None)
     load_tools("inspect_sandbox_tools._remote_tools")
 
     ensure_private_server_dir(SERVER_DIR)
