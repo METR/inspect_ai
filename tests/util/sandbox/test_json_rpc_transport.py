@@ -1035,6 +1035,27 @@ async def test_bridge_that_does_not_start_is_closed(
 
 
 @pytest.mark.usefixtures("bridge_on")
+async def test_nothing_is_sent_before_the_bridge_is_ready() -> None:
+    """A provider may start the bridge through a shell reading the same stdin.
+
+    dash and busybox sh read ahead of the line they run, so a request sent before
+    the bridge started could be lost to the shell.
+    """
+    early: list[bytes] = []
+
+    async def serve(bridge: _FakeBridge) -> None:
+        with anyio.move_on_after(0.2):
+            early.append(await bridge.stream.receive())
+        await bridge.ready()
+        await bridge.reply(await bridge.next_request())
+
+    async with _bridge_sandbox(serve) as sandbox:
+        result = await _result(_bridged_transport(sandbox), "exec_remote_poll_wait")
+
+    assert (early, result) == ([], "bridged")
+
+
+@pytest.mark.usefixtures("bridge_on")
 async def test_chunked_reply_is_fetched_over_the_bridge() -> None:
     original = json.dumps({"jsonrpc": "2.0", "id": 1, "result": "x" * 2000}).encode()
     handle = "d" * 32

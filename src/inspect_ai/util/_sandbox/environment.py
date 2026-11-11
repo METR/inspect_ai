@@ -355,6 +355,8 @@ class SandboxEnvironment(abc.ABC):
         raising `anyio.EndOfStream` once stdout closes; either raises
         `anyio.BrokenResourceError` when the connection to the command breaks.
         A cancelled `receive()` loses no data. Stderr is not part of the stream.
+        Inspect sends nothing until the command has written a line, so a
+        provider may start the command through a shell reading the same stdin.
         Closing the stream ends the command's stdin and stdout (the sandbox tools
         `bridge` then exits) and a pending `receive()` or `send()`. Starting the
         command, sending, and closing must stop promptly when cancelled, since
