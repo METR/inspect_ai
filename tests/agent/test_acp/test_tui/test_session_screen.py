@@ -971,7 +971,8 @@ async def test_pressing_a_resolves_approve_via_screen_binding(
     stranded on the now-hidden composer ``TextArea`` (which would
     eat the keystroke) or the action mount sequence racing with
     ``first.focus()`` so the screen's ``priority=True`` binding
-    didn't reach ``check_action`` cleanly.
+    didn't reach ``check_action`` cleanly. Once the card closes, the
+    composer has focus again.
     """
     client = make_fake_client(sample_rows)
     app = InspectAcpApp(eval_id=None, server=None, client=client)
@@ -1010,6 +1011,7 @@ async def test_pressing_a_resolves_approve_via_screen_binding(
             f"composer.text={composer.text!r}"
         )
         assert tc.last_approval_decision == "approved"
+        assert app.screen.focused is composer
 
 
 @skip_if_trio
@@ -1152,13 +1154,12 @@ async def test_key_right_after_a_withdrawal_is_reported_and_lands_nowhere(
     """A letter or Enter meant for a just-withdrawn approval decides nothing.
 
     Keys have no explicit target, so for a moment they belong to the
-    withdrawn card: a letter or Enter must not answer the approval shown
-    next, even with its button focused, and with none left Enter must
-    not send the composer draft. The terminal says the decision was not
-    applied, and the composer is back once the moment passes.
+    withdrawn card and nothing has focus: a letter or Enter must not
+    answer the approval shown next, and with none left Enter must not
+    send the composer draft. The terminal says the decision was not
+    applied, and the composer has focus once the moment passes.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
-    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
 
     app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
     async with app.run_test() as pilot:
@@ -1181,7 +1182,7 @@ async def test_key_right_after_a_withdrawal_is_reported_and_lands_nowhere(
         screen.state.withdraw_approval(shown)
         await pilot.press("a")
         await pilot.pause()
-        assert getattr(screen.focused, "id", None) == f"{_BUTTON_ID_PREFIX}approve"
+        assert screen.focused is None
         await pilot.press("enter")
         await pilot.pause()
         assert screen.state.current_pending_approval() is behind
@@ -1393,7 +1394,8 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
 ) -> None:
     """An open ``ask_user`` form keeps focus when an approval stops pending.
 
-    Neither the end of a withdrawal's late moment nor the card that
+    A form opened in the moment after the focused approval is withdrawn
+    gets focus when that moment ends. Neither that nor the card that
     replaces a withdrawn one may take focus from the form, so typing and
     Enter still answer it. When the form closes, the approval card's
     first button takes focus, not its last (Terminate).
@@ -1430,11 +1432,11 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
         early = _form()
         screen.state.consume_elicitation_request(early)
         await pilot.pause()
-        await pilot.press("b", "o")
+        assert screen.focused is None
         clock[0] += 1.0
         screen._tick()
         await pilot.pause()
-        await pilot.press("b", "enter")
+        await pilot.press("b", "o", "b", "enter")
         await pilot.pause()
         assert early.content == {"name": "bob"}
 
@@ -1470,6 +1472,7 @@ async def test_approval_arriving_under_the_cancel_card_leaves_it_focused(
     Terminate button, one Enter away from ending the sample.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
 
     app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
     async with app.run_test() as pilot:
@@ -1483,9 +1486,122 @@ async def test_approval_arriving_under_the_cancel_card_leaves_it_focused(
 
         await pilot.press("escape")
         await pilot.pause()
+        assert getattr(screen.focused, "id", None) == f"{_BUTTON_ID_PREFIX}approve"
         await pilot.press("enter")
         await pilot.pause()
         assert pending.chosen_option_id != "terminate"
+
+
+@skip_if_trio
+@pytest.mark.anyio
+@pytest.mark.parametrize("approval_arrives", ["before", "after", None])
+async def test_closing_the_cancel_card_leaves_typing_in_an_open_form(
+    sample_rows: list[SessionRow], approval_arrives: str | None
+) -> None:
+    """Esc on the cancel card opened over an ``ask_user`` form keeps typing there.
+
+    The next keys answer the form: they don't decide an approval under
+    the cards or go into the hidden composer.
+    """
+    from inspect_ai.agent._acp.tui.state import PendingApproval
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        if approval_arrives == "before":
+            screen.state.consume_approval_request(pending)
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        if approval_arrives == "after":
+            screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        await pilot.press("b", "o", "ctrl+n")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("x", "enter")
+        await pilot.pause()
+        assert form is not None and form.content == {"name": "box"}
+        assert not pending.event.is_set()
+        assert screen.query_one("#composer", TextArea).text == ""
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_enter_right_after_the_focused_approval_is_withdrawn_spares_a_form(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter right after the focused approval is withdrawn is only reported.
+
+    Nothing has focus for that moment, so the Enter can't decline the
+    ``ask_user`` form above the card, where Textual would move focus.
+    """
+    from textual.widgets import Button
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+        shown: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(shown)
+        await pilot.pause()
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        screen.query_one(f"#{_BUTTON_ID_PREFIX}approve", Button).focus()
+        await pilot.pause()
+
+        screen.state.withdraw_approval(shown)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert form is not None and form.action is None
+        assert notes == [withdrawn_notice(shown)]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_letters_in_a_form_select_field_decide_no_approval(
+    sample_rows: list[SessionRow],
+) -> None:
+    """With an ``ask_user`` Select field focused, ``a`` doesn't approve.
+
+    Letters belong to the form while it has focus, as in a text field.
+    """
+    import asyncio
+
+    from acp.schema import ElicitationBooleanPropertySchema, ElicitationSchema
+    from textual.widgets import Select
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        # An optional boolean with no default renders as a Select.
+        schema = ElicitationSchema(
+            properties={"ok": ElicitationBooleanPropertySchema(type="boolean")}
+        )
+        screen.state.consume_elicitation_request(
+            PendingElicitation(
+                message="Proceed?", requested_schema=schema, event=asyncio.Event()
+            )
+        )
+        await pilot.pause()
+        assert isinstance(screen.focused, Select)
+
+        await pilot.press("a")
+        await pilot.pause()
+        assert not pending.event.is_set()
 
 
 @skip_if_trio

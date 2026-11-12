@@ -97,11 +97,6 @@ class _ElicitationCard(InlineRequestCard):
         super().__init__()
         self._message = message
         self._schema = schema
-        # Held for ``on_mount`` so focus lands on the first form field
-        # — the base's first-focusable walk would land on the
-        # ElicitationForm's first input anyway, but going through
-        # ``ElicitationForm.focus_first`` is more deliberate (it
-        # knows how to skip over decorative widgets inside the form).
         self._form: ElicitationForm | None = None
 
     @classmethod
@@ -155,24 +150,10 @@ class _ElicitationCard(InlineRequestCard):
             tooltip="Decline to answer.",
         )
 
-    def on_mount(self) -> None:
-        # Override the base's first-focusable walk: go through
-        # ``ElicitationForm.focus_first`` so we land on a real form
-        # input even if the form starts with decorative widgets.
-        #
-        # Defer one refresh cycle: at on_mount time the form's
-        # FieldRow children have been yielded and their direct
-        # children (Input / Select / etc.) appear in the widget
-        # tree, but layout hasn't run yet and Textual's
-        # ``focus()`` is a no-op against a widget that isn't yet
-        # part of a laid-out screen. ``call_after_refresh`` runs
-        # the call after the next refresh pass, when the whole
-        # subtree is live and focusable. Mirrors the
-        # "Approval / cancel auto-focus a button on mount" UX —
-        # the elicitation flavour just targets the first form
-        # input rather than the first button.
+    def focus_first(self) -> None:
+        """Focus the form's first field; the base walk stops at the form itself."""
         if self._form is not None:
-            self.call_after_refresh(self._form.focus_first)
+            self._form.focus_first()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter on a form Input → advance to next empty required, or submit.

@@ -20,14 +20,11 @@ from __future__ import annotations
 
 from acp.schema import PermissionOption
 from rich.text import Text
-from textual import events
 from textual.app import ComposeResult
 from textual.widgets import Button
 
 from inspect_ai.agent._acp.tui.state import PendingApproval
 
-from .cancel_card import _CancelCard
-from .elicitation_card import _ElicitationCard
 from .inline_request_card import InlineRequestCard
 from .tool_call import _BUTTON_ID_PREFIX, ApprovalDecisionRequested
 
@@ -86,24 +83,6 @@ class _ApprovalCard(InlineRequestCard):
     def from_pending(cls, pending: PendingApproval) -> "_ApprovalCard":
         """Build a card for a parked :class:`PendingApproval`."""
         return cls(pending)
-
-    def on_mount(self, event: events.Mount | None = None) -> None:
-        """Leave focus in an open ``ask_user`` form or the cancel card.
-
-        Otherwise the base class focuses the first button, so a card
-        that replaces a withdrawn one would take a later Enter.
-        ``prevent_default`` stops Textual running the base handler.
-        """
-        focused = self.screen.focused
-        if (
-            event is not None
-            and focused is not None
-            and any(
-                isinstance(node, (_ElicitationCard, _CancelCard))
-                for node in focused.ancestors_with_self
-            )
-        ):
-            event.prevent_default()
 
     @property
     def header_text(self) -> Text:

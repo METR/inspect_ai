@@ -246,14 +246,6 @@ class SessionScreen(Screen[None]):
     }
     """
 
-    # Tracks whether the previous ``_apply_lifecycle`` was deciding (an
-    # approval pending, or a withdrawn one's late window) so it can hand
-    # focus back to the composer when that ends. The bar itself takes
-    # focus on mount; without this, focus would be stranded on the (now
-    # hidden) last-pressed action button and the next keystroke would go
-    # nowhere.
-    _last_deciding: bool = False
-
     def __init__(
         self,
         *,
@@ -269,6 +261,9 @@ class SessionScreen(Screen[None]):
         self._unsubscribe: Callable[[], None] | None = None
         # The approval a mouse press started on; see ``on_mouse_down``.
         self._pressed_approval: PendingApproval | None = None
+        # True from removing a focused, withdrawn approval card until its
+        # late moment ends; see ``_apply_focus_rule``.
+        self._focus_parked = False
         # Set by ``action_switch_sample`` so the disconnect watcher can
         # tell a user-initiated pop from a peer-side EOF and skip the
         # otherwise-misleading "disconnected from server" toast.
@@ -342,14 +337,16 @@ class SessionScreen(Screen[None]):
             return
         header.set_usage(self._state.usage)
         transcript.refresh_from(self._state)
-        self._apply_request_cards()
+        cards_changed = self._apply_request_cards()
         # ``_apply_lifecycle`` calls ``refresh_bindings`` itself so the
         # ``^p plan`` footer hint flips on the same tick the strip
         # becomes visible (and so the bare-letter gates re-evaluate
         # when the cards mount / unmount).
         self._apply_lifecycle()
+        if cards_changed:
+            self._apply_focus_rule()
 
-    def _apply_request_cards(self) -> None:
+    def _apply_request_cards(self) -> bool:
         """Mount / unmount the three inline request cards based on state.
 
         Single source of truth is :class:`SessionState`. Three slots
@@ -363,30 +360,35 @@ class SessionScreen(Screen[None]):
         once in principle (a cancel card on top of a parked approval),
         though in practice approval and elicitation park the agent so
         cancel is the only one that can land while another card is up.
+
+        Returns True if any card was mounted or removed.
         """
-        self._reconcile_card(
-            _ElicitationCard,
-            self._state.pending_elicitation,
-            lambda pending: _ElicitationCard.from_pending(pending),
-        )
-        self._reconcile_card(
-            _ApprovalCard,
-            self._state.current_pending_approval(),
-            lambda pending: _ApprovalCard.from_pending(pending),
-        )
-        self._reconcile_card(
-            _CancelCard,
-            self._state.pending_cancel,
-            lambda pending: _CancelCard.from_pending(pending, self._state),
-        )
+        changed = [
+            self._reconcile_card(
+                _ElicitationCard,
+                self._state.pending_elicitation,
+                lambda pending: _ElicitationCard.from_pending(pending),
+            ),
+            self._reconcile_card(
+                _ApprovalCard,
+                self._state.current_pending_approval(),
+                lambda pending: _ApprovalCard.from_pending(pending),
+            ),
+            self._reconcile_card(
+                _CancelCard,
+                self._state.pending_cancel,
+                lambda pending: _CancelCard.from_pending(pending, self._state),
+            ),
+        ]
+        return any(changed)
 
     def _reconcile_card(
         self,
         card_cls: type[InlineRequestCard],
         pending: object | None,
         factory: Callable[[Any], InlineRequestCard],
-    ) -> None:
-        """Mount / unmount / replace a single card class.
+    ) -> bool:
+        """Mount / unmount / replace a single card class; True if anything changed.
 
         Three cases:
 
@@ -407,35 +409,68 @@ class SessionScreen(Screen[None]):
         sibling of the transcript (not a child), it never scrolls
         out of view, which is why we don't need a separate
         auto-follow scroll for the cancel card.
+
+        A card removed while it holds focus gives focus up first, so
+        Textual can't hand it to a neighbour (a form's Decline, an
+        approval's Terminate); :meth:`_apply_focus_rule` picks the target.
         """
         existing: InlineRequestCard | None
         try:
             existing = self.query_one(card_cls)
         except NoMatches:
             existing = None
-        if pending is None:
-            if existing is not None:
-                approval = self._approval_card_or_none()
-                focused = self.focused
-                if (
-                    approval is not None
-                    and approval is not existing
-                    and focused is not None
-                    and existing in focused.ancestors_with_self
-                ):
-                    # Else Textual moves focus to its last button (Terminate).
-                    for button in approval.query(Button):
-                        button.focus()
-                        break
-                existing.remove()
-            return
+        if existing is not None and existing.request is pending:
+            return False
         if existing is not None:
-            if existing.request is pending:
-                return
+            if self._focus_in(type(existing)):
+                self.set_focus(None)
+                request = existing.request
+                if isinstance(request, PendingApproval) and request.withdrawn:
+                    self._focus_parked = True
             existing.remove()
-        card = factory(pending)
-        plan_strip = self.query_one(PlanStripWidget)
-        self.query_one("Vertical").mount(card, after=plan_strip)
+        if pending is not None:
+            card = factory(pending)
+            plan_strip = self.query_one(PlanStripWidget)
+            self.query_one("Vertical").mount(card, after=plan_strip)
+            # Queued on the card, so it runs once the card's controls exist.
+            card.call_later(self._apply_focus_rule)
+        return existing is not None or pending is not None
+
+    def _apply_focus_rule(self) -> None:
+        """Put focus where the operator's next key belongs.
+
+        An open ``ask_user`` form, else the cancel card, else the current
+        approval's first button, else the composer unless disabled, else
+        nothing. For the moment after the focused approval is withdrawn,
+        nothing: a key then was meant for that card and is reported.
+        Cards are found by their pending request, as a removed card stays
+        in the DOM until its task ends.
+        """
+        if self._focus_parked and self._state.late_decision_target() is not None:
+            return
+        self._focus_parked = False
+        for pending in (
+            self._state.pending_elicitation,
+            self._state.pending_cancel,
+            self._state.current_pending_approval(),
+        ):
+            if pending is not None:
+                for card in self.query(InlineRequestCard):
+                    if card.request is pending and not self._focus_in(type(card)):
+                        card.focus_first()
+                return
+        composer = self._composer_or_none()
+        if composer is not None and not composer.disabled:
+            composer.focus()
+        else:
+            self.set_focus(None)
+
+    def _focus_in(self, *card_types: type[InlineRequestCard]) -> bool:
+        """Whether focus is inside a card of one of ``card_types``."""
+        focused = self.focused
+        return focused is not None and any(
+            isinstance(node, card_types) for node in focused.ancestors_with_self
+        )
 
     def _elicitation_card_or_none(self) -> _ElicitationCard | None:
         try:
@@ -533,11 +568,7 @@ class SessionScreen(Screen[None]):
             return self._letter_targets_visible_bar(str(_parameters[0]))
         if action == "late_enter":
             # Enter in the cancel card or an ask_user form has its own target.
-            focused = self.focused
-            if focused is not None and any(
-                isinstance(node, (_CancelCard, _ElicitationCard))
-                for node in focused.ancestors_with_self
-            ):
+            if self._focus_in(_CancelCard, _ElicitationCard):
                 return False
             return self._state.late_decision_target() is not None
         # Composer-driven actions are meaningless in an observe-only
@@ -638,25 +669,8 @@ class SessionScreen(Screen[None]):
                     else "type a message"
                 )
                 composer.disabled = False
-        # Focus handoff on the approval-card unmount boundary: after a
-        # decision the card unmounts and any focused button is now
-        # invisible, so we route focus back to the composer so the
-        # operator can type again. Skip the handoff while a cancel
-        # card is up; that card's first button owns focus. A withdrawal
-        # defers it for the late window, so a key meant for the
-        # withdrawn card isn't typed into the composer.
-        deciding = (
-            lifecycle == "approval" or self._state.late_decision_target() is not None
-        )
-        if (
-            self._last_deciding
-            and not deciding
-            and composer is not None
-            and self._state.pending_cancel is None
-            and self._state.pending_elicitation is None
-        ):
-            composer.focus()
-        self._last_deciding = deciding
+        if self._focus_parked and self._state.late_decision_target() is None:
+            self._apply_focus_rule()
         # Bindings depend on which cards are mounted (see
         # check_action) — nudge the bindings view so the footer + key
         # dispatch stay in sync with the row owner.
@@ -1243,9 +1257,6 @@ class SessionScreen(Screen[None]):
                 # actually proceeds to cancel.
                 return
             self._state.resolve_cancel()
-            composer = self._composer_or_none()
-            if composer is not None:
-                composer.focus()
             return
         elicit_card = self._elicitation_card_or_none()
         if elicit_card is not None:
@@ -1297,8 +1308,12 @@ class SessionScreen(Screen[None]):
 
         Cancel card takes precedence: ``e`` while a cancel card is
         mounted activates ``Cancel: Error`` (when offered), not the
-        approval ``escalate``.
+        approval ``escalate``. No letter acts while focus is inside an
+        ``ask_user`` form: it's the form's input (a Select field would
+        otherwise let it decide an approval).
         """
+        if self._focus_in(_ElicitationCard):
+            return False
         cancel_card = self._cancel_card_or_none()
         if cancel_card is not None:
             if letter == "s":

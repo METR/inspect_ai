@@ -58,6 +58,10 @@ class _CardApp(App[None]):
     def compose(self) -> ComposeResult:
         yield _ElicitationCard(message=self._message, schema=self._schema)
 
+    def on_mount(self) -> None:
+        # The session screen's focus rule does this in the app.
+        self.query_one(_ElicitationCard).focus_first()
+
     def on_elicitation_decision_requested(
         self, message: ElicitationDecisionRequested
     ) -> None:
@@ -236,7 +240,7 @@ async def test_submit_with_only_optional_fields_blank_bubbles_empty_content() ->
 
 
 # ---------------------------------------------------------------------------
-# Mount-time focus + Enter dispatch (parity with approval / cancel cards)
+# focus_first + Enter dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -273,26 +277,15 @@ def _two_string_schema() -> ElicitationSchema:
 
 @skip_if_trio
 @pytest.mark.anyio
-async def test_mount_focuses_first_form_input() -> None:
-    """On mount, focus lands on the first Input — parity with approval / cancel.
+async def test_focus_first_focuses_first_form_input() -> None:
+    """``focus_first`` lands on the first Input, not the scrollable form.
 
-    Approval / cancel cards inherit the base
-    :meth:`InlineRequestCard.on_mount` first-focusable walk, which
-    lands on a Button. Elicitation overrides on_mount to instead
-    route through :meth:`ElicitationForm.focus_first` so the
-    cursor lands on the first form input rather than the header
-    Static. The override defers via ``call_after_refresh`` because
-    layout hasn't run by the time the parent's on_mount fires —
-    without the defer the focus call silently no-ops against the
-    not-yet-laid-out subtree.
+    The base :meth:`InlineRequestCard.focus_first` walk would stop at
+    the focusable ``ElicitationForm`` container; the override routes
+    through :meth:`ElicitationForm.focus_first` instead.
     """
     app = _CardApp(message="What's your name?", schema=_single_string_schema())
     async with app.run_test() as pilot:
-        await pilot.pause()
-        # call_after_refresh fires AFTER the next refresh, which
-        # pilot.pause() advances; a second pause covers any extra
-        # message-pump tick between the focus call and pilot
-        # observing it.
         await pilot.pause()
         inputs = list(app.query(Input))
         assert len(inputs) == 1
@@ -319,8 +312,8 @@ async def test_enter_on_only_field_submits() -> None:
         # going through ``pilot.press("enter")`` exercises the full
         # key path — the Input's own Enter binding fires
         # ``action_submit``, which awaits and emits the bubble.
-        # Relies on mount-time focus landing on this Input
-        # (pinned by ``test_mount_focuses_first_form_input``).
+        # Relies on the host's ``focus_first`` landing on this Input
+        # (pinned by ``test_focus_first_focuses_first_form_input``).
         await pilot.press("enter")
         await pilot.pause()
 

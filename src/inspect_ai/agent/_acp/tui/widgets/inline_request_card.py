@@ -138,15 +138,15 @@ class InlineRequestCard(Vertical):
         with Horizontal(id=_ACTIONS_ID):
             yield from self.compose_actions()
 
-    def on_mount(self) -> None:
-        """Focus the first focusable descendant on mount.
+    def focus_first(self) -> None:
+        """Focus the first focusable descendant.
 
-        Same rationale as the previous elicitation-card on_mount:
-        focus landing on the actions row would let an early Space
+        The session screen calls this when its focus rule picks the
+        card. Focus landing on the actions row would let an early Space
         keypress trigger a button before the operator has read the
-        card. Prefer body widgets (form fields, the tool-call
-        summary) over the actions row; subclasses can override if a
-        more specific target makes sense.
+        card. Prefer body widgets (form fields, the tool-call summary)
+        over the actions row; subclasses can override if a more
+        specific target makes sense.
         """
         for widget in self.query("*"):
             if widget.focusable:

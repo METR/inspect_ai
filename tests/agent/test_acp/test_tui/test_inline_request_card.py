@@ -77,14 +77,18 @@ async def test_compose_yields_header_body_and_actions() -> None:
 
 @skip_if_trio
 @pytest.mark.anyio
-async def test_on_mount_focuses_first_focusable_descendant() -> None:
-    """``on_mount`` lands focus on the body field, not on an action button.
+async def test_focus_first_focuses_first_focusable_descendant() -> None:
+    """``focus_first`` lands focus on the body field, not on an action button.
 
     Focus on the actions row would let an early Space activate a
     button before the operator has read the card.
     """
     card = _StubCard()
     async with _Host(card).run_test() as pilot:
+        pilot.app.query_one("#cancel", Button).focus()
+        await pilot.pause()
+        card.focus_first()
+        await pilot.pause()
         focused = pilot.app.focused
         assert focused is not None
         # The Input (first focusable in compose order) should win.
