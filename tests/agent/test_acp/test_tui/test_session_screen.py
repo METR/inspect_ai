@@ -1152,12 +1152,13 @@ async def test_key_right_after_a_withdrawal_is_reported_and_lands_nowhere(
     """A letter or Enter meant for a just-withdrawn approval decides nothing.
 
     Keys have no explicit target, so for a moment they belong to the
-    withdrawn card: a letter must not land on the approval shown next,
-    and with none left Enter must not send the composer draft. The
-    terminal says the decision was not applied, and the composer is
-    back once the moment passes.
+    withdrawn card: a letter or Enter must not answer the approval shown
+    next, even with its button focused, and with none left Enter must
+    not send the composer draft. The terminal says the decision was not
+    applied, and the composer is back once the moment passes.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
 
     app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
     async with app.run_test() as pilot:
@@ -1180,17 +1181,21 @@ async def test_key_right_after_a_withdrawal_is_reported_and_lands_nowhere(
         screen.state.withdraw_approval(shown)
         await pilot.press("a")
         await pilot.pause()
+        assert getattr(screen.focused, "id", None) == f"{_BUTTON_ID_PREFIX}approve"
+        await pilot.press("enter")
+        await pilot.pause()
         assert screen.state.current_pending_approval() is behind
         assert not behind.event.is_set()
-        assert notes == [withdrawn_notice(shown)]
+        assert notes == [withdrawn_notice(shown)] * 2
 
+        clock[0] += 1.0
         screen.state.withdraw_approval(behind)
         await pilot.press("r")
         await pilot.press("enter")
         await pilot.pause()
         assert cast(Any, screen)._session.connection.requests == []
         assert composer.text == "draft"
-        assert notes[1:] == [withdrawn_notice(behind)] * 2
+        assert notes[2:] == [withdrawn_notice(behind)] * 2
 
         clock[0] += 1.0
         screen._tick()
@@ -1207,7 +1212,9 @@ async def test_button_decides_the_card_it_was_on(
 
     A click on the next card right after a withdrawal applies to it. A
     press that names a withdrawn card applies nowhere and is reported,
-    even after the late-decision moment has passed.
+    even after the late-decision moment has passed, and never answers a
+    newer request for the same call, such as one re-sent after a
+    reconnect.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
     from inspect_ai.agent._acp.tui.widgets.tool_call import (
@@ -1241,6 +1248,18 @@ async def test_button_decides_the_card_it_was_on(
         screen.post_message(ApprovalDecisionRequested("tc-1", "approve", shown))
         await pilot.pause()
         assert notes == [withdrawn_notice(shown)]
+
+        old: PendingApproval = _bar_pending(_bar_pending_request("tc-3"))
+        screen.state.consume_approval_request(old)
+        screen.state.mark_disconnected()
+        screen.state.mark_reconnected()
+        resent: PendingApproval = _bar_pending(_bar_pending_request("tc-3"))
+        screen.state.consume_approval_request(resent)
+        await pilot.pause()
+        screen.post_message(ApprovalDecisionRequested("tc-3", "approve", old))
+        await pilot.pause()
+        assert not resent.event.is_set()
+        assert notes[1:] == [withdrawn_notice(old)]
 
 
 @skip_if_trio

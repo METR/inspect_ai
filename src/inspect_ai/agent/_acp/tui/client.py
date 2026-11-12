@@ -898,7 +898,9 @@ def _build_session_router(
             ):
                 session_ref._notify(withdrawn_notice(pending), "warning")
 
-        # Delete when acp >= 1.0: it cancels the handler before routing.
+        # acp >= 1.0 handles $/cancel_request itself and only cancels the
+        # handler: then move withdraw_approval into the handler's cancel
+        # path below, and delete this route.
         router.add_route(
             Route(
                 method="$/cancel_request",
@@ -1052,9 +1054,10 @@ def _make_permission_handler(
         ``DeniedOutcome(outcome="cancelled")``. The entry is dropped.
 
     Cancellation: ``asyncio.CancelledError`` (screen unmount /
-    disconnect) sets ``pending.cancelled`` and fires the event so
-    any other reader sees a consistent state, then re-raises so the
-    JSON-RPC dispatcher abandons the response.
+    disconnect) drops the ``approvals`` entry, sets
+    ``pending.cancelled`` and fires the event so any other reader sees
+    a consistent state, then re-raises so the JSON-RPC dispatcher
+    abandons the response.
     """
 
     async def _handler(params: Any) -> dict[str, Any]:
@@ -1075,6 +1078,7 @@ def _make_permission_handler(
             on_request_permission(pending)
             await pending.event.wait()
         except (asyncio.CancelledError, Exception):
+            approvals.pop(request_id, None)
             if not pending.event.is_set():
                 pending.cancelled = True
                 pending.event.set()

@@ -489,7 +489,10 @@ async def test_permission_handler_returns_denied_outcome_for_cancelled() -> None
 
 @skip_if_trio
 async def test_permission_handler_propagates_cancellation_and_marks_pending() -> None:
-    """``CancelledError`` (screen unmount) flips ``pending.cancelled`` + re-raises."""
+    """``CancelledError`` (screen unmount) flips ``pending.cancelled`` + re-raises.
+
+    The connection's approvals map drops the request.
+    """
     import asyncio
 
     from inspect_ai.agent._acp.tui.client import _make_permission_handler
@@ -501,7 +504,8 @@ async def test_permission_handler_propagates_cancellation_and_marks_pending() ->
         captured.append(pending)
         # Never resolve — leave the handler parked.
 
-    handler = _make_permission_handler(_callback, {})
+    approvals: dict[Any, PendingApproval] = {}
+    handler = _make_permission_handler(_callback, approvals)
     task = asyncio.create_task(handler(_permission_request_dict()))
     # Let the handler's callback fire + park.
     await asyncio.sleep(0)
@@ -517,6 +521,7 @@ async def test_permission_handler_propagates_cancellation_and_marks_pending() ->
     # reader sees a consistent state).
     assert pending.cancelled is True
     assert pending.event.is_set()
+    assert approvals == {}
 
 
 @skip_if_trio
@@ -534,7 +539,8 @@ async def test_permission_handler_propagates_callback_exception_and_marks_pendin
     would observe a half-initialised slot, and the server-side
     request future would be permanently parked. The fix moves the
     callback invocation inside the try block so cancellation +
-    sync-exception paths both flip the flag and signal the event.
+    sync-exception paths both flip the flag and signal the event, and
+    the connection's approvals map drops the request.
     """
     from inspect_ai.agent._acp.tui.client import _make_permission_handler
     from inspect_ai.agent._acp.tui.state import PendingApproval
@@ -547,7 +553,8 @@ async def test_permission_handler_propagates_callback_exception_and_marks_pendin
         captured.append(pending)
         raise RuntimeError("screen unmounted")
 
-    handler = _make_permission_handler(_callback, {})
+    approvals: dict[Any, PendingApproval] = {}
+    handler = _make_permission_handler(_callback, approvals)
     with pytest.raises(RuntimeError, match="screen unmounted"):
         await handler(_permission_request_dict())
 
@@ -556,6 +563,7 @@ async def test_permission_handler_propagates_callback_exception_and_marks_pendin
     # Marked cancelled + event fired despite the synchronous throw.
     assert pending.cancelled is True
     assert pending.event.is_set()
+    assert approvals == {}
 
 
 @skip_if_trio

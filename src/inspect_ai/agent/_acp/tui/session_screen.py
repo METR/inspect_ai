@@ -114,6 +114,9 @@ class SessionScreen(Screen[None]):
     # Escape and navigation bindings stay priority-bound so the user
     # can always interrupt or leave the session.
     BINDINGS = [
+        # Except in the moment after a withdrawal: that Enter belongs to
+        # the withdrawn card, not the next card's focused button.
+        Binding("enter", "late_enter", show=False, priority=True),
         Binding("enter", "submit", "submit", show=True, key_display="↵"),
         # ``shift+enter`` inserts a literal ``\n`` into the composer.
         # TextArea's default Enter behavior is also newline, so this
@@ -516,6 +519,8 @@ class SessionScreen(Screen[None]):
             if not _parameters:
                 return False
             return self._letter_targets_visible_bar(str(_parameters[0]))
+        if action == "late_enter":
+            return self._state.late_decision_target() is not None
         # Composer-driven actions are meaningless in an observe-only
         # session: there's no bound turn loop to accept a prompt, and the
         # composer row is hidden, so ``submit`` / ``newline`` can never
@@ -728,14 +733,17 @@ class SessionScreen(Screen[None]):
         parked on. That handler then writes the response back over
         the wire.
 
-        A press on a card the server has since withdrawn applies nowhere
-        and is reported.
+        The decision applies only while the button's request is still
+        the one awaiting a decision; a press on a card the server has
+        since withdrawn applies nowhere and is reported.
         """
         message.stop()
-        if self._state.approval_withdrawn(message.pending):
+        if self._state.approval_pending(message.pending):
+            self._state.resolve_approval(
+                message.tool_call_id, option_id=message.option_id
+            )
+        else:
             self.app.notify(withdrawn_notice(message.pending), severity="warning")
-            return
-        self._state.resolve_approval(message.tool_call_id, option_id=message.option_id)
 
     def action_approval_decide(self, option_id: str) -> None:
         """Resolve the current pending approval via a bare-letter shortcut.
@@ -768,6 +776,10 @@ class SessionScreen(Screen[None]):
         if not any(opt.option_id == option_id for opt in pending.request.options):
             return
         self._state.resolve_approval(tool_call_id, option_id=option_id)
+
+    def action_late_enter(self) -> None:
+        """Report an Enter aimed at a just-withdrawn card."""
+        self._report_late_decision()
 
     def _report_late_decision(self) -> bool:
         """Report a key aimed at a just-withdrawn card; True if it was one."""
@@ -1012,9 +1024,6 @@ class SessionScreen(Screen[None]):
         programmatic-pressed by Enter from the composer context.
         Textual's :class:`Button` exposes ``action_press`` for this
         synthetic activation.
-
-        An Enter right after the server withdrew the approval on screen
-        was aimed at that card: it is reported and sends nothing.
         """
         focused = self.focused
         if (
@@ -1027,8 +1036,6 @@ class SessionScreen(Screen[None]):
             and hasattr(focused, "action_press")
         ):
             focused.action_press()
-            return
-        if self._report_late_decision():
             return
         if self._state.lifecycle == "complete":
             return

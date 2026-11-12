@@ -1851,6 +1851,24 @@ def test_late_decision_target_is_the_shown_approval_for_a_second() -> None:
     assert state.late_decision_target() is None
 
 
+def test_quick_withdrawals_keep_the_first_late_decision_target() -> None:
+    """An interrupt withdraws every approval at once; keys meant the first.
+
+    The next card was on screen for only 5 ms before its own withdrawal.
+    """
+    clock = _FakeClock()
+    state = SessionState(now=clock)
+    shown = _pending(_permission_request("tc-1"))
+    behind = _pending(_permission_request("tc-2"))
+    state.consume_approval_request(shown)
+    state.consume_approval_request(behind)
+
+    state.withdraw_approval(shown)
+    clock.advance(0.005)
+    state.withdraw_approval(behind)
+    assert state.late_decision_target() is shown
+
+
 def test_disconnect_leaves_no_clickable_approval() -> None:
     """A dropped connection takes its requests with it.
 

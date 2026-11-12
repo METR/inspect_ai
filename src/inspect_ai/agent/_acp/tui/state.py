@@ -2258,13 +2258,22 @@ class SessionState:
             return False
         if tc.pending_approval is pending:
             if pending is self.current_pending_approval():
-                self._withdrawn_shown = (pending, self._now())
+                # An interrupt withdraws several at once; the operator saw the first.
+                self._withdrawn_shown = (
+                    self.late_decision_target() or pending,
+                    self._now(),
+                )
             self._resolve_approval_inner(tc.tool_call_id, cancelled=True)
         elif pending.chosen_option_id is None:
             return False
         tc.last_approval_decision = "withdrawn"
         self._notify()
         return pending.chosen_option_id is not None
+
+    def approval_pending(self, pending: PendingApproval) -> bool:
+        """Whether ``pending`` is still the request awaiting a decision on its card."""
+        tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
+        return tc is not None and tc.pending_approval is pending
 
     def approval_withdrawn(self, pending: PendingApproval) -> bool:
         """Whether the server withdrew ``pending`` (its card reads ``withdrawn``)."""
