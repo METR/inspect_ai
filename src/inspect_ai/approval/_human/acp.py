@@ -157,6 +157,9 @@ def _approval_from_response(
     if option_id in choices:
         # Safe cast: option_id is one of the literal-string members.
         decision: ApprovalDecision = option_id  # type: ignore[assignment]
+        decided_by = (response.field_meta or {}).get("inspect.decided_by")
+        if isinstance(decided_by, str) and decided_by:
+            return Approval(decision=decision, metadata={"decided_by": decided_by})
         return Approval(decision=decision)
     return Approval(
         decision="reject",

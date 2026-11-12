@@ -114,7 +114,11 @@ def review_from_approval(approval: Approval, offered: list[ApprovalDecision]) ->
                 "terminated."
             ),
         )
-    return Review(decision=decision, explanation=_EXPLANATION[decision])
+    return Review(
+        decision=decision,
+        explanation=_EXPLANATION[decision],
+        metadata=approval.metadata,
+    )
 
 
 def _result_text(result: ChatMessageTool) -> str:
