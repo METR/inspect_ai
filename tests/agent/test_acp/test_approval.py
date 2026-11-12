@@ -216,6 +216,19 @@ def test_approval_from_response_selected_known_option() -> None:
     assert approval.explanation is None
 
 
+def test_approval_from_response_records_who_answered() -> None:
+    """The client's word on who answered goes in the approval's metadata."""
+    choices: list[ApprovalDecision] = ["approve", "reject"]
+    response = RequestPermissionResponse(
+        outcome=AllowedOutcome(outcome="selected", option_id="reject"),
+        field_meta={"inspect.decided_by": "alice"},
+    )
+    approval = _approval_from_response(response, choices)
+    assert approval.decision == "reject"
+    assert approval.metadata == {"decided_by": "alice"}
+    assert _approval_from_response(_selected("reject"), choices).metadata is None
+
+
 def test_approval_from_response_cancelled_becomes_reject() -> None:
     """outcome=cancelled → reject with an explanation noting the cancel."""
     choices: list[ApprovalDecision] = ["approve", "reject"]
