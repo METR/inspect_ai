@@ -963,12 +963,14 @@ def _bar_pending(req: Any) -> Any:
 async def test_pressing_a_resolves_approve_via_screen_binding(
     sample_rows: list[SessionRow],
 ) -> None:
-    """Pressing bare ``a`` while the approval card has focus approves it.
+    """Pressing bare ``a`` while approval is pending fires the screen binding.
 
     Pins the live-use regression where the bar appeared, the first
     action got mounted, but pressing ``a`` did nothing until the
-    operator clicked into the bar — the action mount sequence racing
-    with ``first.focus()`` so the screen's ``priority=True`` binding
+    operator clicked into the bar — symptom of either focus
+    stranded on the now-hidden composer ``TextArea`` (which would
+    eat the keystroke) or the action mount sequence racing with
+    ``first.focus()`` so the screen's ``priority=True`` binding
     didn't reach ``check_action`` cleanly. Once the card closes, the
     composer has focus again.
     """
@@ -983,7 +985,16 @@ async def test_pressing_a_resolves_approve_via_screen_binding(
                 break
         assert isinstance(app.screen, SessionScreen)
 
+        # Reproduce live use: the composer TextArea has focus when the
+        # approval arrives (typical case — operator was typing or just
+        # finished a message). The TextArea gets hidden when lifecycle
+        # flips to ``approval``, but Textual's focus might stay
+        # stranded on it.
         composer = app.screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        assert app.screen.focused is composer
+
         pending = _bar_pending(_bar_pending_request("tc-1"))
         app.screen.state.consume_approval_request(pending)
         await pilot.pause()
@@ -1429,8 +1440,6 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
         await pilot.pause()
         assert early.content == {"name": "bob"}
 
-        # Off the composer, where focus went, so the next form takes focus.
-        screen.set_focus(None)
         shown: PendingApproval = _bar_pending(_bar_pending_request("tc-2"))
         behind: PendingApproval = _bar_pending(
             _bar_pending_request("tc-3", title="bash rm")

@@ -453,14 +453,14 @@ class SessionScreen(Screen[None]):
         Runs once a new card's controls exist (``ready``), after the card
         holding focus is removed, and when a withdrawal's late moment ends.
         A card the server sent takes focus only when focus isn't in a live
-        card or the composer; the cancel card, which only the operator's ^N
-        opens, takes it from anywhere. Closing the cancel card returns focus
-        to the control ^N left, if that is still in a live card. Nothing takes
-        focus while parked (see :meth:`set_focus`). Otherwise focus goes to
-        the cancel card, else an open ``ask_user`` form, else the current
-        approval's first button, else the composer unless disabled, else
-        nothing. Cards are found by their pending request, as a removed card
-        stays in the DOM until its task ends.
+        card or a composer holding a draft; the cancel card, which only the
+        operator's ^N opens, takes it from anywhere. Closing the cancel card
+        returns focus to the control ^N left, if that is still in a live
+        card. Nothing takes focus while parked (see :meth:`set_focus`).
+        Otherwise focus goes to the cancel card, else an open ``ask_user``
+        form, else the current approval's first button, else the composer
+        unless disabled, else nothing. Cards are found by their pending
+        request, as a removed card stays in the DOM until its task ends.
         """
         if self._focus_parked and self._state.late_decision_target() is not None:
             return
@@ -475,7 +475,7 @@ class SessionScreen(Screen[None]):
             if not any(ready.request is request for request in live) or (
                 ready.request is not self._state.pending_cancel
                 and (
-                    isinstance(self.focused, ComposerTextArea)
+                    self._drafting()
                     or (
                         holder is not None
                         and any(holder.request is request for request in live)
@@ -717,10 +717,10 @@ class SessionScreen(Screen[None]):
             # visible-but-disabled — none of the current cases hit
             # that path (every "disabled" state now also hides), but
             # cheap insurance against a regression.
-            # A card doesn't take the composer away while it has focus.
-            in_composer = self.focused is composer
+            # A card doesn't take the composer from an operator with a draft.
+            drafting = self._drafting()
             hide_composer_row = (
-                (self._request_card_mounted() and not in_composer)
+                (self._request_card_mounted() and not drafting)
                 or not interactive
                 or lifecycle
                 in (
@@ -744,7 +744,7 @@ class SessionScreen(Screen[None]):
             elif lifecycle == "scoring":
                 composer.placeholder = "scoring"
                 composer.disabled = True
-            elif lifecycle == "approval" and not in_composer:
+            elif lifecycle == "approval" and not drafting:
                 composer.placeholder = "awaiting your approval"
                 composer.disabled = True
             else:
@@ -1381,6 +1381,11 @@ class SessionScreen(Screen[None]):
     # ------------------------------------------------------------------
     # Composer-row helpers
     # ------------------------------------------------------------------
+
+    def _drafting(self) -> bool:
+        """Whether focus is in the composer and it holds unsent text."""
+        composer = self._composer_or_none()
+        return composer is not None and self.focused is composer and bool(composer.text)
 
     def _composer_or_none(self) -> ComposerTextArea | None:
         """The composer TextArea, or None if it isn't mounted (defensive)."""
