@@ -439,9 +439,9 @@ class SessionScreen(Screen[None]):
     def _apply_focus_rule(self) -> None:
         """Put focus where the operator's next key belongs.
 
-        An open ``ask_user`` form, else the cancel card, else the current
-        approval's first button, else the composer unless disabled, else
-        nothing. For the moment after the focused approval is withdrawn,
+        The cancel card (only ^N opens it), else an open ``ask_user`` form,
+        else the current approval's first button, else the composer unless
+        disabled, else nothing. For the moment after the focused approval is withdrawn,
         nothing: a key then was meant for that card and is reported.
         Cards are found by their pending request, as a removed card stays
         in the DOM until its task ends.
@@ -450,8 +450,8 @@ class SessionScreen(Screen[None]):
             return
         self._focus_parked = False
         for pending in (
-            self._state.pending_elicitation,
             self._state.pending_cancel,
+            self._state.pending_elicitation,
             self._state.current_pending_approval(),
         ):
             if pending is not None:

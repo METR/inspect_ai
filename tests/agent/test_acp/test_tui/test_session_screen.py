@@ -1498,7 +1498,7 @@ async def test_approval_arriving_under_the_cancel_card_leaves_it_focused(
 async def test_closing_the_cancel_card_leaves_typing_in_an_open_form(
     sample_rows: list[SessionRow], approval_arrives: str | None
 ) -> None:
-    """Esc on the cancel card opened over an ``ask_user`` form keeps typing there.
+    """^N over an ``ask_user`` form focuses the cancel card; Esc returns to the form.
 
     The next keys answer the form: they don't decide an approval under
     the cards or go into the hidden composer.
@@ -1516,15 +1516,38 @@ async def test_closing_the_cancel_card_leaves_typing_in_an_open_form(
         if approval_arrives == "after":
             screen.state.consume_approval_request(pending)
         await pilot.pause()
-        await pilot.press("b", "o", "ctrl+n")
+        await pilot.press("ctrl+n")
         await pilot.pause()
+        assert getattr(screen.focused, "id", None) == "cancel-sample-opt-score"
         await pilot.press("escape")
         await pilot.pause()
         await pilot.press("x", "enter")
         await pilot.pause()
-        assert form is not None and form.content == {"name": "box"}
+        assert form is not None and form.content == {"name": "x"}
         assert not pending.event.is_set()
         assert screen.query_one("#composer", TextArea).text == ""
+
+
+@skip_if_trio
+@pytest.mark.anyio
+@pytest.mark.parametrize(("letter", "action"), [("s", "score"), ("e", "error")])
+async def test_cancel_card_letters_act_over_an_open_form(
+    sample_rows: list[SessionRow], letter: str, action: str
+) -> None:
+    """``s`` and ``e`` act on a cancel card opened over an ``ask_user`` form."""
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        _seed_pending_elicitation(screen.state)
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.press(letter)
+        await pilot.pause()
+        sent = cast(Any, screen)._session.connection.requests
+        assert [(method, params["action"]) for method, params in sent] == [
+            ("inspect/cancel_sample", action)
+        ]
 
 
 @skip_if_trio
