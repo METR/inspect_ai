@@ -1132,6 +1132,66 @@ async def test_action_approval_decide_noop_when_option_not_in_request(
 
 @skip_if_trio
 @pytest.mark.anyio
+async def test_decision_right_after_a_withdrawal_is_reported_and_lands_nowhere(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key or click meant for a just-withdrawn approval decides nothing.
+
+    It must not land on the approval shown next, and with no approval
+    left the key isn't typed into the composer. The terminal says the
+    decision was not applied, and the composer is back once the moment
+    passes.
+    """
+    from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import ApprovalDecisionRequested
+
+    client = make_fake_client(sample_rows)
+    app = InspectAcpApp(eval_id=None, server=None, client=client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        cast(Any, app.screen)._on_select(sample_rows[0])
+        for _ in range(20):
+            await pilot.pause()
+            if isinstance(app.screen, SessionScreen):
+                break
+        screen = app.screen
+        assert isinstance(screen, SessionScreen)
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        # Manual clock: the late-decision window lapses only when we say.
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+        shown: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        behind: PendingApproval = _bar_pending(
+            _bar_pending_request("tc-2", title="bash rm")
+        )
+        screen.state.consume_approval_request(shown)
+        screen.state.consume_approval_request(behind)
+        await pilot.pause()
+
+        screen.state.withdraw_approval(shown)
+        await pilot.press("a")
+        screen.post_message(ApprovalDecisionRequested("tc-2", "approve"))
+        await pilot.pause()
+        assert screen.state.current_pending_approval() is behind
+        assert not behind.event.is_set()
+        assert notes == [withdrawn_notice(shown)] * 2
+
+        screen.state.withdraw_approval(behind)
+        await pilot.press("r")
+        await pilot.pause()
+        composer = screen.query_one("#composer", TextArea)
+        assert composer.text == ""
+        assert notes[-1] == withdrawn_notice(behind)
+
+        clock[0] += 1.0
+        screen._tick()
+        await pilot.pause()
+        assert not composer.disabled and screen.focused is composer
+
+
+@skip_if_trio
+@pytest.mark.anyio
 async def test_check_action_gates_prompt_letter_outside_approval(
     sample_rows: list[SessionRow],
 ) -> None:

@@ -1802,6 +1802,48 @@ def test_resolve_approval_unknown_tool_call_id_is_noop() -> None:
     assert "nope" not in state._tool_calls_by_id
 
 
+def test_withdraw_after_operator_answered_reports_the_lost_decision() -> None:
+    """A withdrawal that crossed the operator's click reports it.
+
+    The card stops claiming the decision, since the server never took it.
+    """
+    state = SessionState()
+    pending = _pending(_permission_request("tc-1"))
+    state.consume_approval_request(pending)
+    state.resolve_approval("tc-1", option_id="approve")
+
+    assert state.withdraw_approval(pending) is True
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == "withdrawn"
+
+
+def test_withdraw_after_esc_is_silent() -> None:
+    """Esc already answered the request ``cancelled``: no decision was lost."""
+    state = SessionState()
+    pending = _pending(_permission_request("tc-1"))
+    state.consume_approval_request(pending)
+    state.mark_interrupted()
+
+    assert state.withdraw_approval(pending) is False
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == "cancelled"
+
+
+def test_late_decision_target_is_the_shown_approval_for_a_second() -> None:
+    """Only withdrawing the approval on screen catches decisions, and briefly."""
+    clock = _FakeClock()
+    state = SessionState(now=clock)
+    shown = _pending(_permission_request("tc-1"))
+    behind = _pending(_permission_request("tc-2"))
+    state.consume_approval_request(shown)
+    state.consume_approval_request(behind)
+
+    state.withdraw_approval(behind)
+    assert state.late_decision_target() is None
+    state.withdraw_approval(shown)
+    assert state.late_decision_target() is shown
+    clock.advance(1.0)
+    assert state.late_decision_target() is None
+
+
 def test_lifecycle_approval_beats_running() -> None:
     """When a tool call is awaiting approval, lifecycle is ``approval``."""
     state = SessionState()

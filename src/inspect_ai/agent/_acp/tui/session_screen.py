@@ -32,7 +32,7 @@ from textual.widgets import Static, TextArea
 from inspect_ai.agent._acp.inspect_ext import INSPECT_CANCEL_TOOL_CALL_METHOD
 
 from .client import AttachedSession
-from .state import PendingCancel, SessionState, _QueuedEnqueueHandle
+from .state import PendingCancel, SessionState, _QueuedEnqueueHandle, withdrawn_notice
 from .widgets import (
     AppFooter,
     PlanStripWidget,
@@ -237,13 +237,13 @@ class SessionScreen(Screen[None]):
     }
     """
 
-    # Tracks the previous lifecycle so ``_apply_lifecycle`` can detect
-    # the approval ↔ non-approval transition and hand focus back to the
-    # composer when the bar disappears. The bar itself takes focus on
-    # mount; without this, focus would be stranded on the (now hidden)
-    # last-pressed action button and the next keystroke would go
+    # Tracks whether the previous ``_apply_lifecycle`` was deciding (an
+    # approval pending, or a withdrawn one's late window) so it can hand
+    # focus back to the composer when that ends. The bar itself takes
+    # focus on mount; without this, focus would be stranded on the (now
+    # hidden) last-pressed action button and the next keystroke would go
     # nowhere.
-    _last_lifecycle: str | None = None
+    _last_deciding: bool = False
 
     def __init__(
         self,
@@ -609,15 +609,20 @@ class SessionScreen(Screen[None]):
         # decision the card unmounts and any focused button is now
         # invisible, so we route focus back to the composer so the
         # operator can type again. Skip the handoff while a cancel
-        # card is up; that card's first button owns focus.
+        # card is up; that card's first button owns focus. A withdrawal
+        # defers it for the late window, so a key meant for the
+        # withdrawn card isn't typed into the composer.
+        deciding = (
+            lifecycle == "approval" or self._state.late_decision_target() is not None
+        )
         if (
-            self._last_lifecycle == "approval"
-            and lifecycle != "approval"
+            self._last_deciding
+            and not deciding
             and composer is not None
             and self._state.pending_cancel is None
         ):
             composer.focus()
-        self._last_lifecycle = lifecycle
+        self._last_deciding = deciding
         # Bindings depend on which cards are mounted (see
         # check_action) — nudge the bindings view so the footer + key
         # dispatch stay in sync with the row owner.
@@ -713,9 +718,14 @@ class SessionScreen(Screen[None]):
         ``PendingApproval.event`` the client-side JSON-RPC handler is
         parked on. That handler then writes the response back over
         the wire.
+
+        A click right after the server withdrew the card on screen was
+        aimed at that card, so it is reported and applies nowhere.
         """
-        self._state.resolve_approval(message.tool_call_id, option_id=message.option_id)
         message.stop()
+        if self._report_late_decision():
+            return
+        self._state.resolve_approval(message.tool_call_id, option_id=message.option_id)
 
     def action_approval_decide(self, option_id: str) -> None:
         """Resolve the current pending approval via a bare-letter shortcut.
@@ -731,7 +741,12 @@ class SessionScreen(Screen[None]):
         can restrict the choice set per call. Pressing ``e`` for a
         request that doesn't offer ``escalate`` should do nothing,
         not raise.
+
+        A key right after the server withdrew the card on screen was
+        aimed at that card, so it is reported and applies nowhere.
         """
+        if self._report_late_decision():
+            return
         if self._state.lifecycle != "approval":
             return
         pending = self._state.current_pending_approval()
@@ -741,6 +756,14 @@ class SessionScreen(Screen[None]):
         if not any(opt.option_id == option_id for opt in pending.request.options):
             return
         self._state.resolve_approval(tool_call_id, option_id=option_id)
+
+    def _report_late_decision(self) -> bool:
+        """Toast a decision aimed at a just-withdrawn card; True if it was."""
+        late = self._state.late_decision_target()
+        if late is None:
+            return False
+        self.app.notify(withdrawn_notice(late), severity="warning")
+        return True
 
     def action_switch_sample(self) -> None:
         """Disconnect from the current session and return to the picker."""
@@ -895,7 +918,7 @@ class SessionScreen(Screen[None]):
             if target is not None:
                 self.action_cancel_decide(target)
             return
-        if self._state.current_pending_approval() is not None:
+        if self._approval_letters_live():
             approval_letter_map = {
                 "a": "approve",
                 "r": "reject",
@@ -1223,6 +1246,13 @@ class SessionScreen(Screen[None]):
                     return False
                 return True
             return False
-        if self._state.current_pending_approval() is not None:
+        if self._approval_letters_live():
             return letter in ("a", "r", "e", "t")
         return False
+
+    def _approval_letters_live(self) -> bool:
+        """Approval letters stay live for a card the server just withdrew."""
+        return (
+            self._state.current_pending_approval() is not None
+            or self._state.late_decision_target() is not None
+        )

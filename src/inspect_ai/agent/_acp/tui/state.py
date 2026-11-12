@@ -269,13 +269,14 @@ class _QueuedEnqueueHandle:
 
 ToolCallStatus = Literal["pending", "in_progress", "completed", "failed"]
 
-ApprovalDecisionLabel = Literal["approved", "denied", "cancelled"]
+ApprovalDecisionLabel = Literal["approved", "denied", "cancelled", "withdrawn"]
 """Post-resolution label shown in the tool card's decision-summary line.
 
 Kept narrow: the actual ``ApprovalDecision`` (approve / reject
 / terminate / escalate) is recorded server-side; the TUI only needs
 to distinguish "the operator allowed it" vs. "denied it" vs. "we were
-cancelled / interrupted before deciding".
+cancelled / interrupted before deciding" vs. "the server withdrew the
+request" (``$/cancel_request``).
 """
 
 
@@ -289,13 +290,15 @@ class PendingApproval:
     client-side JSON-RPC handler park on ``event.wait()`` until the
     button-press handler calls :meth:`SessionState.resolve_approval`,
     which sets the event and populates ``chosen_option_id`` (or the
-    ``cancelled`` flag) for the handler to read.
+    ``cancelled`` flag) for the handler to read. ``withdrawn`` is set
+    once the server withdraws the request (``$/cancel_request``).
     """
 
     request: RequestPermissionRequest
     event: asyncio.Event
     chosen_option_id: str | None = None
     cancelled: bool = False
+    withdrawn: bool = False
 
 
 ElicitationAction = Literal["accept", "decline", "cancel"]
@@ -615,6 +618,16 @@ def _decision_label(
     if option_id in _APPROVE_OPTION_IDS:
         return "approved"
     return "denied"
+
+
+_LATE_DECISION_SECONDS = 1.0
+"""For this long after the shown approval is withdrawn, decisions are aimed at it."""
+
+
+def withdrawn_notice(pending: PendingApproval) -> str:
+    """Toast text for an operator decision a withdrawal kept from applying."""
+    title = (pending.request.tool_call.title or "tool").replace("[", r"\[")
+    return f"Your decision on {title} was not applied: the request was withdrawn."
 
 
 def _format_score_value(value: Any) -> str:
@@ -980,6 +993,9 @@ class SessionState:
         # ids only need to be unique within a session, never compared
         # across sessions.
         self._next_parallel_batch_id: int = 1
+        # The shown approval the server last withdrew, and when; read by
+        # :meth:`late_decision_target`.
+        self._withdrawn_shown: tuple[PendingApproval, float] | None = None
         self._subscribers: list[Callable[[], None]] = []
 
     # ------------------------------------------------------------------
@@ -2222,6 +2238,44 @@ class SessionState:
             ):
                 any_cleared = True
         return any_cleared
+
+    def withdraw_approval(self, pending: PendingApproval) -> bool:
+        """Apply the server's ``$/cancel_request`` for ``pending``.
+
+        A pending request resolves as cancelled, the answer ACP requires,
+        so the next pending approval becomes current, and its card reads
+        ``withdrawn``. So does the card of a request the operator had
+        already answered: that answer crossed the withdrawal and was not
+        applied, and this returns True. A request resolved without an
+        operator decision (session end, Esc) is left alone.
+        """
+        tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
+        if tc is None or pending.withdrawn:
+            return False
+        if tc.pending_approval is pending:
+            if pending is self.current_pending_approval():
+                self._withdrawn_shown = (pending, self._now())
+            self._resolve_approval_inner(tc.tool_call_id, cancelled=True)
+        elif pending.chosen_option_id is None:
+            return False
+        pending.withdrawn = True
+        tc.last_approval_decision = "withdrawn"
+        self._notify()
+        return pending.chosen_option_id is not None
+
+    def late_decision_target(self) -> PendingApproval | None:
+        """The withdrawn approval a decision made now is aimed at, if any.
+
+        For a moment after the server withdraws the approval on screen,
+        the operator's key or click was meant for it, not for the
+        approval shown next.
+        """
+        if self._withdrawn_shown is None:
+            return None
+        pending, withdrawn_at = self._withdrawn_shown
+        if self._now() - withdrawn_at >= _LATE_DECISION_SECONDS:
+            return None
+        return pending
 
     # ------------------------------------------------------------------
     # Elicitation handshake (parallel to the approval pair above)

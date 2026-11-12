@@ -1010,10 +1010,12 @@ _DECISION_TEXT: dict[ApprovalDecisionLabel, str] = {
     "approved": "approved by you",
     "denied": "denied by you",
     "cancelled": "cancelled",
+    "withdrawn": "request withdrawn",
 }
 
 _DECISION_COLOR: dict[ApprovalDecisionLabel, str] = {
     "approved": "$success",
     "denied": "$error",
     "cancelled": "$warning",
+    "withdrawn": "$warning",
 }

@@ -17,6 +17,7 @@ exercised separately in ``test_session.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sys
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 from acp.schema import (
     AllowedOutcome,
@@ -35,9 +37,16 @@ from acp.schema import (
 )
 from test_helpers.utils import skip_if_trio
 
+from inspect_ai.agent._acp.discovery import TargetAddress
 from inspect_ai.agent._acp.server import acp_server
 from inspect_ai.agent._acp.transport_live import LiveAcpTransport
-from inspect_ai.approval._approval import ApprovalDecision
+from inspect_ai.agent._acp.tui.client import SessionRow, attach_session
+from inspect_ai.agent._acp.tui.state import (
+    PendingApproval,
+    SessionState,
+    withdrawn_notice,
+)
+from inspect_ai.approval._approval import Approval, ApprovalDecision
 from inspect_ai.approval._human.acp import (
     _approval_from_response,
     _build_request,
@@ -1503,10 +1512,13 @@ class _ClientRpcStub:
     ) -> None:
         self._reader = reader
         self._writer = writer
-        self._permission_response = permission_response
+        # ``None`` leaves permission requests unanswered.
+        self.permission_response: dict[str, Any] | None = permission_response
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self.received_permission_request: dict[str, Any] | None = None
+        # Every request and notification the server sent, in arrival order.
+        self.inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._read_task = asyncio.create_task(self._read_loop())
 
     async def _read_loop(self) -> None:
@@ -1519,6 +1531,8 @@ class _ClientRpcStub:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if "method" in msg:
+                    self.inbox.put_nowait(msg)
                 if (
                     "method" in msg
                     and msg["method"] == "session/request_permission"
@@ -1526,10 +1540,12 @@ class _ClientRpcStub:
                 ):
                     # Server sent us an outbound request — answer it.
                     self.received_permission_request = msg
+                    if self.permission_response is None:
+                        continue
                     response = {
                         "jsonrpc": "2.0",
                         "id": msg["id"],
-                        "result": self._permission_response,
+                        "result": self.permission_response,
                     }
                     self._writer.write((json.dumps(response) + "\n").encode("utf-8"))
                     await self._writer.drain()
@@ -1717,3 +1733,163 @@ async def test_approval_e2e_attach_after_fire(
             assert client.received_permission_request is not None
         finally:
             await client.close()
+
+
+def _live_sample(monkeypatch: pytest.MonkeyPatch) -> LiveAcpTransport:
+    """Make a fake sample the active one; return its live ACP transport."""
+    session = LiveAcpTransport()
+    session._attachable_override = True
+    sample = MagicMock()
+    sample.acp_transport = session
+    sample.task = "t"
+    sample.sample.id = "s"
+    sample.epoch = 0
+    monkeypatch.setattr("inspect_ai.log._samples.active_samples", lambda: [sample])
+    monkeypatch.setattr("inspect_ai.agent._acp.picker.active_samples", lambda: [sample])
+    monkeypatch.setattr("inspect_ai.log._samples.sample_active", lambda: sample)
+    return session
+
+
+async def _approve(call_id: str) -> Approval | None:
+    return await request_human_approval_via_acp(
+        message="",
+        call=ToolCall(id=call_id, function="bash", arguments={"command": "ls"}),
+        view=_make_view(),
+        choices=["approve", "reject"],
+    )
+
+
+@skip_if_trio
+@unix_only
+async def test_cancelled_approval_wait_withdraws_its_request(
+    short_data_dir: Path, monkeypatch
+) -> None:
+    """A cancelled wait sends ``$/cancel_request`` naming exactly its request.
+
+    An answered approval goes first and must withdraw nothing: a
+    withdrawal of it would reach the client before the second request.
+    """
+    session = _live_sample(monkeypatch)
+    async with acp_server(eval_id="evt-appr-wd", transport=True) as server:
+        assert server is not None and server.socket_path is not None
+        reader, writer = await asyncio.open_unix_connection(str(server.socket_path))
+        client = _ClientRpcStub(
+            reader,
+            writer,
+            permission_response={
+                "outcome": {"outcome": "selected", "optionId": "approve"}
+            },
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def _next(method: str) -> dict[str, Any]:
+            while True:
+                msg = await asyncio.wait_for(client.inbox.get(), timeout=5.0)
+                seen.append(msg)
+                if msg["method"] == method:
+                    return msg
+
+        try:
+            await client.request(
+                "initialize",
+                {"protocolVersion": 1, "clientInfo": {"name": "test", "version": "0"}},
+            )
+            await client.request(
+                "session/load",
+                {"cwd": "/tmp", "mcpServers": [], "sessionId": session.session_id},
+            )
+            answered = await asyncio.wait_for(_approve("tc1"), timeout=5.0)
+            assert answered is not None and answered.decision == "approve"
+            await _next("session/request_permission")
+
+            client.permission_response = None
+            waiting = asyncio.create_task(_approve("tc2"))
+            second = await _next("session/request_permission")
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+            await _next("$/cancel_request")
+
+            withdrawn = [m["params"] for m in seen if m["method"] == "$/cancel_request"]
+            assert withdrawn == [{"requestId": second["id"]}]
+        finally:
+            await client.close()
+
+
+@skip_if_trio
+@unix_only
+async def test_tui_drops_withdrawn_approvals_and_reports_a_crossed_click(
+    short_data_dir: Path, monkeypatch
+) -> None:
+    """The terminal client clears an approval Inspect withdraws.
+
+    It answers the request ``cancelled``, as ACP requires, labels the
+    card, and shows the approval that was waiting behind it. A click
+    that crosses the next withdrawal is reported as not applied.
+    """
+    session = _live_sample(monkeypatch)
+    state = SessionState()
+    received: list[PendingApproval] = []
+    both = anyio.Event()
+    notes: list[str] = []
+    noted = anyio.Event()
+
+    def _on_request(pending: PendingApproval) -> None:
+        state.consume_approval_request(pending)
+        received.append(pending)
+        if len(received) == 2:
+            both.set()
+
+    def _notify(message: str, severity: str) -> None:
+        notes.append(message)
+        noted.set()
+
+    async with acp_server(eval_id="evt-appr-tui", transport=True) as server:
+        assert server is not None and server.socket_path is not None
+        waits = {cid: asyncio.create_task(_approve(cid)) for cid in ("tc1", "tc2")}
+        row = SessionRow(
+            eval_id="evt-appr-tui",
+            session_id=session.session_id,
+            task="t",
+            sample_id="s",
+            epoch=0,
+            agent_name=None,
+            started_at=None,
+            target=TargetAddress(socket_path=server.socket_path),
+        )
+        attached = await attach_session(
+            row, state=state, on_request_permission=_on_request, notify=_notify
+        )
+        try:
+            with anyio.fail_after(5):
+                await both.wait()
+            shown = state.current_pending_approval()
+            assert shown is not None
+            behind = next(p for p in received if p is not shown)
+            waits[shown.request.tool_call.tool_call_id].cancel()
+            with anyio.fail_after(5):
+                await shown.event.wait()
+
+            assert shown.cancelled and shown.chosen_option_id is None
+            card = state._tool_calls_by_id[shown.request.tool_call.tool_call_id]
+            assert card.pending_approval is None
+            assert card.last_approval_decision == "withdrawn"
+            assert state.current_pending_approval() is behind
+            assert notes == []
+
+            # The operator answers just as Inspect stops waiting.
+            behind_id = behind.request.tool_call.tool_call_id
+            waits[behind_id].cancel()
+            state.resolve_approval(behind_id, option_id="approve")
+            with anyio.fail_after(5):
+                await noted.wait()
+            assert notes == [withdrawn_notice(behind)]
+            assert state._tool_calls_by_id[behind_id].last_approval_decision == (
+                "withdrawn"
+            )
+        finally:
+            for wait in waits.values():
+                wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await wait
+            await attached.close()

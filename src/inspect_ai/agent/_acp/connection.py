@@ -16,11 +16,13 @@ anyio boundary" for the rationale.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from logging import getLogger
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from acp.connection import Connection
 from acp.exceptions import RequestError
 from acp.meta import CLIENT_METHODS, PROTOCOL_VERSION
@@ -200,8 +202,9 @@ class ConnectionHandler:
         self._forwarders: Forwarders | None = None
         # Tasks scheduled via ``_schedule_after_response`` to fire a
         # notification once the in-progress RPC response has been
-        # written to the wire. Tracked so they're not garbage-collected
-        # before they run and so connection close can cancel them.
+        # written to the wire, and ``_withdraw_request`` sends. Tracked
+        # so they're not garbage-collected before they run and so
+        # connection close can cancel them.
         self._pending_after_response: set[asyncio.Task[None]] = set()
         # Bind serialization. ACP dispatches each request as its own
         # asyncio task, so two ``session/new`` / ``session/load`` calls
@@ -1049,6 +1052,10 @@ class ConnectionHandler:
         prompt as cross-session traffic. Mirrors
         ``Forwarders._rewrite_session_id`` in ``session_router.py``.
 
+        If the wait is cancelled (the call was decided elsewhere, timed
+        out or was interrupted), the request is withdrawn with ACP's
+        ``$/cancel_request``.
+
         Any exception (binding mismatch, transport failure, malformed
         response) propagates so the approval shim's driver-fallback
         loop drops us and tries the next client.
@@ -1073,8 +1080,35 @@ class ConnectionHandler:
         if binding.wire_session_id != request.session_id:
             request = request.model_copy(update={"session_id": binding.wire_session_id})
         payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
-        raw = await self.connection.send_request("session/request_permission", payload)
+        # acp 0.12.1 hides the id; send_request takes this one before it yields.
+        request_id = self.connection._next_request_id
+        try:
+            raw = await self.connection.send_request(
+                "session/request_permission", payload
+            )
+        except anyio.get_cancelled_exc_class():
+            self._withdraw_request(self.connection, request_id)
+            raise
         return RequestPermissionResponse.model_validate(raw)
+
+    def _withdraw_request(self, connection: Connection, request_id: int) -> None:
+        """Send ACP's ``$/cancel_request`` for a request we stopped waiting on.
+
+        acp 0.12.1 sends nothing when a ``send_request`` caller is
+        cancelled. The send runs in a task because the caller's scope is
+        cancelled; connection close cancels it with the deferred sends.
+        """
+
+        async def _send() -> None:
+            # A client that has disconnected has nothing to withdraw.
+            with contextlib.suppress(ConnectionError):
+                await connection.send_notification(
+                    "$/cancel_request", {"requestId": request_id}
+                )
+
+        task = asyncio.create_task(_send())
+        self._pending_after_response.add(task)
+        task.add_done_callback(self._on_after_response_done)
 
     async def drain_notifications(self) -> None:
         """Wait until pending ``session/update`` notifications have been sent.
@@ -1371,7 +1405,7 @@ class ConnectionHandler:
             return
         exc = task.exception()
         if exc is not None:
-            logger.exception("Deferred post-response send failed", exc_info=exc)
+            logger.exception("Deferred send failed", exc_info=exc)
 
     async def shutdown(self, *, graceful: bool = False) -> None:
         """Connection-close cleanup: cancel deferred sends, stop forwarders.

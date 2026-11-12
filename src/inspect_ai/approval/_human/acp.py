@@ -14,8 +14,8 @@ time — the driver, which is the client whose ``session/prompt``
 most recently landed on this session (fallback: first-attached
 when no prompt has been sent yet). If the driver's request raises
 (typically ``ConnectionError`` on mid-prompt disconnect), the shim
-falls through to the next attached client in attach order. ACP has
-no protocol-level cancel for outbound requests, so broadcasting
+falls through to the next attached client in attach order. ACP
+clients may ignore ``$/cancel_request``, so broadcasting
 would leave losing editors with a stale permission card forever
 (whatever they later click is silently discarded). Routing to one
 driver means the operator only sees the prompt on the client
@@ -396,8 +396,8 @@ async def _request_from_driver_with_fallback(
 ) -> Approval:
     """Send ``request`` to the driver; park-and-retry on chain exhaustion.
 
-    Routing model: single-driver, with a fallback chain. ACP has no
-    protocol-level cancel for outbound requests, so broadcasting to N
+    Routing model: single-driver, with a fallback chain. ACP clients
+    may ignore ``$/cancel_request``, so broadcasting to N
     clients leaves the losers' editors showing a stale permission card
     forever (whatever they click later is silently discarded). Picking
     one driver keeps the UX coherent.

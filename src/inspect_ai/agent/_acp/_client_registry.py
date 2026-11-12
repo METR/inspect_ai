@@ -6,8 +6,8 @@ comparisons, subscriber callbacks) without calling any
 protocol-specific method, so the entire state machine is parametric on
 the client protocol type `T`.
 
-Why single-driver and not broadcast: ACP has no protocol-level cancel
-for outbound requests, so broadcasting to N clients and racing leaves
+Why single-driver and not broadcast: ACP clients may ignore
+`$/cancel_request`, so broadcasting to N clients and racing leaves
 the losers' editors showing a stale request card forever (whatever they
 click later is silently discarded). Picking one driver keeps the UX
 coherent: the operator sees the prompt on the client they're actually

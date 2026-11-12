@@ -453,7 +453,7 @@ async def test_permission_handler_returns_allowed_outcome_for_chosen_option() ->
 
         asyncio.create_task(_resolve())
 
-    handler = _make_permission_handler(_callback)
+    handler = _make_permission_handler(_callback, {})
     response = await handler(_permission_request_dict())
 
     assert response["outcome"]["outcome"] == "selected"
@@ -479,7 +479,7 @@ async def test_permission_handler_returns_denied_outcome_for_cancelled() -> None
 
         asyncio.create_task(_resolve())
 
-    handler = _make_permission_handler(_callback)
+    handler = _make_permission_handler(_callback, {})
     response = await handler(_permission_request_dict())
 
     assert response["outcome"]["outcome"] == "cancelled"
@@ -501,7 +501,7 @@ async def test_permission_handler_propagates_cancellation_and_marks_pending() ->
         captured.append(pending)
         # Never resolve — leave the handler parked.
 
-    handler = _make_permission_handler(_callback)
+    handler = _make_permission_handler(_callback, {})
     task = asyncio.create_task(handler(_permission_request_dict()))
     # Let the handler's callback fire + park.
     await asyncio.sleep(0)
@@ -547,7 +547,7 @@ async def test_permission_handler_propagates_callback_exception_and_marks_pendin
         captured.append(pending)
         raise RuntimeError("screen unmounted")
 
-    handler = _make_permission_handler(_callback)
+    handler = _make_permission_handler(_callback, {})
     with pytest.raises(RuntimeError, match="screen unmounted"):
         await handler(_permission_request_dict())
 

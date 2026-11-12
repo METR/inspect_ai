@@ -21,11 +21,12 @@ import asyncio
 import sys
 import time
 from collections.abc import Awaitable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Literal
 
 from acp import PROTOCOL_VERSION
-from acp.connection import Connection
+from acp.connection import Connection, StreamDirection, StreamEvent
 from acp.exceptions import RequestError
 from acp.router import MessageRouter, Route
 from acp.schema import (
@@ -52,6 +53,7 @@ from inspect_ai.agent._acp.tui.state import (
     PendingApproval,
     PendingElicitation,
     SessionState,
+    withdrawn_notice,
 )
 
 # JSON-RPC error code for ``invalid_params`` (per JSON-RPC 2.0). The
@@ -654,6 +656,7 @@ class AttachedSession:
             handler=router,
             writer=writer,
             reader=reader,
+            observers=[_note_request_id],
             listening=False,
         )
         receive_task = asyncio.create_task(
@@ -708,6 +711,21 @@ class AttachedSession:
         self.writer = writer
         self.connection = conn
         self._receive_task = receive_task
+
+
+_request_id: ContextVar[Any] = ContextVar("acp_tui_request_id", default=None)
+"""JSON-RPC id of the incoming message whose handler is running."""
+
+
+def _note_request_id(event: StreamEvent) -> None:
+    """Connection observer that gives each handler its message's JSON-RPC id.
+
+    acp 0.12.1 passes handlers only ``params``. It calls observers in the
+    receive loop just before it creates the message's handler task, and
+    the task copies this context.
+    """
+    if event.direction is StreamDirection.INCOMING:
+        _request_id.set(event.message.get("id"))
 
 
 async def _run_receive_loop(conn: Connection) -> None:
@@ -861,7 +879,31 @@ def _build_session_router(
     """
     router = MessageRouter()
     if on_request_permission is not None:
-        _register_permission_route(router, on_request_permission)
+        # This connection's permission requests by JSON-RPC id. Ids
+        # restart on every connection, so the map does too.
+        approvals: dict[Any, PendingApproval] = {}
+        _register_permission_route(router, on_request_permission, approvals)
+
+        async def _on_cancel_request(params: Any) -> None:
+            pending = (
+                approvals.get(params.get("requestId"))
+                if isinstance(params, dict)
+                else None
+            )
+            if (
+                pending is not None
+                and session_ref._state.withdraw_approval(pending)
+                and session_ref._notify is not None
+            ):
+                session_ref._notify(withdrawn_notice(pending), "warning")
+
+        router.add_route(
+            Route(
+                method="$/cancel_request",
+                func=_on_cancel_request,
+                kind="notification",
+            )
+        )
 
     if on_request_elicitation is not None:
         _register_elicitation_route(router, on_request_elicitation)
@@ -983,6 +1025,7 @@ async def _open_socket(
 
 def _make_permission_handler(
     on_request_permission: Callable[[PendingApproval], None],
+    approvals: dict[Any, PendingApproval],
 ) -> Callable[[Any], Coroutine[Any, Any, dict[str, Any]]]:
     """Build the ``session/request_permission`` handler closure.
 
@@ -992,7 +1035,9 @@ def _make_permission_handler(
     Handler contract:
     - Validates ``params`` to :class:`RequestPermissionRequest`.
     - Creates a :class:`PendingApproval` (with a fresh
-      ``asyncio.Event``) and hands it to the screen-side callback,
+      ``asyncio.Event``), records it in ``approvals`` under the
+      request's JSON-RPC id so ``$/cancel_request`` can find it, and
+      hands it to the screen-side callback,
       which attaches it to the matching tool-call card via
       :meth:`SessionState.consume_approval_request`.
     - Parks on ``pending.event``. The button-press handler in
@@ -1012,6 +1057,7 @@ def _make_permission_handler(
     async def _handler(params: Any) -> dict[str, Any]:
         request = RequestPermissionRequest.model_validate(params)
         pending = PendingApproval(request=request, event=asyncio.Event())
+        approvals[_request_id.get()] = pending
         # Invoke the screen-side callback INSIDE the try block so a
         # synchronous exception from it (e.g. a Textual ``NoMatches``
         # if the screen has just unmounted, or any other unexpected
@@ -1096,12 +1142,13 @@ def _refresh_row_from_binding_meta(
 def _register_permission_route(
     router: MessageRouter,
     on_request_permission: Callable[[PendingApproval], None],
+    approvals: dict[Any, PendingApproval],
 ) -> None:
     """Register the permission-request handler on the client router."""
     router.add_route(
         Route(
             method="session/request_permission",
-            func=_make_permission_handler(on_request_permission),
+            func=_make_permission_handler(on_request_permission, approvals),
             kind="request",
         )
     )
