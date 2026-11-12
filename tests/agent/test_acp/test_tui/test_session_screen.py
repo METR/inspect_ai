@@ -963,14 +963,12 @@ def _bar_pending(req: Any) -> Any:
 async def test_pressing_a_resolves_approve_via_screen_binding(
     sample_rows: list[SessionRow],
 ) -> None:
-    """Pressing bare ``a`` while approval is pending fires the screen binding.
+    """Pressing bare ``a`` while the approval card has focus approves it.
 
     Pins the live-use regression where the bar appeared, the first
     action got mounted, but pressing ``a`` did nothing until the
-    operator clicked into the bar — symptom of either focus
-    stranded on the now-hidden composer ``TextArea`` (which would
-    eat the keystroke) or the action mount sequence racing with
-    ``first.focus()`` so the screen's ``priority=True`` binding
+    operator clicked into the bar — the action mount sequence racing
+    with ``first.focus()`` so the screen's ``priority=True`` binding
     didn't reach ``check_action`` cleanly. Once the card closes, the
     composer has focus again.
     """
@@ -985,16 +983,7 @@ async def test_pressing_a_resolves_approve_via_screen_binding(
                 break
         assert isinstance(app.screen, SessionScreen)
 
-        # Reproduce live use: the composer TextArea has focus when the
-        # approval arrives (typical case — operator was typing or just
-        # finished a message). The TextArea gets hidden when lifecycle
-        # flips to ``approval``, but Textual's focus might stay
-        # stranded on it.
         composer = app.screen.query_one("#composer", TextArea)
-        composer.focus()
-        await pilot.pause()
-        assert app.screen.focused is composer
-
         pending = _bar_pending(_bar_pending_request("tc-1"))
         app.screen.state.consume_approval_request(pending)
         await pilot.pause()
@@ -1440,6 +1429,8 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
         await pilot.pause()
         assert early.content == {"name": "bob"}
 
+        # Off the composer, where focus went, so the next form takes focus.
+        screen.set_focus(None)
         shown: PendingApproval = _bar_pending(_bar_pending_request("tc-2"))
         behind: PendingApproval = _bar_pending(
             _bar_pending_request("tc-3", title="bash rm")
@@ -1888,6 +1879,257 @@ async def test_a_card_removed_before_its_controls_mount_leaves_focus_alone(
         screen.state.withdraw_approval(pending)
         await pilot.pause()
         assert screen.focused is transcript
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_ready_card_tolerates_a_form_card_still_composing(
+    sample_rows: list[SessionRow],
+) -> None:
+    """An approval's ready call doesn't crash on a form whose buttons aren't mounted."""
+    import anyio
+    from textual.widgets import Input
+
+    from inspect_ai.agent._acp.tui.widgets.approval_card import _ApprovalCard
+    from inspect_ai.agent._acp.tui.widgets.elicitation_card import _ElicitationCard
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        screen.state.consume_approval_request(
+            _bar_pending(_bar_pending_request("tc-1"))
+        )
+        approval = screen.query_one(_ApprovalCard)
+        _seed_pending_elicitation(screen.state)
+        form = screen.query_one(_ElicitationCard)
+        for _ in range(200):
+            if cast(Any, form)._form is not None and not form.query(
+                "#submit-elicitation"
+            ):
+                break
+            await anyio.sleep(0)
+        else:
+            pytest.fail("the form card was never caught half-built")
+        cast(Any, screen)._apply_focus_rule(approval)
+        await pilot.pause()
+        assert isinstance(screen.focused, Input)
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_typing_in_the_composer_keeps_focus_when_an_approval_arrives(
+    sample_rows: list[SessionRow],
+) -> None:
+    """An approval arriving mid-sentence leaves focus in the composer.
+
+    The rest of the sentence is typing, not approval shortcuts.
+    """
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press(*"check ")
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        await pilot.press(*"the logs")
+        await pilot.pause()
+        assert composer.text == "check the logs"
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+@pytest.mark.parametrize("control", ["approve-opt-reject", "decline-elicitation"])
+async def test_closing_the_cancel_card_returns_to_the_control_left(
+    sample_rows: list[SessionRow], control: str
+) -> None:
+    """Esc on the cancel card returns focus to the exact control ^N left."""
+    from textual.widgets import Button
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        if control == "approve-opt-reject":
+            screen.state.consume_approval_request(
+                _bar_pending(_bar_pending_request("tc-1"))
+            )
+        else:
+            _seed_pending_elicitation(screen.state)
+        await pilot.pause()
+        screen.query_one(f"#{control}", Button).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert getattr(screen.focused, "id", None) == control
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_the_control_left_is_returned_only_when_the_cancel_card_had_focus(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Closing the cancel card from elsewhere drops the control ^N left.
+
+    The operator leaves Reject, opens the cancel card, moves to the form,
+    and closes the card from there. Answering the form then puts focus on
+    Approve, not back on Reject.
+    """
+    from textual.widgets import Button, Input
+
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        screen.state.consume_approval_request(
+            _bar_pending(_bar_pending_request("tc-1"))
+        )
+        _seed_pending_elicitation(screen.state)
+        await pilot.pause()
+        screen.query_one(f"#{_BUTTON_ID_PREFIX}reject", Button).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.click(Input)
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("x", "enter")
+        await pilot.pause()
+        assert getattr(screen.focused, "id", None) == f"{_BUTTON_ID_PREFIX}approve"
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_failed_cancel_gives_focus_back(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the cancel RPC fails and its card closes, focus returns to the form.
+
+    Score left nothing focused, so the next letters decided the approval.
+    """
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        monkeypatch.setattr(app, "notify", lambda message, **_: None)
+
+        async def fail(method: str, params: dict[str, object]) -> None:
+            raise RuntimeError("server gone")
+
+        monkeypatch.setattr(cast(Any, screen)._session.connection, "send_request", fail)
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        await pilot.press("b", "o", "ctrl+n")
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.press("b", "t", "a", "enter")
+        await pilot.pause()
+        assert form is not None and form.content == {"name": "bobta"}
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_the_end_of_the_late_moment_moves_no_focus(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Focus the operator takes after the late moment stays there.
+
+    The next status tick used to re-rank it, moving it from the form to
+    the cancel card, where Enter cancelled the sample.
+    """
+    from textual.widgets import Button, Input
+
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        screen.set_focus(screen.query_one(f"#{_BUTTON_ID_PREFIX}approve", Button))
+        screen.state.withdraw_approval(pending)
+        await pilot.pause()
+
+        clock[0] += 1.01
+        screen.set_focus(screen.query_one(Input))
+        await pilot.press("b", "o", "b")
+        screen._tick()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert form is not None and form.content == {"name": "bob"}
+        assert cast(Any, screen)._session.connection.requests == []
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_click_in_the_late_moment_focuses_where_it_lands(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A click right after the focused approval is withdrawn still focuses.
+
+    Typing then goes into the form field clicked, not to late-decision reports.
+    """
+    from textual.widgets import Input
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        monkeypatch.setattr(screen.state, "_now", lambda: 1000.0)
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        screen.state.withdraw_approval(pending)
+        await pilot.pause()
+
+        await pilot.click(Input)
+        await pilot.press("t", "e", "d", "enter")
+        await pilot.pause()
+        assert form is not None and form.content == {"name": "ted"}
+        assert notes == []
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_esc_on_an_approval_leaves_the_waiting_form(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Esc with focus on an approval doesn't decline the form waiting above it."""
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        screen.state.consume_approval_request(
+            _bar_pending(_bar_pending_request("tc-1"))
+        )
+        await pilot.pause()
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert form is not None and form.action != "decline"
 
 
 @skip_if_trio

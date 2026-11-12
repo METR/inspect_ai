@@ -265,6 +265,10 @@ class SessionScreen(Screen[None]):
         # True from removing a focused, withdrawn approval card until its
         # late moment ends; see ``_apply_focus_rule``.
         self._focus_parked = False
+        # True while a mouse press is being forwarded; see ``set_focus``.
+        self._clicking = False
+        # The control focused when ^N opened the cancel card, to return to.
+        self._focus_before_cancel: Widget | None = None
         # Set by ``action_switch_sample`` so the disconnect watcher can
         # tell a user-initiated pop from a peer-side EOF and skip the
         # otherwise-misleading "disconnected from server" toast.
@@ -430,6 +434,10 @@ class SessionScreen(Screen[None]):
                 request = existing.request
                 if isinstance(request, PendingApproval) and request.withdrawn:
                     self._focus_parked = True
+            elif self.focused is None:
+                released = True
+            elif isinstance(existing, _CancelCard):
+                self._focus_before_cancel = None
             existing.remove()
         if pending is not None:
             card = factory(pending)
@@ -445,13 +453,14 @@ class SessionScreen(Screen[None]):
         Runs once a new card's controls exist (``ready``), after the card
         holding focus is removed, and when a withdrawal's late moment ends.
         A card the server sent takes focus only when focus isn't in a live
-        card; the cancel card, which only the operator's ^N opens, takes it
-        from any card. Nothing takes focus while parked (see
-        :meth:`set_focus`). Focus goes to the cancel card, else an open
-        ``ask_user`` form, else the current approval's first button, else
-        the composer unless disabled, else nothing. Cards are found by their
-        pending request, as a removed card stays in the DOM until its task
-        ends.
+        card or the composer; the cancel card, which only the operator's ^N
+        opens, takes it from anywhere. Closing the cancel card returns focus
+        to the control ^N left, if that is still in a live card. Nothing takes
+        focus while parked (see :meth:`set_focus`). Otherwise focus goes to
+        the cancel card, else an open ``ask_user`` form, else the current
+        approval's first button, else the composer unless disabled, else
+        nothing. Cards are found by their pending request, as a removed card
+        stays in the DOM until its task ends.
         """
         if self._focus_parked and self._state.late_decision_target() is not None:
             return
@@ -462,12 +471,33 @@ class SessionScreen(Screen[None]):
             self._state.current_pending_approval(),
         )
         if ready is not None:
-            holder = self._focused_card()
+            holder = self._card_of(self.focused)
             if not any(ready.request is request for request in live) or (
                 ready.request is not self._state.pending_cancel
-                and holder is not None
-                and any(holder.request is request for request in live)
+                and (
+                    isinstance(self.focused, ComposerTextArea)
+                    or (
+                        holder is not None
+                        and any(holder.request is request for request in live)
+                    )
+                )
             ):
+                return
+        elif self._state.pending_cancel is None:
+            back, self._focus_before_cancel = self._focus_before_cancel, None
+            card = self._card_of(back)
+            if (
+                back is not None
+                and card is not None
+                and back.is_attached
+                and back.focusable
+                and any(card.request is request for request in live)
+            ):
+                # A form field goes through the card, which keeps its text.
+                if isinstance(card, _ElicitationCard) and not isinstance(back, Button):
+                    card.focus_first()
+                else:
+                    back.focus()
                 return
         for request in live:
             if request is not None:
@@ -487,22 +517,36 @@ class SessionScreen(Screen[None]):
         scroll_visible: bool = True,
         from_app_focus: bool = False,
     ) -> None:
-        """Focus nothing while parked, so a focus queued earlier can't land."""
-        if self._focus_parked and self._state.late_decision_target() is not None:
-            widget = None
+        """Focus nothing while parked, so a focus queued earlier can't land.
+
+        A click still focuses where it lands, and the first focus after the
+        late moment ends un-parks, so the moment's end moves nothing.
+        """
+        if self._focus_parked:
+            if self._clicking or self._state.late_decision_target() is None:
+                self._focus_parked = False
+            else:
+                widget = None
         super().set_focus(
             widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus
         )
 
-    def _focused_card(self) -> InlineRequestCard | None:
-        """The card holding focus, if any."""
-        focused = self.focused
-        if focused is None:
+    def _forward_event(self, event: events.Event) -> None:
+        self._clicking = isinstance(event, events.MouseDown)
+        try:
+            super()._forward_event(event)
+        finally:
+            self._clicking = False
+
+    @staticmethod
+    def _card_of(widget: Widget | None) -> InlineRequestCard | None:
+        """The card holding ``widget``, if any."""
+        if widget is None:
             return None
         return next(
             (
                 node
-                for node in focused.ancestors_with_self
+                for node in widget.ancestors_with_self
                 if isinstance(node, InlineRequestCard)
             ),
             None,
@@ -510,7 +554,7 @@ class SessionScreen(Screen[None]):
 
     def _focus_in(self, *card_types: type[InlineRequestCard]) -> bool:
         """Whether focus is inside a card of one of ``card_types``."""
-        return isinstance(self._focused_card(), card_types)
+        return isinstance(self._card_of(self.focused), card_types)
 
     def _elicitation_card_or_none(self) -> _ElicitationCard | None:
         try:
@@ -673,8 +717,10 @@ class SessionScreen(Screen[None]):
             # visible-but-disabled — none of the current cases hit
             # that path (every "disabled" state now also hides), but
             # cheap insurance against a regression.
+            # A card doesn't take the composer away while it has focus.
+            in_composer = self.focused is composer
             hide_composer_row = (
-                self._request_card_mounted()
+                (self._request_card_mounted() and not in_composer)
                 or not interactive
                 or lifecycle
                 in (
@@ -698,7 +744,7 @@ class SessionScreen(Screen[None]):
             elif lifecycle == "scoring":
                 composer.placeholder = "scoring"
                 composer.disabled = True
-            elif lifecycle == "approval":
+            elif lifecycle == "approval" and not in_composer:
                 composer.placeholder = "awaiting your approval"
                 composer.disabled = True
             else:
@@ -919,6 +965,7 @@ class SessionScreen(Screen[None]):
                 if card.request is pending and not self._focus_in(_CancelCard):
                     card.focus_first()
             return
+        self._focus_before_cancel = self.focused
         self._state.consume_cancel_request(
             PendingCancel(
                 fails_on_error=self._session.row.fails_on_error,
@@ -1257,9 +1304,9 @@ class SessionScreen(Screen[None]):
 
         1. Cancel card mounted → resolve it as Back (the operator
            backed out of cancelling). No interrupt, no composer change.
-        2. Elicitation card mounted → decline it (the operator is
-           saying "no thanks, I won't answer"). Mirrors clicking
-           the card's Decline button.
+        2. Elicitation card mounted, with focus in it or in no card →
+           decline it (the operator is saying "no thanks, I won't
+           answer"). Mirrors clicking the card's Decline button.
         3. Composer has a draft → clear it (so a typo is easy to undo).
         4. Agent is working → send ``session/cancel``.
 
@@ -1302,7 +1349,9 @@ class SessionScreen(Screen[None]):
             self._state.resolve_cancel()
             return
         elicit_card = self._elicitation_card_or_none()
-        if elicit_card is not None:
+        if elicit_card is not None and (
+            self._focus_in(_ElicitationCard) or self._card_of(self.focused) is None
+        ):
             # Route through the same message the Decline button
             # posts so resolve_elicitation + unmount + composer
             # re-focus all run on the single screen-level handler.

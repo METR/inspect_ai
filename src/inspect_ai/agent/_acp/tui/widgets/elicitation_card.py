@@ -168,10 +168,13 @@ class _ElicitationCard(InlineRequestCard):
         if self._last_field is not None:
             self._keep_typed_text = True
             self._last_field.focus()
-        elif form.query(FieldRow):
+        elif self._schema.properties:
             form.focus_first()
         else:
-            self.query_one(f"#{self._SUBMIT_ID}", Button).focus()
+            # The buttons may not be mounted yet; the card's own ready call
+            # comes back once they are.
+            for button in self.query(f"#{self._SUBMIT_ID}").results(Button):
+                button.focus()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         # Runs after the field's own Focus handler selected all its text.
