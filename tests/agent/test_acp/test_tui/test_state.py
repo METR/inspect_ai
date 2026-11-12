@@ -1888,6 +1888,35 @@ def test_withdrawal_answers_a_request_whose_card_left_the_window() -> None:
     assert pending.event.is_set() and pending.cancelled
 
 
+def test_disconnect_drops_a_stale_ask_user_form() -> None:
+    """A dropped connection takes its ``ask_user`` request with it.
+
+    The server asks again after the reconnect, so the old form must not
+    take an answer that goes nowhere.
+    """
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingElicitation
+
+    state = SessionState()
+    form = PendingElicitation(
+        message="Name?",
+        requested_schema=ElicitationSchema(
+            properties={
+                "name": ElicitationStringPropertySchema(type="string", title="Name")
+            },
+            required=["name"],
+        ),
+        event=asyncio.Event(),
+    )
+    state.consume_elicitation_request(form)
+
+    state.mark_disconnected()
+    assert state.pending_elicitation is None
+
+
 def test_disconnect_leaves_no_clickable_approval() -> None:
     """A dropped connection takes its requests with it.
 

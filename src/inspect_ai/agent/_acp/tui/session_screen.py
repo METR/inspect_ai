@@ -415,6 +415,18 @@ class SessionScreen(Screen[None]):
             existing = None
         if pending is None:
             if existing is not None:
+                approval = self._approval_card_or_none()
+                focused = self.focused
+                if (
+                    approval is not None
+                    and approval is not existing
+                    and focused is not None
+                    and existing in focused.ancestors_with_self
+                ):
+                    # Else Textual moves focus to its last button (Terminate).
+                    for button in approval.query(Button):
+                        button.focus()
+                        break
                 existing.remove()
             return
         if existing is not None:

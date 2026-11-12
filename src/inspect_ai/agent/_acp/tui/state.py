@@ -1228,9 +1228,9 @@ class SessionState:
         via the existing handler and the dot would just flash before
         the lifecycle flip.
 
-        Pending approvals resolve as cancelled: their requests died with
-        the connection, and the server re-sends any it still waits on
-        once we re-attach.
+        Pending approvals and an ``ask_user`` form resolve as cancelled:
+        their requests died with the connection, and the server re-sends
+        any it still waits on once we re-attach.
         """
         if self._complete or self._session_ended_received:
             return
@@ -1238,6 +1238,7 @@ class SessionState:
             return
         self._disconnected = True
         self._clear_pending_approvals()
+        self._clear_pending_elicitation()
         self._notify()
 
     def mark_reconnected(self) -> None:

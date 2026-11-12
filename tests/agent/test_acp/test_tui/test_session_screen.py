@@ -1395,13 +1395,15 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
 
     Neither the end of a withdrawal's late moment nor the card that
     replaces a withdrawn one may take focus from the form, so typing and
-    Enter still answer it.
+    Enter still answer it. When the form closes, the approval card's
+    first button takes focus, not its last (Terminate).
     """
     import asyncio
 
     from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
 
     from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
 
     def _form() -> PendingElicitation:
         return PendingElicitation(
@@ -1454,6 +1456,36 @@ async def test_open_form_keeps_focus_while_approvals_come_and_go(
         await pilot.pause()
         assert later.content == {"name": "x"}
         assert not behind.event.is_set()
+        assert getattr(screen.focused, "id", None) == f"{_BUTTON_ID_PREFIX}approve"
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_approval_arriving_under_the_cancel_card_leaves_it_focused(
+    sample_rows: list[SessionRow],
+) -> None:
+    """The cancel card keeps focus when an approval arrives under it.
+
+    Closing it with Esc must not leave focus on the approval's
+    Terminate button, one Enter away from ending the sample.
+    """
+    from inspect_ai.agent._acp.tui.state import PendingApproval
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        assert getattr(screen.focused, "id", None) == "cancel-sample-opt-score"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pending.chosen_option_id != "terminate"
 
 
 @skip_if_trio
