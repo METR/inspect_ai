@@ -141,13 +141,14 @@ async def test_an_acp_client_decision_is_used_when_one_answers(
     surface.install(monkeypatch)
 
     async def acp(**kwargs: object) -> Approval | None:
-        return Approval(decision="terminate")
+        return Approval(decision="terminate", metadata={"decided_by": "alice"})
 
     monkeypatch.setattr(acp_module, "request_human_approval_via_acp", acp)
 
     decided = await review(human_reviewer())
 
     assert decided.decision == "terminate"
+    assert decided.metadata == {"decided_by": "alice"}
     assert surface.views == []
 
 
