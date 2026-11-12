@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from textual import events
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.widgets import Button, Input
@@ -98,6 +99,7 @@ class _ElicitationCard(InlineRequestCard):
         self._message = message
         self._schema = schema
         self._form: ElicitationForm | None = None
+        self._keep_typed_text = False
 
     @classmethod
     def from_pending(cls, pending: PendingElicitation) -> "_ElicitationCard":
@@ -151,9 +153,20 @@ class _ElicitationCard(InlineRequestCard):
         )
 
     def focus_first(self) -> None:
-        """Focus the form's first field; the base walk stops at the form itself."""
+        """Focus the form's first field; the base walk stops at the form itself.
+
+        A text field keeps what the operator typed, with the cursor at the
+        end, so the next key extends a half-typed answer.
+        """
         if self._form is not None:
+            self._keep_typed_text = True
             self._form.focus_first()
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        # Runs after the field's own Focus handler selected all its text.
+        if self._keep_typed_text and isinstance(event.widget, Input):
+            event.widget.cursor_position = len(event.widget.value)
+        self._keep_typed_text = False
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter on a form Input → advance to next empty required, or submit.

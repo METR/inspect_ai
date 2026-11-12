@@ -1500,8 +1500,8 @@ async def test_closing_the_cancel_card_leaves_typing_in_an_open_form(
 ) -> None:
     """^N over an ``ask_user`` form focuses the cancel card; Esc returns to the form.
 
-    The next keys answer the form: they don't decide an approval under
-    the cards or go into the hidden composer.
+    The next keys extend what was typed in the form: they don't replace
+    it, decide an approval under the cards, or go into the hidden composer.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval
 
@@ -1516,14 +1516,14 @@ async def test_closing_the_cancel_card_leaves_typing_in_an_open_form(
         if approval_arrives == "after":
             screen.state.consume_approval_request(pending)
         await pilot.pause()
-        await pilot.press("ctrl+n")
+        await pilot.press("b", "o", "ctrl+n")
         await pilot.pause()
         assert getattr(screen.focused, "id", None) == "cancel-sample-opt-score"
         await pilot.press("escape")
         await pilot.pause()
         await pilot.press("x", "enter")
         await pilot.pause()
-        assert form is not None and form.content == {"name": "x"}
+        assert form is not None and form.content == {"name": "box"}
         assert not pending.event.is_set()
         assert screen.query_one("#composer", TextArea).text == ""
 
