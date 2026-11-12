@@ -260,7 +260,7 @@ class SessionScreen(Screen[None]):
         self._watch_task: asyncio.Task[None] | None = None
         self._state = state
         self._unsubscribe: Callable[[], None] | None = None
-        # The approval a mouse press started on; see ``on_mouse_down``.
+        # The approval a mouse press started on; see ``_note_press``.
         self._pressed_approval: PendingApproval | None = None
         # True from removing a focused, withdrawn approval card until its
         # late moment ends; see ``_apply_focus_rule``.
@@ -488,10 +488,15 @@ class SessionScreen(Screen[None]):
             card = self._card_of(back)
             if (
                 back is not None
-                and card is not None
                 and back.is_attached
                 and back.focusable
-                and any(card.request is request for request in live)
+                and (
+                    (isinstance(back, ComposerTextArea) and bool(back.text))
+                    or (
+                        card is not None
+                        and any(card.request is request for request in live)
+                    )
+                )
             ):
                 # A form field goes through the card, which keeps its text.
                 if isinstance(card, _ElicitationCard) and not isinstance(back, Button):
@@ -533,6 +538,8 @@ class SessionScreen(Screen[None]):
 
     def _forward_event(self, event: events.Event) -> None:
         self._clicking = isinstance(event, events.MouseDown)
+        if isinstance(event, events.MouseDown):
+            self._note_press(event)
         try:
             super()._forward_event(event)
         finally:
@@ -650,8 +657,11 @@ class SessionScreen(Screen[None]):
                 return False
             return self._letter_targets_visible_bar(str(_parameters[0]))
         if action == "late_enter":
-            # Enter in the cancel card or an ask_user form has its own target.
-            if self._focus_in(_CancelCard, _ElicitationCard):
+            # Enter in the cancel card, an ask_user form or the composer has its
+            # own target.
+            if self._focus_in(_CancelCard, _ElicitationCard) or isinstance(
+                self.focused, ComposerTextArea
+            ):
                 return False
             return self._state.late_decision_target() is not None
         # Composer-driven actions are meaningless in an observe-only
@@ -717,10 +727,13 @@ class SessionScreen(Screen[None]):
             # visible-but-disabled — none of the current cases hit
             # that path (every "disabled" state now also hides), but
             # cheap insurance against a regression.
-            # A card doesn't take the composer from an operator with a draft.
-            drafting = self._drafting()
+            # A card doesn't take the composer from an operator in it, or from
+            # a draft ^N left.
+            kept = self.focused is composer or (
+                self._focus_before_cancel is composer and bool(composer.text)
+            )
             hide_composer_row = (
-                (self._request_card_mounted() and not drafting)
+                (self._request_card_mounted() and not kept)
                 or not interactive
                 or lifecycle
                 in (
@@ -744,7 +757,7 @@ class SessionScreen(Screen[None]):
             elif lifecycle == "scoring":
                 composer.placeholder = "scoring"
                 composer.disabled = True
-            elif lifecycle == "approval" and not drafting:
+            elif lifecycle == "approval" and not kept:
                 composer.placeholder = "awaiting your approval"
                 composer.disabled = True
             else:
@@ -908,11 +921,12 @@ class SessionScreen(Screen[None]):
         self.app.notify(withdrawn_notice(late), severity="warning")
         return True
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
+    def _note_press(self, event: events.MouseDown) -> None:
         """Note the approval a button press starts on.
 
         A withdrawal before the release swaps the card under the pointer,
         so Textual makes no click; :meth:`on_mouse_up` reports it instead.
+        Runs as the press is forwarded, before a withdrawal can swap the card.
         """
         card = self._approval_card_or_none()
         self._pressed_approval = None
@@ -963,6 +977,7 @@ class SessionScreen(Screen[None]):
         if pending is not None:
             for card in self.query(_CancelCard):
                 if card.request is pending and not self._focus_in(_CancelCard):
+                    self._focus_before_cancel = self.focused
                     card.focus_first()
             return
         self._focus_before_cancel = self.focused
@@ -1350,7 +1365,11 @@ class SessionScreen(Screen[None]):
             return
         elicit_card = self._elicitation_card_or_none()
         if elicit_card is not None and (
-            self._focus_in(_ElicitationCard) or self._card_of(self.focused) is None
+            self._focus_in(_ElicitationCard)
+            or (
+                self._card_of(self.focused) is None
+                and not isinstance(self.focused, ComposerTextArea)
+            )
         ):
             # Route through the same message the Decline button
             # posts so resolve_elicitation + unmount + composer

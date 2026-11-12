@@ -2125,20 +2125,223 @@ async def test_a_click_in_the_late_moment_focuses_where_it_lands(
 async def test_esc_on_an_approval_leaves_the_waiting_form(
     sample_rows: list[SessionRow],
 ) -> None:
-    """Esc with focus on an approval doesn't decline the form waiting above it."""
+    """Esc with focus on an approval interrupts the turn; it doesn't decline the form.
+
+    The interrupt cancels the approval and the form waiting above it, and
+    sends ``session/cancel``.
+    """
     app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
     async with app.run_test() as pilot:
         screen = await _open_session(app, pilot, sample_rows[0])
-        screen.state.consume_approval_request(
-            _bar_pending(_bar_pending_request("tc-1"))
-        )
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
         await pilot.pause()
         _seed_pending_elicitation(screen.state)
         form = screen.state.pending_elicitation
         await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
-        assert form is not None and form.action != "decline"
+        assert form is not None and form.action == "cancel"
+        assert pending.cancelled
+        notifications = cast(Any, screen)._session.connection.notifications
+        assert [method for method, _ in notifications] == ["session/cancel"]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_the_composer_keeps_focus_when_its_draft_is_deleted(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Deleting a kept draft leaves the composer focused and shown.
+
+    The status tick used to hide it, so the next letters decided the approval.
+    """
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press("x")
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        await pilot.press("backspace")
+        screen._tick()
+        await pilot.pause()
+        await pilot.press(*"test")
+        await pilot.pause()
+        assert composer.text == "test"
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_second_ctrl_n_saves_the_control_it_leaves(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Esc after a repeat ^N returns to where that ^N was pressed.
+
+    Reject, ^N, back into the form, ^N, Esc: typing goes into the form, not
+    to Reject, where ``r`` rejected the approval.
+    """
+    from textual.widgets import Button, Input
+
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        _seed_pending_elicitation(screen.state)
+        await pilot.pause()
+        screen.query_one(f"#{_BUTTON_ID_PREFIX}reject", Button).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.click(Input)
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press(*"rust")
+        await pilot.pause()
+        assert screen.query_one(Input).value == "rust"
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_ctrl_n_and_esc_from_a_draft_return_to_the_composer(
+    sample_rows: list[SessionRow],
+) -> None:
+    """^N then Esc from a kept draft puts focus back in the composer.
+
+    Focus used to go to the approval, so finishing the sentence decided it.
+    """
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press(*"check ")
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        screen._tick()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press(*"the logs")
+        await pilot.pause()
+        assert composer.text == "check the logs"
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_esc_in_a_draft_clears_it_not_a_waiting_form(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Esc in a composer holding a draft clears the draft; a waiting form stays."""
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press(*"check ")
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert composer.text == ""
+        assert form is not None and form.action is None
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_enter_in_a_draft_after_a_withdrawal_sends_it(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter in a kept draft right after an approval is withdrawn sends it.
+
+    Enter in the composer isn't a late decision on the withdrawn card.
+    """
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        monkeypatch.setattr(screen.state, "_now", lambda: 1000.0)
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press(*"hello")
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        screen.state.withdraw_approval(pending)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert notes == []
+        assert cast(Any, screen)._session.connection.requests == [
+            (
+                "session/prompt",
+                {
+                    "sessionId": sample_rows[0].session_id,
+                    "prompt": [{"type": "text", "text": "hello"}],
+                },
+            )
+        ]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_press_is_noted_before_a_withdrawal_can_swap_the_card(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A press withdrawn before it reaches the screen's handlers is reported.
+
+    The screen used to note the press only once it bubbled up, by when the
+    next card had replaced the withdrawn one under the pointer.
+    """
+    from textual import events
+    from textual.widgets import Button
+
+    from inspect_ai.agent._acp.tui.state import withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        monkeypatch.setattr(screen.state, "_now", lambda: 1000.0)
+        shown = _bar_pending(_bar_pending_request("tc-1"))
+        behind = _bar_pending(_bar_pending_request("tc-2", title="bash rm"))
+        screen.state.consume_approval_request(shown)
+        screen.state.consume_approval_request(behind)
+        await pilot.pause()
+        button = screen.query_one(f"#{_BUTTON_ID_PREFIX}approve", Button)
+        x, y = button.region.x + 1, button.region.y
+
+        # The app forwards the press at once; its handlers run later.
+        await app.on_event(
+            events.MouseDown(None, x, y, 0, 0, 1, False, False, False, x, y)
+        )
+        screen.state.withdraw_approval(shown)
+        await pilot.pause()
+        app.post_message(events.MouseUp(None, x, y, 0, 0, 1, False, False, False, x, y))
+        await pilot.pause()
+        assert not behind.event.is_set()
+        assert notes == [withdrawn_notice(shown)]
 
 
 @skip_if_trio
