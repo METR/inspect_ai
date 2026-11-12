@@ -2454,6 +2454,45 @@ async def test_a_card_arriving_while_the_window_is_unfocused_waits(
 
 @skip_if_trio
 @pytest.mark.anyio
+async def test_a_card_closing_while_the_window_is_unfocused_leaves_the_composer(
+    sample_rows: list[SessionRow],
+) -> None:
+    """A card closing while the terminal is unfocused doesn't move the composer's focus.
+
+    Back in the composer after ^N, the operator switches windows and the
+    approval is withdrawn. Back in the window, ``s`` is typing, not Cancel:
+    Score.
+    """
+    from textual import events
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.focus()
+        await pilot.pause()
+        await pilot.press(*"check ")
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        # Past the draft's end, so the cursor stays after it.
+        await pilot.click("#composer", offset=(20, 0))
+        app.post_message(events.AppBlur())
+        await pilot.pause()
+        screen.state.withdraw_approval(pending)
+        await pilot.pause()
+        app.post_message(events.AppFocus())
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        assert composer.text == "check s"
+        assert cast(Any, screen)._session.connection.requests == []
+
+
+@skip_if_trio
+@pytest.mark.anyio
 async def test_an_emptied_composer_keeps_focus_when_the_next_card_replaces_one(
     sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
 ) -> None:

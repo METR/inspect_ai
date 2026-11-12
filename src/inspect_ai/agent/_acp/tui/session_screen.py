@@ -441,7 +441,7 @@ class SessionScreen(Screen[None]):
                 request = existing.request
                 if isinstance(request, PendingApproval) and request.withdrawn:
                     self._focus_parked = True
-            elif self.focused is None:
+            elif self._operator_focus() is None:
                 released = True
             elif isinstance(existing, _CancelCard):
                 self._focus_before_cancel = None
