@@ -19,9 +19,10 @@ from typing import Any
 from textual import events
 from textual.app import ComposeResult
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Button, Input
 
-from inspect_ai._util.textual.form import ElicitationForm
+from inspect_ai._util.textual.form import ElicitationForm, FieldRow
 from inspect_ai.agent._acp.tui.state import (
     ElicitationAction,
     PendingElicitation,
@@ -100,6 +101,7 @@ class _ElicitationCard(InlineRequestCard):
         self._schema = schema
         self._form: ElicitationForm | None = None
         self._keep_typed_text = False
+        self._last_field: Widget | None = None
 
     @classmethod
     def from_pending(cls, pending: PendingElicitation) -> "_ElicitationCard":
@@ -153,20 +155,31 @@ class _ElicitationCard(InlineRequestCard):
         )
 
     def focus_first(self) -> None:
-        """Focus the form's first field; the base walk stops at the form itself.
+        """Focus the field last used, else the first field, else Submit.
 
-        A text field keeps what the operator typed, with the cursor at the
-        end, so the next key extends a half-typed answer.
+        Back in a text field, the cursor goes to the end with nothing
+        selected, so the next key extends a half-typed answer. A first focus
+        keeps Textual's selection, so typing replaces a default. The base
+        walk would stop at the form itself.
         """
-        if self._form is not None:
+        form = self._form
+        if form is None:
+            return
+        if self._last_field is not None:
             self._keep_typed_text = True
-            self._form.focus_first()
+            self._last_field.focus()
+        elif form.query(FieldRow):
+            form.focus_first()
+        else:
+            self.query_one(f"#{self._SUBMIT_ID}", Button).focus()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         # Runs after the field's own Focus handler selected all its text.
         if self._keep_typed_text and isinstance(event.widget, Input):
             event.widget.cursor_position = len(event.widget.value)
         self._keep_typed_text = False
+        if isinstance(event.widget.parent, FieldRow):
+            self._last_field = event.widget
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter on a form Input → advance to next empty required, or submit.

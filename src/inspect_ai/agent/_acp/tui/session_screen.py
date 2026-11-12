@@ -27,6 +27,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, Static, TextArea
 
 from inspect_ai.agent._acp.inspect_ext import INSPECT_CANCEL_TOOL_CALL_METHOD
@@ -337,13 +338,13 @@ class SessionScreen(Screen[None]):
             return
         header.set_usage(self._state.usage)
         transcript.refresh_from(self._state)
-        cards_changed = self._apply_request_cards()
+        focus_released = self._apply_request_cards()
         # ``_apply_lifecycle`` calls ``refresh_bindings`` itself so the
         # ``^p plan`` footer hint flips on the same tick the strip
         # becomes visible (and so the bare-letter gates re-evaluate
         # when the cards mount / unmount).
         self._apply_lifecycle()
-        if cards_changed:
+        if focus_released:
             self._apply_focus_rule()
 
     def _apply_request_cards(self) -> bool:
@@ -361,9 +362,9 @@ class SessionScreen(Screen[None]):
         though in practice approval and elicitation park the agent so
         cancel is the only one that can land while another card is up.
 
-        Returns True if any card was mounted or removed.
+        Returns True if a card holding focus was removed.
         """
-        changed = [
+        released = [
             self._reconcile_card(
                 _ElicitationCard,
                 self._state.pending_elicitation,
@@ -380,7 +381,7 @@ class SessionScreen(Screen[None]):
                 lambda pending: _CancelCard.from_pending(pending, self._state),
             ),
         ]
-        return any(changed)
+        return any(released)
 
     def _reconcile_card(
         self,
@@ -388,7 +389,7 @@ class SessionScreen(Screen[None]):
         pending: object | None,
         factory: Callable[[Any], InlineRequestCard],
     ) -> bool:
-        """Mount / unmount / replace a single card class; True if anything changed.
+        """Mount / unmount / replace a single card class; True if it took focus away.
 
         Three cases:
 
@@ -421,9 +422,11 @@ class SessionScreen(Screen[None]):
             existing = None
         if existing is not None and existing.request is pending:
             return False
+        released = False
         if existing is not None:
             if self._focus_in(type(existing)):
                 self.set_focus(None)
+                released = True
                 request = existing.request
                 if isinstance(request, PendingApproval) and request.withdrawn:
                     self._focus_parked = True
@@ -433,30 +436,43 @@ class SessionScreen(Screen[None]):
             plan_strip = self.query_one(PlanStripWidget)
             self.query_one("Vertical").mount(card, after=plan_strip)
             # Queued on the card, so it runs once the card's controls exist.
-            card.call_later(self._apply_focus_rule)
-        return existing is not None or pending is not None
+            card.call_later(self._apply_focus_rule, card)
+        return released
 
-    def _apply_focus_rule(self) -> None:
-        """Put focus where the operator's next key belongs.
+    def _apply_focus_rule(self, ready: InlineRequestCard | None = None) -> None:
+        """Place focus without taking it from a card the operator is in.
 
-        The cancel card (only ^N opens it), else an open ``ask_user`` form,
-        else the current approval's first button, else the composer unless
-        disabled, else nothing. For the moment after the focused approval is withdrawn,
-        nothing: a key then was meant for that card and is reported.
-        Cards are found by their pending request, as a removed card stays
-        in the DOM until its task ends.
+        Runs once a new card's controls exist (``ready``), after the card
+        holding focus is removed, and when a withdrawal's late moment ends.
+        A card the server sent takes focus only when focus isn't in a live
+        card; the cancel card, which only the operator's ^N opens, takes it
+        from any card. Nothing takes focus while parked (see
+        :meth:`set_focus`). Focus goes to the cancel card, else an open
+        ``ask_user`` form, else the current approval's first button, else
+        the composer unless disabled, else nothing. Cards are found by their
+        pending request, as a removed card stays in the DOM until its task
+        ends.
         """
         if self._focus_parked and self._state.late_decision_target() is not None:
             return
         self._focus_parked = False
-        for pending in (
+        live = (
             self._state.pending_cancel,
             self._state.pending_elicitation,
             self._state.current_pending_approval(),
-        ):
-            if pending is not None:
+        )
+        if ready is not None:
+            holder = self._focused_card()
+            if not any(ready.request is request for request in live) or (
+                ready.request is not self._state.pending_cancel
+                and holder is not None
+                and any(holder.request is request for request in live)
+            ):
+                return
+        for request in live:
+            if request is not None:
                 for card in self.query(InlineRequestCard):
-                    if card.request is pending and not self._focus_in(type(card)):
+                    if card.request is request:
                         card.focus_first()
                 return
         composer = self._composer_or_none()
@@ -465,12 +481,36 @@ class SessionScreen(Screen[None]):
         else:
             self.set_focus(None)
 
+    def set_focus(
+        self,
+        widget: Widget | None,
+        scroll_visible: bool = True,
+        from_app_focus: bool = False,
+    ) -> None:
+        """Focus nothing while parked, so a focus queued earlier can't land."""
+        if self._focus_parked and self._state.late_decision_target() is not None:
+            widget = None
+        super().set_focus(
+            widget, scroll_visible=scroll_visible, from_app_focus=from_app_focus
+        )
+
+    def _focused_card(self) -> InlineRequestCard | None:
+        """The card holding focus, if any."""
+        focused = self.focused
+        if focused is None:
+            return None
+        return next(
+            (
+                node
+                for node in focused.ancestors_with_self
+                if isinstance(node, InlineRequestCard)
+            ),
+            None,
+        )
+
     def _focus_in(self, *card_types: type[InlineRequestCard]) -> bool:
         """Whether focus is inside a card of one of ``card_types``."""
-        focused = self.focused
-        return focused is not None and any(
-            isinstance(node, card_types) for node in focused.ancestors_with_self
-        )
+        return isinstance(self._focused_card(), card_types)
 
     def _elicitation_card_or_none(self) -> _ElicitationCard | None:
         try:

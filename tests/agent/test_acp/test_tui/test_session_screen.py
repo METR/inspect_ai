@@ -1629,6 +1629,226 @@ async def test_letters_in_a_form_select_field_decide_no_approval(
 
 @skip_if_trio
 @pytest.mark.anyio
+@pytest.mark.parametrize("change", ["arrives", "withdrawn"])
+async def test_an_approval_change_leaves_focus_in_the_form_in_use(
+    sample_rows: list[SessionRow], change: str
+) -> None:
+    """A card change doesn't take focus from the form the operator went back to.
+
+    After ^N the operator clicks back into the form and types. An approval
+    arriving or withdrawn under the cards leaves focus there, so Enter
+    answers the form rather than choosing on the cancel card.
+    """
+    from textual.widgets import Input
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        if change == "withdrawn":
+            screen.state.consume_approval_request(pending)
+        _seed_pending_elicitation(screen.state)
+        form = screen.state.pending_elicitation
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.click(Input)
+        await pilot.press("b", "o", "b")
+        if change == "arrives":
+            screen.state.consume_approval_request(pending)
+        else:
+            screen.state.withdraw_approval(pending)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert form is not None and form.content == {"name": "bob"}
+        assert cast(Any, screen)._session.connection.requests == []
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_back_from_the_cancel_card_typing_continues_the_field_last_used(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Esc on the cancel card returns to the form field the operator was in."""
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        form = PendingElicitation(
+            message="Who?",
+            requested_schema=ElicitationSchema(
+                properties={
+                    "first": ElicitationStringPropertySchema(type="string"),
+                    "second": ElicitationStringPropertySchema(type="string"),
+                },
+                required=["first", "second"],
+            ),
+            event=asyncio.Event(),
+        )
+        screen.state.consume_elicitation_request(form)
+        await pilot.pause()
+        await pilot.press(*"alice", "enter", "b", "o", "ctrl+n")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("b", "enter")
+        await pilot.pause()
+        assert form.content == {"first": "alice", "second": "bob"}
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_form_arriving_over_a_focused_approval_waits(
+    sample_rows: list[SessionRow],
+) -> None:
+    """A form the server sends doesn't take focus from the approval in use.
+
+    Enter, meant for Approve, approves; the form waits.
+    """
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        # An optional field, so an Enter in the form would submit it.
+        form = PendingElicitation(
+            message="Anything to add?",
+            requested_schema=ElicitationSchema(
+                properties={"note": ElicitationStringPropertySchema(type="string")}
+            ),
+            event=asyncio.Event(),
+        )
+        screen.state.consume_elicitation_request(form)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pending.chosen_option_id == "approve"
+        assert form.action is None
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_form_without_fields_takes_focus_on_submit(
+    sample_rows: list[SessionRow],
+) -> None:
+    """Enter answers a form with no fields, not the approval under it."""
+    import asyncio
+
+    from acp.schema import ElicitationSchema
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        form = PendingElicitation(
+            message="Go ahead?",
+            requested_schema=ElicitationSchema(properties={}),
+            event=asyncio.Event(),
+        )
+        screen.state.consume_elicitation_request(form)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert form.action == "accept"
+        assert not pending.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_focus_queued_before_a_withdrawal_does_not_land(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing takes focus in the moment after the focused approval is withdrawn.
+
+    ^N queues focus for the cancel card; the approval is withdrawn before it
+    lands, so the late Enter is reported instead of choosing Cancel: Score.
+    """
+    import asyncio
+
+    from textual.widgets import Button
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        monkeypatch.setattr(screen.state, "_now", lambda: 1000.0)
+        pending: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        await pilot.pause()
+        focus = Button.focus
+
+        def focus_then_withdraw(button: Button, scroll_visible: bool = True) -> Button:
+            monkeypatch.setattr(Button, "focus", focus)
+            # Runs once this focus is queued, before the app applies it.
+            asyncio.get_running_loop().call_soon(
+                screen.state.withdraw_approval, pending
+            )
+            return focus(button, scroll_visible)
+
+        monkeypatch.setattr(Button, "focus", focus_then_withdraw)
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert screen.focused is None
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cast(Any, screen)._session.connection.requests == []
+        assert notes == [withdrawn_notice(pending)]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_typing_replaces_a_fresh_default(sample_rows: list[SessionRow]) -> None:
+    """A form's first focus selects its default, so typing replaces it."""
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        form = PendingElicitation(
+            message="Branch?",
+            requested_schema=ElicitationSchema(
+                properties={
+                    "branch": ElicitationStringPropertySchema(
+                        type="string", default="main"
+                    )
+                }
+            ),
+            event=asyncio.Event(),
+        )
+        screen.state.consume_elicitation_request(form)
+        await pilot.pause()
+        await pilot.press("d", "e", "v", "enter")
+        await pilot.pause()
+        assert form.content == {"branch": "dev"}
+
+
+@skip_if_trio
+@pytest.mark.anyio
 async def test_check_action_gates_prompt_letter_outside_approval(
     sample_rows: list[SessionRow],
 ) -> None:
