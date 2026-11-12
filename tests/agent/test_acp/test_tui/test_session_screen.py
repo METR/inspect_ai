@@ -1388,6 +1388,76 @@ async def test_enter_in_the_cancel_card_or_a_form_has_its_own_target(
 
 @skip_if_trio
 @pytest.mark.anyio
+async def test_open_form_keeps_focus_while_approvals_come_and_go(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open ``ask_user`` form keeps focus when an approval stops pending.
+
+    Neither the end of a withdrawal's late moment nor the card that
+    replaces a withdrawn one may take focus from the form, so typing and
+    Enter still answer it.
+    """
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+
+    def _form() -> PendingElicitation:
+        return PendingElicitation(
+            message="Name?",
+            requested_schema=ElicitationSchema(
+                properties={
+                    "name": ElicitationStringPropertySchema(type="string", title="Name")
+                },
+                required=["name"],
+            ),
+            event=asyncio.Event(),
+        )
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+
+        last: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(last)
+        await pilot.pause()
+        screen.state.withdraw_approval(last)
+        early = _form()
+        screen.state.consume_elicitation_request(early)
+        await pilot.pause()
+        await pilot.press("b", "o")
+        clock[0] += 1.0
+        screen._tick()
+        await pilot.pause()
+        await pilot.press("b", "enter")
+        await pilot.pause()
+        assert early.content == {"name": "bob"}
+
+        shown: PendingApproval = _bar_pending(_bar_pending_request("tc-2"))
+        behind: PendingApproval = _bar_pending(
+            _bar_pending_request("tc-3", title="bash rm")
+        )
+        screen.state.consume_approval_request(shown)
+        screen.state.consume_approval_request(behind)
+        later = _form()
+        screen.state.consume_elicitation_request(later)
+        await pilot.pause()
+        screen.state.withdraw_approval(shown)
+        await pilot.pause()
+        clock[0] += 1.0
+        screen._tick()
+        await pilot.pause()
+        await pilot.press("x", "enter")
+        await pilot.pause()
+        assert later.content == {"name": "x"}
+        assert not behind.event.is_set()
+
+
+@skip_if_trio
+@pytest.mark.anyio
 async def test_check_action_gates_prompt_letter_outside_approval(
     sample_rows: list[SessionRow],
 ) -> None:

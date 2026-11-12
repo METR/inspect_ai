@@ -641,6 +641,7 @@ class SessionScreen(Screen[None]):
             and not deciding
             and composer is not None
             and self._state.pending_cancel is None
+            and self._state.pending_elicitation is None
         ):
             composer.focus()
         self._last_deciding = deciding
