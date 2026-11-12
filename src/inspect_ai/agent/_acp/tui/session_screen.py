@@ -25,6 +25,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.errors import NoWidget
 from textual.message import Message
 from textual.screen import Screen
 from textual.widget import Widget
@@ -269,6 +270,11 @@ class SessionScreen(Screen[None]):
         self._clicking = False
         # The control focused when ^N opened the cancel card, to return to.
         self._focus_before_cancel: Widget | None = None
+        # The widget focus was last in; see ``_operator_focus``.
+        self._last_focus: Widget | None = None
+        # A withdrawn press already reported on release; see
+        # ``_send_approval_click``.
+        self._reported_press: PendingApproval | None = None
         # Set by ``action_switch_sample`` so the disconnect watcher can
         # tell a user-initiated pop from a peer-side EOF and skip the
         # otherwise-misleading "disconnected from server" toast.
@@ -427,6 +433,7 @@ class SessionScreen(Screen[None]):
         if existing is not None and existing.request is pending:
             return False
         released = False
+        beside = self._request_card_mounted()
         if existing is not None:
             if self._focus_in(type(existing)):
                 self.set_focus(None)
@@ -444,23 +451,27 @@ class SessionScreen(Screen[None]):
             plan_strip = self.query_one(PlanStripWidget)
             self.query_one("Vertical").mount(card, after=plan_strip)
             # Queued on the card, so it runs once the card's controls exist.
-            card.call_later(self._apply_focus_rule, card)
+            card.call_later(self._apply_focus_rule, card, beside)
         return released
 
-    def _apply_focus_rule(self, ready: InlineRequestCard | None = None) -> None:
+    def _apply_focus_rule(
+        self, ready: InlineRequestCard | None = None, beside: bool = False
+    ) -> None:
         """Place focus without taking it from a card the operator is in.
 
-        Runs once a new card's controls exist (``ready``), after the card
-        holding focus is removed, and when a withdrawal's late moment ends.
-        A card the server sent takes focus only when focus isn't in a live
-        card or a composer holding a draft; the cancel card, which only the
-        operator's ^N opens, takes it from anywhere. Closing the cancel card
-        returns focus to the control ^N left, if that is still in a live
-        card. Nothing takes focus while parked (see :meth:`set_focus`).
-        Otherwise focus goes to the cancel card, else an open ``ask_user``
-        form, else the current approval's first button, else the composer
-        unless disabled, else nothing. Cards are found by their pending
-        request, as a removed card stays in the DOM until its task ends.
+        Runs once a new card's controls exist (``ready``, mounted ``beside``
+        a card already up), after the card holding focus is removed, and
+        when a withdrawal's late moment ends. A card the server sent takes
+        focus only when focus isn't in a live card, in a composer holding a
+        draft, or in the composer when it arrived beside another card; the
+        cancel card, which only the operator's ^N opens, takes it from
+        anywhere. Closing the cancel card returns focus to the control ^N
+        left, if that is the composer or still in a live card. Nothing takes
+        focus while parked (see :meth:`set_focus`). Otherwise focus goes to
+        the cancel card, else an open ``ask_user`` form, else the current
+        approval's first button, else the composer unless disabled, else
+        nothing. Cards are found by their pending request, as a removed card
+        stays in the DOM until its task ends.
         """
         if self._focus_parked and self._state.late_decision_target() is not None:
             return
@@ -471,11 +482,12 @@ class SessionScreen(Screen[None]):
             self._state.current_pending_approval(),
         )
         if ready is not None:
-            holder = self._card_of(self.focused)
+            holder = self._card_of(self._operator_focus())
             if not any(ready.request is request for request in live) or (
                 ready.request is not self._state.pending_cancel
                 and (
                     self._drafting()
+                    or (beside and isinstance(self._operator_focus(), ComposerTextArea))
                     or (
                         holder is not None
                         and any(holder.request is request for request in live)
@@ -491,7 +503,7 @@ class SessionScreen(Screen[None]):
                 and back.is_attached
                 and back.focusable
                 and (
-                    (isinstance(back, ComposerTextArea) and bool(back.text))
+                    isinstance(back, ComposerTextArea)
                     or (
                         card is not None
                         and any(card.request is request for request in live)
@@ -501,6 +513,9 @@ class SessionScreen(Screen[None]):
                 # A form field goes through the card, which keeps its text.
                 if isinstance(card, _ElicitationCard) and not isinstance(back, Button):
                     card.focus_first()
+                elif isinstance(back, ComposerTextArea):
+                    # At once, so a status tick can't hide it first.
+                    self.set_focus(back)
                 else:
                     back.focus()
                 return
@@ -537,13 +552,27 @@ class SessionScreen(Screen[None]):
         )
 
     def _forward_event(self, event: events.Event) -> None:
+        if not event.is_forwarded:
+            if isinstance(event, events.MouseDown):
+                self._note_press(event)
+            elif isinstance(event, events.MouseUp):
+                self._report_crossed_press()
+            elif isinstance(event, events.Click) and self._send_approval_click(event):
+                return
         self._clicking = isinstance(event, events.MouseDown)
-        if isinstance(event, events.MouseDown):
-            self._note_press(event)
         try:
             super()._forward_event(event)
         finally:
             self._clicking = False
+
+    def _operator_focus(self) -> Widget | None:
+        """The focused widget; while the terminal is unfocused, the one it had."""
+        if self.focused is None and not self.app.app_focus:
+            return self._last_focus
+        return self.focused
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        self._last_focus = event.widget
 
     @staticmethod
     def _card_of(widget: Widget | None) -> InlineRequestCard | None:
@@ -727,10 +756,11 @@ class SessionScreen(Screen[None]):
             # visible-but-disabled — none of the current cases hit
             # that path (every "disabled" state now also hides), but
             # cheap insurance against a regression.
-            # A card doesn't take the composer from an operator in it, or from
-            # a draft ^N left.
-            kept = self.focused is composer or (
-                self._focus_before_cancel is composer and bool(composer.text)
+            # A card doesn't take the composer from an operator in it, or that
+            # ^N left.
+            kept = (
+                self._operator_focus() is composer
+                or self._focus_before_cancel is composer
             )
             hide_composer_row = (
                 (self._request_card_mounted() and not kept)
@@ -925,25 +955,63 @@ class SessionScreen(Screen[None]):
         """Note the approval a button press starts on.
 
         A withdrawal before the release swaps the card under the pointer,
-        so Textual makes no click; :meth:`on_mouse_up` reports it instead.
-        Runs as the press is forwarded, before a withdrawal can swap the card.
+        so Textual makes no click; :meth:`_report_crossed_press` reports it
+        instead. Runs as the press is forwarded, before a withdrawal can swap
+        the card, and looks it up the way Textual routes the press: by what
+        is drawn under the pointer.
         """
-        card = self._approval_card_or_none()
         self._pressed_approval = None
-        if (
-            card is not None
-            and isinstance(card.request, PendingApproval)
-            and any(
-                button.region.contains(event.screen_x, event.screen_y)
-                for button in card.query(Button)
-            )
-        ):
+        card = self._card_of(self._approval_button_at(event))
+        if card is not None and isinstance(card.request, PendingApproval):
             self._pressed_approval = card.request
 
-    def on_mouse_up(self, event: events.MouseUp) -> None:
+    def _report_crossed_press(self) -> None:
+        """Report a release whose press began on a since-withdrawn card."""
         pressed, self._pressed_approval = self._pressed_approval, None
+        self._reported_press = None
         if pressed is not None and pressed.withdrawn:
             self.app.notify(withdrawn_notice(pressed), severity="warning")
+            self._reported_press = pressed
+
+    def _send_approval_click(self, event: events.Click) -> bool:
+        """Send a click on an approval button as its card's decision, now.
+
+        The button's own handler runs later, when a withdrawal may have
+        removed its card and dropped the click unreported. A click whose
+        release already reported its withdrawn request sends nothing.
+        True if the click was on an approval button.
+        """
+        button = self._approval_button_at(event)
+        if button is None:
+            return False
+        reported, self._reported_press = self._reported_press, None
+        card = self._card_of(button)
+        pending = None if card is None else card.request
+        if (
+            isinstance(pending, PendingApproval)
+            and pending is not reported
+            and not button.disabled
+        ):
+            self.post_message(
+                ApprovalDecisionRequested(
+                    tool_call_id=pending.request.tool_call.tool_call_id,
+                    option_id=(button.id or "")[len(_BUTTON_ID_PREFIX) :],
+                    pending=pending,
+                )
+            )
+        return True
+
+    def _approval_button_at(self, event: events.MouseEvent) -> Button | None:
+        """The approval card's button drawn under ``event``, if any."""
+        try:
+            widget, _ = self.get_widget_at(event.x, event.y)
+        except NoWidget:
+            return None
+        if isinstance(widget, Button) and isinstance(
+            self._card_of(widget), _ApprovalCard
+        ):
+            return widget
+        return None
 
     def action_switch_sample(self) -> None:
         """Disconnect from the current session and return to the picker."""
@@ -1194,8 +1262,10 @@ class SessionScreen(Screen[None]):
         # so the operator's draft can't ship while the card is up.
         # Pairs with :meth:`_apply_lifecycle`'s ``hide_composer_row``
         # — same predicate, single source of truth via
-        # :meth:`_request_card_mounted`.
-        if self._request_card_mounted():
+        # :meth:`_request_card_mounted`. The composer the operator is in
+        # is shown, so Enter there sends.
+        in_use = self._composer_in_use()
+        if self._request_card_mounted() and not in_use:
             return
         # Approval mode: composer is disabled in ``_apply_lifecycle``,
         # but its ``text`` is intact so a stray ↵ landing here via
@@ -1204,7 +1274,7 @@ class SessionScreen(Screen[None]):
         # ``_request_card_mounted`` above but the lifecycle check
         # also catches the brief window between
         # ``mark_approval_started`` and the card mounting.)
-        if self._state.lifecycle == "approval":
+        if self._state.lifecycle == "approval" and not in_use:
             return
         composer = self._composer_or_none()
         if composer is None:
@@ -1301,11 +1371,14 @@ class SessionScreen(Screen[None]):
         ``\\n`` into the invisible draft, which then ships to the
         agent on the next submit. Single predicate via
         :meth:`_request_card_mounted` — mirrors the matching guard
-        in :meth:`action_submit`.
+        in :meth:`action_submit`. The composer the operator is in is
+        shown, so the newline keys work there.
         """
-        if self._state.lifecycle in ("complete", "scoring", "approval"):
+        if self._state.lifecycle in ("complete", "scoring"):
             return
-        if self._request_card_mounted():
+        if (
+            self._state.lifecycle == "approval" or self._request_card_mounted()
+        ) and not self._composer_in_use():
             return
         composer = self._composer_or_none()
         if composer is None:
@@ -1319,10 +1392,12 @@ class SessionScreen(Screen[None]):
 
         1. Cancel card mounted → resolve it as Back (the operator
            backed out of cancelling). No interrupt, no composer change.
-        2. Elicitation card mounted, with focus in it or in no card →
-           decline it (the operator is saying "no thanks, I won't
-           answer"). Mirrors clicking the card's Decline button.
-        3. Composer has a draft → clear it (so a typo is easy to undo).
+        2. Elicitation card mounted, with focus in it or in no card and
+           not the composer → decline it (the operator is saying "no
+           thanks, I won't answer"). Mirrors clicking the card's Decline
+           button.
+        3. Composer has a draft, and focus isn't on an approval → clear it
+           (so a typo is easy to undo).
         4. Agent is working → send ``session/cancel``.
 
         The card takeovers are the highest-priority cases because
@@ -1377,7 +1452,7 @@ class SessionScreen(Screen[None]):
             elicit_card.post_message(ElicitationDecisionRequested(action="decline"))
             return
         composer = self._composer_or_none()
-        if composer is not None and composer.text:
+        if composer is not None and composer.text and not self._focus_in(_ApprovalCard):
             composer.clear()
             return
         if not self._state.has_active_work:
@@ -1404,7 +1479,18 @@ class SessionScreen(Screen[None]):
     def _drafting(self) -> bool:
         """Whether focus is in the composer and it holds unsent text."""
         composer = self._composer_or_none()
-        return composer is not None and self.focused is composer and bool(composer.text)
+        return (
+            composer is not None
+            and self._operator_focus() is composer
+            and bool(composer.text)
+        )
+
+    def _composer_in_use(self) -> bool:
+        """Whether the composer has focus and is enabled, so it is shown."""
+        composer = self._composer_or_none()
+        return (
+            composer is not None and self.focused is composer and not composer.disabled
+        )
 
     def _composer_or_none(self) -> ComposerTextArea | None:
         """The composer TextArea, or None if it isn't mounted (defensive)."""
