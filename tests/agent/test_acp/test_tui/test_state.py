@@ -1855,18 +1855,37 @@ def test_quick_withdrawals_keep_the_first_late_decision_target() -> None:
     """An interrupt withdraws every approval at once; keys meant the first.
 
     The next card was on screen for only 5 ms before its own withdrawal.
+    A card on screen for 0.9 s is the one the keys meant.
     """
     clock = _FakeClock()
     state = SessionState(now=clock)
     shown = _pending(_permission_request("tc-1"))
     behind = _pending(_permission_request("tc-2"))
+    later = _pending(_permission_request("tc-3"))
     state.consume_approval_request(shown)
     state.consume_approval_request(behind)
+    state.consume_approval_request(later)
 
     state.withdraw_approval(shown)
     clock.advance(0.005)
     state.withdraw_approval(behind)
     assert state.late_decision_target() is shown
+    clock.advance(0.9)
+    state.withdraw_approval(later)
+    assert state.late_decision_target() is later
+
+
+def test_withdrawal_answers_a_request_whose_card_left_the_window() -> None:
+    """ACP needs an answer even after the transcript window dropped the card."""
+    state = SessionState()
+    pending = _pending(_permission_request("tc-1"))
+    state.consume_approval_request(pending)
+    for i in range(16):
+        state.consume(_agent_chunk(f"later {i}", message_id=f"m-{i}"))
+    assert "tc-1" not in state._tool_calls_by_id
+
+    state.withdraw_approval(pending)
+    assert pending.event.is_set() and pending.cancelled
 
 
 def test_disconnect_leaves_no_clickable_approval() -> None:

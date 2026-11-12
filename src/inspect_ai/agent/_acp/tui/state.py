@@ -290,13 +290,15 @@ class PendingApproval:
     client-side JSON-RPC handler park on ``event.wait()`` until the
     button-press handler calls :meth:`SessionState.resolve_approval`,
     which sets the event and populates ``chosen_option_id`` (or the
-    ``cancelled`` flag) for the handler to read.
+    ``cancelled`` flag) for the handler to read. ``withdrawn`` is set
+    when the server withdraws the request (``$/cancel_request``).
     """
 
     request: RequestPermissionRequest
     event: asyncio.Event
     chosen_option_id: str | None = None
     cancelled: bool = False
+    withdrawn: bool = False
 
 
 ElicitationAction = Literal["accept", "decline", "cancel"]
@@ -2247,26 +2249,34 @@ class SessionState:
         """Apply the server's ``$/cancel_request`` for ``pending``.
 
         A pending request resolves as cancelled, the answer ACP requires,
-        so the next pending approval becomes current, and its card reads
-        ``withdrawn``. So does the card of a request the operator had
-        already answered: that answer crossed the withdrawal and was not
-        applied, and this returns True. A request resolved without an
-        operator decision (session end, Esc) is left alone.
+        even if its card has left the transcript window; the next pending
+        approval becomes current, and the card reads ``withdrawn``. So
+        does the card of a request the operator had already answered:
+        that answer crossed the withdrawal and was not applied, and this
+        returns True. A request resolved without an operator decision
+        (session end, Esc) is left alone.
         """
         tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
-        if tc is None:
-            return False
-        if tc.pending_approval is pending:
+        if tc is not None and tc.pending_approval is pending:
             if pending is self.current_pending_approval():
+                now = self._now()
+                late = self._withdrawn_shown
                 # An interrupt withdraws several at once; the operator saw the first.
+                burst = late is not None and now - late[1] < 0.1
                 self._withdrawn_shown = (
-                    self.late_decision_target() or pending,
-                    self._now(),
+                    late[0] if late is not None and burst else pending,
+                    now,
                 )
             self._resolve_approval_inner(tc.tool_call_id, cancelled=True)
+        elif not pending.event.is_set():
+            # Its card left the transcript window; ACP still needs an answer.
+            pending.cancelled = True
+            pending.event.set()
         elif pending.chosen_option_id is None:
             return False
-        tc.last_approval_decision = "withdrawn"
+        pending.withdrawn = True
+        if tc is not None:
+            tc.last_approval_decision = "withdrawn"
         self._notify()
         return pending.chosen_option_id is not None
 
@@ -2274,15 +2284,6 @@ class SessionState:
         """Whether ``pending`` is still the request awaiting a decision on its card."""
         tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
         return tc is not None and tc.pending_approval is pending
-
-    def approval_withdrawn(self, pending: PendingApproval) -> bool:
-        """Whether the server withdrew ``pending`` (its card reads ``withdrawn``)."""
-        tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
-        return (
-            tc is not None
-            and tc.pending_approval is not pending
-            and tc.last_approval_decision == "withdrawn"
-        )
 
     def late_decision_target(self) -> PendingApproval | None:
         """The withdrawn approval a decision made now is aimed at, if any.

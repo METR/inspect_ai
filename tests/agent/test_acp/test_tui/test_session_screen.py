@@ -1214,7 +1214,7 @@ async def test_button_decides_the_card_it_was_on(
     press that names a withdrawn card applies nowhere and is reported,
     even after the late-decision moment has passed, and never answers a
     newer request for the same call, such as one re-sent after a
-    reconnect.
+    reconnect. A second press on a card just answered stays silent.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
     from inspect_ai.agent._acp.tui.widgets.tool_call import (
@@ -1240,6 +1240,8 @@ async def test_button_decides_the_card_it_was_on(
         screen.state.withdraw_approval(shown)
         await pilot.pause()
         await pilot.click(f"#{_BUTTON_ID_PREFIX}approve")
+        await pilot.pause()
+        screen.post_message(ApprovalDecisionRequested("tc-2", "reject", behind))
         await pilot.pause()
         assert behind.chosen_option_id == "approve"
         assert notes == []
@@ -1269,7 +1271,9 @@ async def test_press_that_crosses_a_withdrawal_is_reported(
 ) -> None:
     """A mouse press on a card withdrawn before the release is reported.
 
-    The release lands on the next card, so Textual makes no click.
+    The release lands on the next card, so Textual makes no click. The
+    report follows the request, not its call: a later request for the
+    same call (an escalation) that Esc cancels doesn't erase it.
     """
     from textual import events
     from textual.widgets import Button
@@ -1302,6 +1306,84 @@ async def test_press_that_crosses_a_withdrawal_is_reported(
         await pilot.pause()
         assert not behind.event.is_set()
         assert notes == [withdrawn_notice(shown)]
+
+        button = screen.query_one(f"#{_BUTTON_ID_PREFIX}approve", Button)
+        x, y = button.region.x + 1, button.region.y
+        app.post_message(
+            events.MouseDown(None, x, y, 0, 0, 1, False, False, False, x, y)
+        )
+        await pilot.pause()
+        screen.state.withdraw_approval(behind)
+        again: PendingApproval = _bar_pending(
+            _bar_pending_request("tc-2", title="bash rm")
+        )
+        screen.state.consume_approval_request(again)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        app.post_message(events.MouseUp(None, x, y, 0, 0, 1, False, False, False, x, y))
+        await pilot.pause()
+        assert again.cancelled
+        assert notes[1:] == [withdrawn_notice(behind)]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_enter_in_the_cancel_card_or_a_form_has_its_own_target(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Enter in an ``ask_user`` form or the cancel-sample card still works.
+
+    The late-Enter rule is about approvals: a withdrawal in the same second
+    must not swallow it.
+    """
+    import asyncio
+
+    from acp.schema import ElicitationSchema, ElicitationStringPropertySchema
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, PendingElicitation
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+
+        first: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(first)
+        form = PendingElicitation(
+            message="Name?",
+            requested_schema=ElicitationSchema(
+                properties={
+                    "name": ElicitationStringPropertySchema(type="string", title="Name")
+                },
+                required=["name"],
+            ),
+            event=asyncio.Event(),
+        )
+        screen.state.consume_elicitation_request(form)
+        await pilot.pause()
+        await pilot.press("b", "o", "b")
+        screen.state.withdraw_approval(first)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert form.action == "accept"
+
+        second: PendingApproval = _bar_pending(_bar_pending_request("tc-2"))
+        screen.state.consume_approval_request(second)
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        screen.state.withdraw_approval(second)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        sent = [method for method, _ in cast(Any, screen)._session.connection.requests]
+        assert sent == ["inspect/cancel_sample"]
+        assert notes == []
 
 
 @skip_if_trio
