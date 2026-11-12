@@ -2393,8 +2393,7 @@ class SessionState:
         Idempotent: if a cancel is already pending, this is a no-op —
         the operator pressing ``^N`` while the card is already up
         does not stomp the existing pending. (The session screen
-        treats a repeat ``^N`` as a "scroll back to the card + re-
-        engage auto-follow" gesture; see Phase 6b plan.)
+        focuses the card on a repeat ``^N``.)
 
         Unlike the elicitation / approval pairs, there's no parked
         JSON-RPC handler waiting on an event — the cancel-sample

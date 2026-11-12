@@ -587,8 +587,7 @@ class SessionScreen(Screen[None]):
             # Nothing to cancel once the sample is terminal — the
             # footer hint also disappears so the operator sees only
             # the actions that still apply. While a cancel card is
-            # already mounted, ^N stays live but takes a different
-            # path (scroll-to-card + re-engage auto-follow); see
+            # already mounted, ^N stays live and focuses it; see
             # :meth:`action_cancel_sample`.
             if self._state.lifecycle == "complete":
                 return False
@@ -903,10 +902,8 @@ class SessionScreen(Screen[None]):
 
         The card lives in the composer's slot (below the plan strip,
         above the footer) so it is always on screen — no auto-scroll
-        gymnastics needed. Repeat press while a card is already up is
-        a no-op: ``consume_cancel_request`` is itself idempotent and
-        the card never goes out of view, so there's nothing for the
-        re-press to fix.
+        gymnastics needed. A repeat press while the card is up focuses
+        it, as the operator may have moved back into a form.
 
         Gated by :meth:`check_action` against ``lifecycle ==
         "complete"`` so a stray ^N on a finished sample is a no-op.
@@ -915,6 +912,12 @@ class SessionScreen(Screen[None]):
             return
         connection = self._session.connection
         if connection is None:
+            return
+        pending = self._state.pending_cancel
+        if pending is not None:
+            for card in self.query(_CancelCard):
+                if card.request is pending and not self._focus_in(_CancelCard):
+                    card.focus_first()
             return
         self._state.consume_cancel_request(
             PendingCancel(

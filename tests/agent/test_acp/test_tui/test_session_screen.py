@@ -1849,6 +1849,49 @@ async def test_typing_replaces_a_fresh_default(sample_rows: list[SessionRow]) ->
 
 @skip_if_trio
 @pytest.mark.anyio
+async def test_a_repeat_ctrl_n_focuses_the_open_cancel_card(
+    sample_rows: list[SessionRow],
+) -> None:
+    """^N with the cancel card open but unfocused brings focus back to it."""
+    from textual.widgets import Input
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        _seed_pending_elicitation(screen.state)
+        await pilot.pause()
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        await pilot.click(Input)
+        assert isinstance(screen.focused, Input)
+        await pilot.press("ctrl+n")
+        await pilot.pause()
+        assert getattr(screen.focused, "id", None) == "cancel-sample-opt-score"
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_a_card_removed_before_its_controls_mount_leaves_focus_alone(
+    sample_rows: list[SessionRow],
+) -> None:
+    """An approval withdrawn before its card's controls mount moves no focus."""
+    from inspect_ai.agent._acp.tui.widgets import TranscriptWidget
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        transcript = screen.query_one(TranscriptWidget)
+        transcript.focus()
+        await pilot.pause()
+        pending = _bar_pending(_bar_pending_request("tc-1"))
+        screen.state.consume_approval_request(pending)
+        screen.state.withdraw_approval(pending)
+        await pilot.pause()
+        assert screen.focused is transcript
+
+
+@skip_if_trio
+@pytest.mark.anyio
 async def test_check_action_gates_prompt_letter_outside_approval(
     sample_rows: list[SessionRow],
 ) -> None:
