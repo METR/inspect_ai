@@ -36,6 +36,7 @@ from acp.schema import (
     RequestPermissionRequest,
     RequestPermissionResponse,
     SessionNotification,
+    ToolCallUpdate,
 )
 
 from inspect_ai._util._async import tg_collect
@@ -886,7 +887,7 @@ def _build_session_router(
 
         async def _on_cancel_request(params: Any) -> None:
             pending = (
-                approvals.get(params.get("requestId"))
+                approvals.pop(params.get("requestId"), None)
                 if isinstance(params, dict)
                 else None
             )
@@ -897,6 +898,7 @@ def _build_session_router(
             ):
                 session_ref._notify(withdrawn_notice(pending), "warning")
 
+        # Delete when acp >= 1.0: it cancels the handler before routing.
         router.add_route(
             Route(
                 method="$/cancel_request",
@@ -1045,8 +1047,9 @@ def _make_permission_handler(
       which fires the event and populates the resolution flags.
     - Returns a JSON-RPC-serializable response dict:
       - ``chosen_option_id`` set → ``AllowedOutcome(outcome="selected", optionId=...)``.
+        The ``approvals`` entry keeps only the card's id and title.
       - Otherwise (cancelled / decided_elsewhere) →
-        ``DeniedOutcome(outcome="cancelled")``.
+        ``DeniedOutcome(outcome="cancelled")``. The entry is dropped.
 
     Cancellation: ``asyncio.CancelledError`` (screen unmount /
     disconnect) sets ``pending.cancelled`` and fires the event so
@@ -1057,7 +1060,8 @@ def _make_permission_handler(
     async def _handler(params: Any) -> dict[str, Any]:
         request = RequestPermissionRequest.model_validate(params)
         pending = PendingApproval(request=request, event=asyncio.Event())
-        approvals[_request_id.get()] = pending
+        request_id = _request_id.get()
+        approvals[request_id] = pending
         # Invoke the screen-side callback INSIDE the try block so a
         # synchronous exception from it (e.g. a Textual ``NoMatches``
         # if the screen has just unmounted, or any other unexpected
@@ -1076,12 +1080,22 @@ def _make_permission_handler(
                 pending.event.set()
             raise
         if pending.chosen_option_id is not None:
+            # A withdrawal crossing this answer needs only the card's id and title.
+            pending.request = RequestPermissionRequest(
+                session_id=request.session_id,
+                tool_call=ToolCallUpdate(
+                    tool_call_id=request.tool_call.tool_call_id,
+                    title=request.tool_call.title,
+                ),
+                options=[],
+            )
             response = RequestPermissionResponse(
                 outcome=AllowedOutcome(
                     outcome="selected", option_id=pending.chosen_option_id
                 )
             )
         else:
+            approvals.pop(request_id, None)
             response = RequestPermissionResponse(
                 outcome=DeniedOutcome(outcome="cancelled")
             )

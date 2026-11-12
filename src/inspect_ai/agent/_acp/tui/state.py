@@ -290,15 +290,13 @@ class PendingApproval:
     client-side JSON-RPC handler park on ``event.wait()`` until the
     button-press handler calls :meth:`SessionState.resolve_approval`,
     which sets the event and populates ``chosen_option_id`` (or the
-    ``cancelled`` flag) for the handler to read. ``withdrawn`` is set
-    once the server withdraws the request (``$/cancel_request``).
+    ``cancelled`` flag) for the handler to read.
     """
 
     request: RequestPermissionRequest
     event: asyncio.Event
     chosen_option_id: str | None = None
     cancelled: bool = False
-    withdrawn: bool = False
 
 
 ElicitationAction = Literal["accept", "decline", "cancel"]
@@ -1227,12 +1225,17 @@ class SessionState:
         clean-end notification — those are bound for ``mark_complete``
         via the existing handler and the dot would just flash before
         the lifecycle flip.
+
+        Pending approvals resolve as cancelled: their requests died with
+        the connection, and the server re-sends any it still waits on
+        once we re-attach.
         """
         if self._complete or self._session_ended_received:
             return
         if self._disconnected:
             return
         self._disconnected = True
+        self._clear_pending_approvals()
         self._notify()
 
     def mark_reconnected(self) -> None:
@@ -2223,9 +2226,10 @@ class SessionState:
         """Resolve every in-flight approval as cancelled, NO notify.
 
         Returns True if any approvals were cleared. Used by
-        :meth:`mark_complete` and :meth:`mark_interrupted` so they
-        can batch the approval-cancel sweep alongside their other
-        mutations and fire ``_notify()`` exactly once at the end.
+        :meth:`mark_complete`, :meth:`mark_interrupted` and
+        :meth:`mark_disconnected` so they can batch the approval-cancel
+        sweep alongside their other mutations and fire ``_notify()``
+        exactly once at the end.
         Without this, the per-call notifies inside ``resolve_approval``
         would fire mid-transition (before ``_interrupted`` /
         ``_complete`` is set) and subscribers would briefly observe a
@@ -2250,7 +2254,7 @@ class SessionState:
         operator decision (session end, Esc) is left alone.
         """
         tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
-        if tc is None or pending.withdrawn:
+        if tc is None:
             return False
         if tc.pending_approval is pending:
             if pending is self.current_pending_approval():
@@ -2258,10 +2262,18 @@ class SessionState:
             self._resolve_approval_inner(tc.tool_call_id, cancelled=True)
         elif pending.chosen_option_id is None:
             return False
-        pending.withdrawn = True
         tc.last_approval_decision = "withdrawn"
         self._notify()
         return pending.chosen_option_id is not None
+
+    def approval_withdrawn(self, pending: PendingApproval) -> bool:
+        """Whether the server withdrew ``pending`` (its card reads ``withdrawn``)."""
+        tc = self._tool_calls_by_id.get(pending.request.tool_call.tool_call_id)
+        return (
+            tc is not None
+            and tc.pending_approval is not pending
+            and tc.last_approval_decision == "withdrawn"
+        )
 
     def late_decision_target(self) -> PendingApproval | None:
         """The withdrawn approval a decision made now is aimed at, if any.

@@ -1130,35 +1130,96 @@ async def test_action_approval_decide_noop_when_option_not_in_request(
         assert tc.last_approval_decision is None
 
 
+async def _open_session(
+    app: InspectAcpApp, pilot: Any, row: SessionRow
+) -> SessionScreen:
+    """Pick ``row`` and return the session screen it opens."""
+    await pilot.pause()
+    cast(Any, app.screen)._on_select(row)
+    for _ in range(20):
+        await pilot.pause()
+        if isinstance(app.screen, SessionScreen):
+            break
+    assert isinstance(app.screen, SessionScreen)
+    return app.screen
+
+
 @skip_if_trio
 @pytest.mark.anyio
-async def test_decision_right_after_a_withdrawal_is_reported_and_lands_nowhere(
+async def test_key_right_after_a_withdrawal_is_reported_and_lands_nowhere(
     sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A key or click meant for a just-withdrawn approval decides nothing.
+    """A letter or Enter meant for a just-withdrawn approval decides nothing.
 
-    It must not land on the approval shown next, and with no approval
-    left the key isn't typed into the composer. The terminal says the
-    decision was not applied, and the composer is back once the moment
-    passes.
+    Keys have no explicit target, so for a moment they belong to the
+    withdrawn card: a letter must not land on the approval shown next,
+    and with none left Enter must not send the composer draft. The
+    terminal says the decision was not applied, and the composer is
+    back once the moment passes.
     """
     from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
-    from inspect_ai.agent._acp.tui.widgets.tool_call import ApprovalDecisionRequested
 
-    client = make_fake_client(sample_rows)
-    app = InspectAcpApp(eval_id=None, server=None, client=client)
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
     async with app.run_test() as pilot:
-        await pilot.pause()
-        cast(Any, app.screen)._on_select(sample_rows[0])
-        for _ in range(20):
-            await pilot.pause()
-            if isinstance(app.screen, SessionScreen):
-                break
-        screen = app.screen
-        assert isinstance(screen, SessionScreen)
+        screen = await _open_session(app, pilot, sample_rows[0])
         notes: list[str] = []
         monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
         # Manual clock: the late-decision window lapses only when we say.
+        clock = [1000.0]
+        monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
+        composer = screen.query_one("#composer", TextArea)
+        composer.text = "draft"
+        shown: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        behind: PendingApproval = _bar_pending(
+            _bar_pending_request("tc-2", title="bash rm")
+        )
+        screen.state.consume_approval_request(shown)
+        screen.state.consume_approval_request(behind)
+        await pilot.pause()
+
+        screen.state.withdraw_approval(shown)
+        await pilot.press("a")
+        await pilot.pause()
+        assert screen.state.current_pending_approval() is behind
+        assert not behind.event.is_set()
+        assert notes == [withdrawn_notice(shown)]
+
+        screen.state.withdraw_approval(behind)
+        await pilot.press("r")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cast(Any, screen)._session.connection.requests == []
+        assert composer.text == "draft"
+        assert notes[1:] == [withdrawn_notice(behind)] * 2
+
+        clock[0] += 1.0
+        screen._tick()
+        await pilot.pause()
+        assert not composer.disabled and screen.focused is composer
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_button_decides_the_card_it_was_on(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A button press carries its card's request, whatever the timing.
+
+    A click on the next card right after a withdrawal applies to it. A
+    press that names a withdrawn card applies nowhere and is reported,
+    even after the late-decision moment has passed.
+    """
+    from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import (
+        _BUTTON_ID_PREFIX,
+        ApprovalDecisionRequested,
+    )
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
         clock = [1000.0]
         monkeypatch.setattr(screen.state, "_now", lambda: clock[0])
         shown: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
@@ -1170,24 +1231,58 @@ async def test_decision_right_after_a_withdrawal_is_reported_and_lands_nowhere(
         await pilot.pause()
 
         screen.state.withdraw_approval(shown)
-        await pilot.press("a")
-        screen.post_message(ApprovalDecisionRequested("tc-2", "approve"))
         await pilot.pause()
-        assert screen.state.current_pending_approval() is behind
+        await pilot.click(f"#{_BUTTON_ID_PREFIX}approve")
+        await pilot.pause()
+        assert behind.chosen_option_id == "approve"
+        assert notes == []
+
+        clock[0] += 1.01
+        screen.post_message(ApprovalDecisionRequested("tc-1", "approve", shown))
+        await pilot.pause()
+        assert notes == [withdrawn_notice(shown)]
+
+
+@skip_if_trio
+@pytest.mark.anyio
+async def test_press_that_crosses_a_withdrawal_is_reported(
+    sample_rows: list[SessionRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mouse press on a card withdrawn before the release is reported.
+
+    The release lands on the next card, so Textual makes no click.
+    """
+    from textual import events
+    from textual.widgets import Button
+
+    from inspect_ai.agent._acp.tui.state import PendingApproval, withdrawn_notice
+    from inspect_ai.agent._acp.tui.widgets.tool_call import _BUTTON_ID_PREFIX
+
+    app = InspectAcpApp(eval_id=None, server=None, client=make_fake_client(sample_rows))
+    async with app.run_test() as pilot:
+        screen = await _open_session(app, pilot, sample_rows[0])
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda message, **_: notes.append(message))
+        shown: PendingApproval = _bar_pending(_bar_pending_request("tc-1"))
+        behind: PendingApproval = _bar_pending(
+            _bar_pending_request("tc-2", title="bash rm")
+        )
+        screen.state.consume_approval_request(shown)
+        screen.state.consume_approval_request(behind)
+        await pilot.pause()
+        button = screen.query_one(f"#{_BUTTON_ID_PREFIX}approve", Button)
+        x, y = button.region.x + 1, button.region.y
+
+        app.post_message(
+            events.MouseDown(None, x, y, 0, 0, 1, False, False, False, x, y)
+        )
+        await pilot.pause()
+        screen.state.withdraw_approval(shown)
+        await pilot.pause()
+        app.post_message(events.MouseUp(None, x, y, 0, 0, 1, False, False, False, x, y))
+        await pilot.pause()
         assert not behind.event.is_set()
-        assert notes == [withdrawn_notice(shown)] * 2
-
-        screen.state.withdraw_approval(behind)
-        await pilot.press("r")
-        await pilot.pause()
-        composer = screen.query_one("#composer", TextArea)
-        assert composer.text == ""
-        assert notes[-1] == withdrawn_notice(behind)
-
-        clock[0] += 1.0
-        screen._tick()
-        await pilot.pause()
-        assert not composer.disabled and screen.focused is composer
+        assert notes == [withdrawn_notice(shown)]
 
 
 @skip_if_trio

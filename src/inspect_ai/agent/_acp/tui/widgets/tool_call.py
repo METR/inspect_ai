@@ -30,7 +30,7 @@ from textual.widgets import Static
 
 from inspect_ai._util.rich import clean_control_characters
 
-from ..state import ApprovalDecisionLabel, ToolCallState
+from ..state import ApprovalDecisionLabel, PendingApproval, ToolCallState
 from ._collapsible import CollapsibleContent
 from ._fingerprint import item_signature
 from ._formatting import SPINNER_FRAMES, format_duration
@@ -870,13 +870,17 @@ class ApprovalDecisionRequested(Message):
     Routes to :meth:`SessionScreen.on_approval_decision_requested`
     which calls :meth:`SessionState.resolve_approval` — that fires the
     pending event the client-side JSON-RPC handler is parked on, and
-    the response goes back over the wire.
+    the response goes back over the wire. ``pending`` is the request
+    the pressed card showed, so a press on a withdrawn card is caught.
     """
 
-    def __init__(self, tool_call_id: str, option_id: str) -> None:
+    def __init__(
+        self, tool_call_id: str, option_id: str, pending: PendingApproval
+    ) -> None:
         super().__init__()
         self.tool_call_id = tool_call_id
         self.option_id = option_id
+        self.pending = pending
 
 
 _BUTTON_ID_PREFIX = "approve-opt-"

@@ -1081,6 +1081,7 @@ class ConnectionHandler:
             request = request.model_copy(update={"session_id": binding.wire_session_id})
         payload = request.model_dump(mode="json", by_alias=True, exclude_none=True)
         # acp 0.12.1 hides the id; send_request takes this one before it yields.
+        # Delete this and _withdraw_request when acp >= 1.0: it withdraws itself.
         request_id = self.connection._next_request_id
         try:
             raw = await self.connection.send_request(

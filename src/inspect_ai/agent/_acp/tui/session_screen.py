@@ -27,12 +27,18 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from inspect_ai.agent._acp.inspect_ext import INSPECT_CANCEL_TOOL_CALL_METHOD
 
 from .client import AttachedSession
-from .state import PendingCancel, SessionState, _QueuedEnqueueHandle, withdrawn_notice
+from .state import (
+    PendingApproval,
+    PendingCancel,
+    SessionState,
+    _QueuedEnqueueHandle,
+    withdrawn_notice,
+)
 from .widgets import (
     AppFooter,
     PlanStripWidget,
@@ -258,6 +264,8 @@ class SessionScreen(Screen[None]):
         self._watch_task: asyncio.Task[None] | None = None
         self._state = state
         self._unsubscribe: Callable[[], None] | None = None
+        # The approval a mouse press started on; see ``on_mouse_down``.
+        self._pressed_approval: PendingApproval | None = None
         # Set by ``action_switch_sample`` so the disconnect watcher can
         # tell a user-initiated pop from a peer-side EOF and skip the
         # otherwise-misleading "disconnected from server" toast.
@@ -479,7 +487,8 @@ class SessionScreen(Screen[None]):
         shortcuts so the composer ``TextArea`` still receives plain
         typing when neither bar is visible. The dispatcher key
         (``prompt_letter``) is gated to fire ONLY when either the
-        approval bar or the cancel bar wants the letter — see
+        approval bar or the cancel bar wants the letter, or for a
+        moment after the server withdraws the approval on screen — see
         :meth:`_letter_targets_visible_bar`.
         """
         if action == "toggle_plan":
@@ -719,11 +728,12 @@ class SessionScreen(Screen[None]):
         parked on. That handler then writes the response back over
         the wire.
 
-        A click right after the server withdrew the card on screen was
-        aimed at that card, so it is reported and applies nowhere.
+        A press on a card the server has since withdrawn applies nowhere
+        and is reported.
         """
         message.stop()
-        if self._report_late_decision():
+        if self._state.approval_withdrawn(message.pending):
+            self.app.notify(withdrawn_notice(message.pending), severity="warning")
             return
         self._state.resolve_approval(message.tool_call_id, option_id=message.option_id)
 
@@ -732,7 +742,8 @@ class SessionScreen(Screen[None]):
 
         The screen's ``a`` / ``r`` / ``e`` / ``t`` bindings
         all dispatch here with the corresponding option id. Gated by
-        :meth:`check_action` to fire only in ``approval`` lifecycle,
+        :meth:`check_action` to fire only while an approval is pending
+        or for a moment after the server withdraws the one on screen,
         so this is a defence-in-depth no-op if it somehow lands
         otherwise.
 
@@ -742,8 +753,9 @@ class SessionScreen(Screen[None]):
         request that doesn't offer ``escalate`` should do nothing,
         not raise.
 
-        A key right after the server withdrew the card on screen was
-        aimed at that card, so it is reported and applies nowhere.
+        A key has no explicit target: one right after the server withdrew
+        the card on screen was aimed at that card, so it is reported and
+        applies nowhere.
         """
         if self._report_late_decision():
             return
@@ -758,12 +770,35 @@ class SessionScreen(Screen[None]):
         self._state.resolve_approval(tool_call_id, option_id=option_id)
 
     def _report_late_decision(self) -> bool:
-        """Toast a decision aimed at a just-withdrawn card; True if it was."""
+        """Report a key aimed at a just-withdrawn card; True if it was one."""
         late = self._state.late_decision_target()
         if late is None:
             return False
         self.app.notify(withdrawn_notice(late), severity="warning")
         return True
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Note the approval a button press starts on.
+
+        A withdrawal before the release swaps the card under the pointer,
+        so Textual makes no click; :meth:`on_mouse_up` reports it instead.
+        """
+        card = self._approval_card_or_none()
+        self._pressed_approval = None
+        if (
+            card is not None
+            and isinstance(card.request, PendingApproval)
+            and any(
+                button.region.contains(event.screen_x, event.screen_y)
+                for button in card.query(Button)
+            )
+        ):
+            self._pressed_approval = card.request
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        pressed, self._pressed_approval = self._pressed_approval, None
+        if pressed is not None and self._state.approval_withdrawn(pressed):
+            self.app.notify(withdrawn_notice(pressed), severity="warning")
 
     def action_switch_sample(self) -> None:
         """Disconnect from the current session and return to the picker."""
@@ -977,6 +1012,9 @@ class SessionScreen(Screen[None]):
         programmatic-pressed by Enter from the composer context.
         Textual's :class:`Button` exposes ``action_press`` for this
         synthetic activation.
+
+        An Enter right after the server withdrew the approval on screen
+        was aimed at that card: it is reported and sends nothing.
         """
         focused = self.focused
         if (
@@ -989,6 +1027,8 @@ class SessionScreen(Screen[None]):
             and hasattr(focused, "action_press")
         ):
             focused.action_press()
+            return
+        if self._report_late_decision():
             return
         if self._state.lifecycle == "complete":
             return
@@ -1223,9 +1263,10 @@ class SessionScreen(Screen[None]):
         """Whether ``letter`` should activate a visible inline card.
 
         Returns True iff the letter maps to an option on a card that
-        is currently mounted. Used by :meth:`check_action` to gate
-        the bare-letter bindings so the composer ``TextArea`` still
-        receives plain typing when no card is up.
+        is currently mounted, or on the approval card the server just
+        withdrew (the key was aimed at it). Used by :meth:`check_action`
+        to gate the bare-letter bindings so the composer ``TextArea``
+        still receives plain typing when no card is up.
 
         Cancel card takes precedence: ``e`` while a cancel card is
         mounted activates ``Cancel: Error`` (when offered), not the

@@ -297,6 +297,7 @@ The standard surface is documented at [agentclientprotocol.com](https://agentcli
 | `session/cancel` | Interrupt the current turn. |
 | `session/update` | Agent activity notification (messages, tool calls, plans). |
 | `session/request_permission` | Ask the operator to approve a tool call. |
+| `$/cancel_request` | Inspect withdraws a permission request it stopped waiting on (decided elsewhere, timed out, or interrupted). Answer that request `cancelled`. |
 | `elicitation/create` | Ask the operator a structured question via the `ask_user` tool (form mode; opt-in via `clientCapabilities.elicitation.form`). |
 : {tbl-colwidths=[35,65]}
 

@@ -556,3 +556,34 @@ async def test_permission_handler_propagates_callback_exception_and_marks_pendin
     # Marked cancelled + event fired despite the synchronous throw.
     assert pending.cancelled is True
     assert pending.event.is_set()
+
+
+@skip_if_trio
+async def test_permission_handler_keeps_only_what_a_crossing_withdrawal_needs() -> None:
+    """Answered requests keep only the card's id and title; others are dropped.
+
+    The map lives as long as the connection, and a full request carries
+    the approval's whole view. Only an answer can cross a withdrawal.
+    """
+    from inspect_ai.agent._acp.tui.client import _make_permission_handler
+    from inspect_ai.agent._acp.tui.state import PendingApproval
+
+    def _cancel(pending: PendingApproval) -> None:
+        pending.cancelled = True
+        pending.event.set()
+
+    def _answer(pending: PendingApproval) -> None:
+        pending.chosen_option_id = "approve"
+        pending.event.set()
+
+    approvals: dict[Any, PendingApproval] = {}
+    await _make_permission_handler(_cancel, approvals)(_permission_request_dict())
+    assert approvals == {}
+
+    await _make_permission_handler(_answer, approvals)(_permission_request_dict())
+    (kept,) = approvals.values()
+    assert kept.request.options == []
+    assert kept.request.tool_call.model_dump(exclude_none=True) == {
+        "tool_call_id": "tc-1",
+        "title": "bash ls",
+    }

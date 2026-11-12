@@ -25,6 +25,7 @@ from inspect_ai.agent._acp.tui.state import (
     SessionState,
     StatusState,
     ToolCallState,
+    withdrawn_notice,
 )
 
 # ---------------------------------------------------------------------------
@@ -1805,15 +1806,20 @@ def test_resolve_approval_unknown_tool_call_id_is_noop() -> None:
 def test_withdraw_after_operator_answered_reports_the_lost_decision() -> None:
     """A withdrawal that crossed the operator's click reports it.
 
-    The card stops claiming the decision, since the server never took it.
+    The card stops claiming the decision, since the server never took it,
+    and the notice names the call even when its title looks like markup.
     """
+    from textual.content import Content
+
     state = SessionState()
-    pending = _pending(_permission_request("tc-1"))
+    pending = _pending(_permission_request("tc-1", title="cat [/etc/passwd]"))
     state.consume_approval_request(pending)
     state.resolve_approval("tc-1", option_id="approve")
 
     assert state.withdraw_approval(pending) is True
     assert state._tool_calls_by_id["tc-1"].last_approval_decision == "withdrawn"
+    notice = Content.from_markup(withdrawn_notice(pending)).plain
+    assert "cat [/etc/passwd]" in notice
 
 
 def test_withdraw_after_esc_is_silent() -> None:
@@ -1839,9 +1845,26 @@ def test_late_decision_target_is_the_shown_approval_for_a_second() -> None:
     state.withdraw_approval(behind)
     assert state.late_decision_target() is None
     state.withdraw_approval(shown)
+    clock.advance(0.9)
     assert state.late_decision_target() is shown
-    clock.advance(1.0)
+    clock.advance(0.1)
     assert state.late_decision_target() is None
+
+
+def test_disconnect_leaves_no_clickable_approval() -> None:
+    """A dropped connection takes its requests with it.
+
+    The queue or the timeout may answer one while the terminal is away,
+    so its card must not keep taking clicks; the server re-sends any
+    request it still waits on after the reconnect.
+    """
+    state = SessionState()
+    state.consume_approval_request(_pending(_permission_request("tc-1")))
+
+    state.mark_disconnected()
+    assert state.current_pending_approval() is None
+    state.resolve_approval("tc-1", option_id="reject")
+    assert state._tool_calls_by_id["tc-1"].last_approval_decision == "cancelled"
 
 
 def test_lifecycle_approval_beats_running() -> None:

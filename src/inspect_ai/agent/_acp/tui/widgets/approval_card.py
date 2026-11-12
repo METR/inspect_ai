@@ -135,5 +135,6 @@ class _ApprovalCard(InlineRequestCard):
             ApprovalDecisionRequested(
                 tool_call_id=tool_call_id,
                 option_id=option_id,
+                pending=self._pending,
             )
         )
