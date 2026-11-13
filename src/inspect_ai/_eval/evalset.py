@@ -1808,6 +1808,9 @@ class _FedSelection(TaskSource):
         self.running = 0
         self.done = False
         self.logs: list[EvalLog] = []
+        # a running task's id to the identifier it was claimed under: a log's own
+        # identifier can differ from its task's (it is computed from other inputs)
+        self._claimed: dict[str, str] = {}
         # eval() needs a first batch: wait for one unless there is no work at all
         self._seed = run_coroutine(self._take())
         while not self._seed and not self.done:
@@ -1842,6 +1845,7 @@ class _FedSelection(TaskSource):
                 if isinstance(task, ResolvedTask) and claim.task_id is not None:
                     task = dataclasses.replace(task, id=claim.task_id)
                 self.running += 1
+                self._claimed[task.id] = claim.entry.identifier
                 taken.append(task)
         return taken
 
@@ -1850,7 +1854,7 @@ class _FedSelection(TaskSource):
 
     async def task_settled(self, log: EvalLog) -> list[Any] | None:
         self.running -= 1
-        self.feed.settled(task_identifier(log, None), log)
+        self.feed.settled(self._claimed.pop(log.eval.task_id), log)
         async with self._lock:
             return await self._take()
 
