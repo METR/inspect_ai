@@ -25,9 +25,11 @@ from inspect_ai._eval.eval_set_overrides import (
 from inspect_ai._eval.eval_set_selection import (
     EVAL_SET_SELECTION_VERSION,
     INSPECT_EVAL_SET_SELECTION,
+    ClaimedTask,
     EvalSetSelection,
     EvalSetSelectionTask,
     read_eval_set_selection,
+    set_selection_feed,
 )
 from inspect_ai._eval.evalset import task_identifier
 from inspect_ai._util.error import PrerequisiteError
@@ -2034,3 +2036,68 @@ def test_a_whole_selection_survives_being_written_and_read_back(
     assert back == selection
     assert back.overrides is not None and selection.overrides is not None
     assert back.overrides.checkpoint == selection.overrides.checkpoint
+
+
+def test_eval_set_selection_takes_its_tasks_from_a_feed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worker with a feed runs what it claims as it has room.
+
+    It is passed no tasks: each claim carries the task built for it. Every task
+    is reported once, under the identifier it was claimed by, and its log has
+    the task id the feed gave it.
+    """
+    capture = enumerate_eval_set(monkeypatch, tmp_path)
+    build = {
+        "selection_task_one": selection_task_one,
+        "selection_task_two": selection_task_two,
+    }
+
+    class Feed:
+        def __init__(self) -> None:
+            self.left = list(enumerate(capture.tasks))
+            self.rooms: list[int] = []
+            self.settled_logs: dict[str, EvalLog] = {}
+
+        async def claim(self, room: int) -> list[ClaimedTask] | None:
+            self.rooms.append(room)
+            if not self.left:
+                return None
+            index, entry = self.left.pop(0)
+            return [
+                ClaimedTask(
+                    EvalSetSelectionTask(identifier=entry.identifier),
+                    f"fed{index}",
+                    build[entry.name](),
+                )
+            ]
+
+        def settled(self, identifier: str, log: EvalLog) -> None:
+            assert identifier not in self.settled_logs
+            self.settled_logs[identifier] = log
+
+    feed = Feed()
+    set_selection_feed(feed)
+    try:
+        success, logs = run_selection(
+            monkeypatch,
+            tmp_path,
+            EvalSetSelection(
+                version=EVAL_SET_SELECTION_VERSION,
+                eval_set_id="fed",
+                completion="definition",
+                tasks=[],
+            ),
+            tmp_path / "logs",
+            tasks=[],
+            max_tasks=2,
+        )
+    finally:
+        set_selection_feed(None)
+
+    assert success
+    assert set(feed.settled_logs) == {entry.identifier for entry in capture.tasks}
+    assert sorted(log.eval.task_id for log in logs) == ["fed0", "fed1", "fed2", "fed3"]
+    assert all(log.status == "success" for log in feed.settled_logs.values())
+    # never asked for more than the worker had room for
+    assert max(feed.rooms) <= 2

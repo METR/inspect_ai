@@ -914,6 +914,10 @@ def eval_set(
         selection_config = GenerateConfig(**kwargs)
 
         def resolve_selection_tasks(selection_input: Tasks) -> list[ResolvedTask]:
+            # a worker with a feed can pass no tasks and build each as it claims
+            # it (an empty list would otherwise mean "the tasks in this directory")
+            if selection_feed() is not None and selection_input == []:
+                return []
             resolved, _, _ = eval_resolve_tasks(
                 selection_input,
                 task_args,
@@ -927,8 +931,7 @@ def eval_set(
                 review=review,
                 input_media_policy="trusted_pre_run",
             )
-            # a worker with a feed can pass no tasks and build each as it claims it
-            if len(resolved) == 0 and selection_feed() is None:
+            if len(resolved) == 0:
                 raise PrerequisiteError(
                     "Error: No inspect tasks were found at the specified paths."
                 )
@@ -1590,7 +1593,7 @@ def as_previous_tasks(
     return previous_tasks
 
 
-def _recover_crashed_log(
+async def _recover_crashed_log_async(
     eval_log: EvalLog,
     log_info: EvalLogInfo,
     incomplete_action: IncompleteAction = "retry",
@@ -1619,52 +1622,13 @@ def _recover_crashed_log(
         from inspect_ai.log._recover import (
             RecoveryNotAvailable,
             RecoveryThresholdExceeded,
-            recover_eval_log,
+            recover_eval_log_async,
         )
 
         try:
             try:
                 # the buffer stays as a safety net while resolved samples
                 # re-run; a finalized recovery is the final log, so sweep it
-                recovered = recover_eval_log(
-                    eval_log.location,
-                    cleanup="finalized",
-                    incomplete_action=incomplete_action,
-                    incomplete_max=incomplete_max,
-                )
-            except RecoveryThresholdExceeded as ex:
-                logger.warning(
-                    f"Recovery for {eval_log.location} exceeded incomplete_max; "
-                    f"falling back to recover-and-retry: {ex}"
-                )
-                recovered = recover_eval_log(eval_log.location, cleanup=False)
-            if recovered.location:
-                log_info = log_info.model_copy(update={"name": recovered.location})
-            eval_log = recovered
-        except RecoveryNotAvailable:
-            pass  # no recovery data available
-        except Exception as ex:
-            logger.warning(f"Recovery failed for {eval_log.location}: {ex}")
-
-    return eval_log, log_info
-
-
-async def _recover_crashed_log_async(
-    eval_log: EvalLog,
-    log_info: EvalLogInfo,
-    incomplete_action: IncompleteAction = "retry",
-    incomplete_max: int | float | None = None,
-) -> tuple[EvalLog, EvalLogInfo]:
-    """`_recover_crashed_log` for a caller on the event loop."""
-    if eval_log.status == "started" and eval_log.location:
-        from inspect_ai.log._recover import (
-            RecoveryNotAvailable,
-            RecoveryThresholdExceeded,
-            recover_eval_log_async,
-        )
-
-        try:
-            try:
                 recovered = await recover_eval_log_async(
                     eval_log.location,
                     cleanup="finalized",
@@ -1688,6 +1652,19 @@ async def _recover_crashed_log_async(
             logger.warning(f"Recovery failed for {eval_log.location}: {ex}")
 
     return eval_log, log_info
+
+
+def _recover_crashed_log(
+    eval_log: EvalLog,
+    log_info: EvalLogInfo,
+    incomplete_action: IncompleteAction = "retry",
+    incomplete_max: int | float | None = None,
+) -> tuple[EvalLog, EvalLogInfo]:
+    return run_coroutine(
+        _recover_crashed_log_async(
+            eval_log, log_info, incomplete_action, incomplete_max
+        )
+    )
 
 
 # eval-set selection (worker) mode. `eval_set()` delegates here once it has
@@ -1767,8 +1744,8 @@ def _run_eval_set_selection(
             source.logs += run_eval(selection.eval_set_id, source)
         return all_evals_succeeded(source.logs), source.logs
 
-    selected = _selected_eval_set_tasks(
-        resolved_tasks, selection, eval_set_args, definition
+    selected = run_coroutine(
+        _selected_eval_set_tasks(resolved_tasks, selection, eval_set_args, definition)
     )
     set_eval_set_id_display(selection.eval_set_id)
     logs = [task for task in selected if isinstance(task, EvalLog)]
@@ -1844,7 +1821,7 @@ class _FedSelection(TaskSource):
             )
             for claim, task in zip(
                 claimed,
-                await _selected_eval_set_tasks_async(
+                await _selected_eval_set_tasks(
                     self.resolved_tasks + fresh,
                     self.selection.model_copy(update={"tasks": entries}),
                     self.eval_set_args,
@@ -1881,20 +1858,7 @@ class _FedSelection(TaskSource):
         return None
 
 
-def _selected_eval_set_tasks(
-    resolved_tasks: list[ResolvedTask],
-    selection: EvalSetSelection,
-    eval_set_args: EvalSetArgsInTaskIdentifier,
-    definition: _DefinitionCompletion | None = None,
-) -> list[ResolvedTask | PreviousTask | EvalLog]:
-    return run_coroutine(
-        _selected_eval_set_tasks_async(
-            resolved_tasks, selection, eval_set_args, definition
-        )
-    )
-
-
-async def _selected_eval_set_tasks_async(
+async def _selected_eval_set_tasks(
     resolved_tasks: list[ResolvedTask],
     selection: EvalSetSelection,
     eval_set_args: EvalSetArgsInTaskIdentifier,
