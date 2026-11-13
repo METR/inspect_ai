@@ -118,6 +118,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
 if TYPE_CHECKING:
+    from inspect_ai._eval.task import Task
     from inspect_ai.log._log import EvalLog
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -138,6 +139,8 @@ class ClaimedTask(NamedTuple):
     entry: "EvalSetSelectionTask"
     task_id: str | None = None
     """The task id a fresh run of it gets, so whoever handed it out can name its log before it exists. A resumed task keeps its log's id."""
+    task: "Task | None" = None
+    """The entry's task, for a worker that builds a task when it claims it instead of passing every task to `eval_set()`."""
 
 
 class SelectionFeed(Protocol):

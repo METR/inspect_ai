@@ -927,7 +927,8 @@ def eval_set(
                 review=review,
                 input_media_policy="trusted_pre_run",
             )
-            if len(resolved) == 0:
+            # a worker with a feed can pass no tasks and build each as it claims it
+            if len(resolved) == 0 and selection_feed() is None:
                 raise PrerequisiteError(
                     "Error: No inspect tasks were found at the specified paths."
                 )
@@ -978,6 +979,7 @@ def eval_set(
                 if selection.completion == "definition"
                 else None,
                 room=max_tasks or 1,
+                resolve=resolve_selection_tasks,
             )
 
         try:
@@ -1725,6 +1727,7 @@ def _run_eval_set_selection(
     log_dir: str,
     definition: _DefinitionCompletion | None = None,
     room: int = 1,
+    resolve: Callable[[Tasks], list[ResolvedTask]] | None = None,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a worker's share of an eval set.
 
@@ -1746,6 +1749,7 @@ def _run_eval_set_selection(
         log_dir: Log directory (for the keep-alive park's launch handoff).
         definition: The definition's settings under `completion="definition"`, or `None` under `completion="runner"`.
         room: With a selection feed, how many tasks the worker runs at once.
+        resolve: With a selection feed, resolves the tasks it builds on claim.
 
     Returns:
         Whether every selected task succeeded, and the logs they produced.
@@ -1757,7 +1761,7 @@ def _run_eval_set_selection(
     if feed is not None:
         set_eval_set_id_display(selection.eval_set_id)
         source = _FedSelection(
-            feed, room, selection, resolved_tasks, eval_set_args, definition
+            feed, room, selection, resolved_tasks, eval_set_args, definition, resolve
         )
         if source.initial_tasks():
             source.logs += run_eval(selection.eval_set_id, source)
@@ -1798,7 +1802,9 @@ class _FedSelection(TaskSource):
         resolved_tasks: list[ResolvedTask],
         eval_set_args: EvalSetArgsInTaskIdentifier,
         definition: "_DefinitionCompletion | None",
+        resolve: Callable[[Tasks], list[ResolvedTask]] | None,
     ) -> None:
+        self.resolve = resolve
         self.feed = feed
         self.room = room
         self.selection = selection
@@ -1829,10 +1835,17 @@ class _FedSelection(TaskSource):
             if not claimed:
                 break
             entries = [claim.entry for claim in claimed]
+            built = [claim.task for claim in claimed if claim.task is not None]
+            # off the loop: resolving reads each task's dataset
+            fresh = (
+                await anyio.to_thread.run_sync(self.resolve, built)
+                if built and self.resolve
+                else []
+            )
             for claim, task in zip(
                 claimed,
                 await _selected_eval_set_tasks_async(
-                    self.resolved_tasks,
+                    self.resolved_tasks + fresh,
                     self.selection.model_copy(update={"tasks": entries}),
                     self.eval_set_args,
                     self.definition,
