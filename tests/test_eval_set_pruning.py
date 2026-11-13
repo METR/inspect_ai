@@ -381,6 +381,23 @@ def test_partial_facets_prune_nothing(
     assert sorted(CONSTRUCTED) == ["prune_one(hard)", "prune_renamed", "prune_two"]
 
 
+def test_a_task_selected_for_two_models_still_prunes_the_others(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One task against two models is two entries carrying one pair of facets."""
+    manifest = capture(monkeypatch, tmp_path)
+    selection = selection_naming(manifest, "prune_two")
+    selection.tasks.append(
+        selection.tasks[0].model_copy(update={"identifier": "prune_two/other-model"})
+    )
+    path = tmp_path / "two-models.json"
+    path.write_text(selection.model_dump_json())
+    monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(path))
+
+    assert is_placeholder(prune_one(difficulty="hard"))
+    assert not is_placeholder(prune_two())
+
+
 def test_the_kill_switch_disables_pruning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

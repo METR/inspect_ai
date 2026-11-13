@@ -208,15 +208,16 @@ class _Pruner:
         except Exception:
             return set()
 
-        facets = {
-            (entry.registry_name, entry.args_hash)
-            for entry in selection.tasks
-            if entry.registry_name is not None and entry.args_hash is not None
-        }
         # all or nothing. A selection where only some entries carry facets is a
         # runner mid-upgrade or a runner with a bug, and pruning on a partial
         # set would skip exactly the tasks whose facets were omitted
-        return facets if len(facets) == len(selection.tasks) else set()
+        facets: set[tuple[str, str]] = set()
+        for entry in selection.tasks:
+            if entry.registry_name is None or entry.args_hash is None:
+                return set()
+            # entries share a pair when one task runs against several models
+            facets.add((entry.registry_name, entry.args_hash))
+        return facets
 
     def should_prune(self, registry_name: str, args_hash: str) -> bool:
         """Whether a task with these facets is definitely not selected."""
