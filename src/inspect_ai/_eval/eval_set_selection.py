@@ -115,7 +115,10 @@ Schema changes require a version bump and corresponding golden-test updates
 import json
 import os
 from collections import Counter
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
+
+if TYPE_CHECKING:
+    from inspect_ai.log._log import EvalLog
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -127,6 +130,43 @@ from .eval_set_overrides import EvalSetOverrides, validate_eval_set_overrides
 INSPECT_EVAL_SET_SELECTION = "INSPECT_EVAL_SET_SELECTION"
 
 EVAL_SET_SELECTION_VERSION = 8
+
+
+class ClaimedTask(NamedTuple):
+    """A task a worker took from its `SelectionFeed`."""
+
+    entry: "EvalSetSelectionTask"
+    task_id: str | None = None
+    """The task id a fresh run of it gets, so whoever handed it out can name its log before it exists. A resumed task keeps its log's id."""
+
+
+class SelectionFeed(Protocol):
+    """A worker's selection handed out over time instead of listed up front.
+
+    With a feed registered (`set_selection_feed`), the selection document names no
+    tasks: the worker takes entries from `claim` as it has room and reports each
+    task once no further attempt at it follows.
+    """
+
+    def claim(self, room: int) -> list[ClaimedTask] | None:
+        """Up to `room` more tasks for this worker; `[]` when none can be had right now, `None` when none ever will."""
+        ...
+
+    def settled(self, identifier: str, log: "EvalLog") -> None:
+        """The task's last attempt ended with `log`."""
+        ...
+
+
+_selection_feed: SelectionFeed | None = None
+
+
+def set_selection_feed(feed: SelectionFeed | None) -> None:
+    global _selection_feed
+    _selection_feed = feed
+
+
+def selection_feed() -> SelectionFeed | None:
+    return _selection_feed
 
 
 def eval_set_selection_requested() -> str | None:
@@ -336,7 +376,7 @@ def read_eval_set_selection(selection_path: str) -> EvalSetSelection:
     except ValidationError as ex:
         raise unreadable(ex) from ex
 
-    if not selection.tasks:
+    if not selection.tasks and selection_feed() is None:
         raise PrerequisiteError(
             f"The eval set selection at '{selection_path}' names no tasks."
         )

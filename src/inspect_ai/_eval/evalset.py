@@ -1,8 +1,12 @@
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import os
 import threading
+import time
+
+import anyio
 from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -139,8 +143,10 @@ from .eval_set_pruning import (
 from .eval_set_selection import (
     INSPECT_EVAL_SET_SELECTION,
     EvalSetSelection,
+    SelectionFeed,
     eval_set_selection_requested,
     read_eval_set_selection,
+    selection_feed,
 )
 from .loader import resolve_task_args, solver_from_spec
 from .task import Epochs
@@ -970,6 +976,7 @@ def eval_set(
                 )
                 if selection.completion == "definition"
                 else None,
+                room=max_tasks or 1,
             )
 
         try:
@@ -1672,9 +1679,10 @@ def _run_eval_set_selection(
     selection: EvalSetSelection,
     resolved_tasks: list[ResolvedTask],
     eval_set_args: EvalSetArgsInTaskIdentifier,
-    run_eval: Callable[[str, list[ResolvedTask | PreviousTask]], list[EvalLog]],
+    run_eval: Callable[[str, Any], list[EvalLog]],
     log_dir: str,
     definition: _DefinitionCompletion | None = None,
+    room: int = 1,
 ) -> tuple[bool, list[EvalLog]]:
     """Run a worker's share of an eval set.
 
@@ -1702,6 +1710,16 @@ def _run_eval_set_selection(
     Raises:
         PrerequisiteError: If the selection does not correspond to this eval set's tasks.
     """
+    feed = selection_feed()
+    if feed is not None:
+        set_eval_set_id_display(selection.eval_set_id)
+        source = _FedSelection(
+            feed, room, selection, resolved_tasks, eval_set_args, definition
+        )
+        if source.initial_tasks():
+            source.logs += run_eval(selection.eval_set_id, source)
+        return all_evals_succeeded(source.logs), source.logs
+
     selected = _selected_eval_set_tasks(
         resolved_tasks, selection, eval_set_args, definition
     )
@@ -1719,6 +1737,90 @@ def _run_eval_set_selection(
         run_coroutine(_keep_alive_park(selection.eval_set_id, log_dir))
 
     return all_evals_succeeded(logs), logs
+
+
+class _FedSelection(TaskSource):
+    """A worker's selection taken from a `SelectionFeed` as the run has room.
+
+    Each claimed entry becomes what a listed selection would have made of it (a
+    resolved task, a resume of its named log, or that log when recovery leaves it
+    complete), so resume and the definition's task retries are the batch path's.
+    """
+
+    def __init__(
+        self,
+        feed: SelectionFeed,
+        room: int,
+        selection: EvalSetSelection,
+        resolved_tasks: list[ResolvedTask],
+        eval_set_args: EvalSetArgsInTaskIdentifier,
+        definition: "_DefinitionCompletion | None",
+    ) -> None:
+        self.feed = feed
+        self.room = room
+        self.selection = selection
+        self.resolved_tasks = resolved_tasks
+        self.eval_set_args = eval_set_args
+        self.definition = definition
+        self.running = 0
+        self.done = False
+        self.logs: list[EvalLog] = []
+        self._lock = anyio.Lock()
+        # eval() needs a first batch: wait for one unless there is no work at all
+        self._seed = self._take()
+        while not self._seed and not self.done:
+            time.sleep(1)
+            self._seed = self._take()
+
+    def _take(self) -> list[ResolvedTask | PreviousTask]:
+        """Claim until the run is full or the feed has nothing to give right now."""
+        taken: list[ResolvedTask | PreviousTask] = []
+        while not self.done and self.running < self.room:
+            claimed = self.feed.claim(self.room - self.running)
+            if claimed is None:
+                self.done = True
+            if not claimed:
+                break
+            entries = [claim.entry for claim in claimed]
+            for claim, task in zip(
+                claimed,
+                _selected_eval_set_tasks(
+                    self.resolved_tasks,
+                    self.selection.model_copy(update={"tasks": entries}),
+                    self.eval_set_args,
+                    self.definition,
+                ),
+            ):
+                if isinstance(task, EvalLog):
+                    self.logs.append(task)
+                    self.feed.settled(claim.entry.identifier, task)
+                    continue
+                if isinstance(task, ResolvedTask) and claim.task_id is not None:
+                    task = dataclasses.replace(task, id=claim.task_id)
+                self.running += 1
+                taken.append(task)
+        return taken
+
+    def initial_tasks(self) -> list[Any]:
+        return self._seed
+
+    async def _take_off_loop(self) -> list[ResolvedTask | PreviousTask]:
+        # Recovering a `resume` log reads it with Inspect's sync API, which drives
+        # the event loop itself: it cannot run on the loop the eval is using.
+        async with self._lock:
+            return await anyio.to_thread.run_sync(self._take)
+
+    async def task_settled(self, log: EvalLog) -> list[Any] | None:
+        self.running -= 1
+        self.feed.settled(task_identifier(log, None), log)
+        return await self._take_off_loop()
+
+    async def next_tasks(self) -> list[Any] | None:
+        while not self.done:
+            if taken := await self._take_off_loop():
+                return taken
+            await anyio.sleep(1)
+        return None
 
 
 def _selected_eval_set_tasks(

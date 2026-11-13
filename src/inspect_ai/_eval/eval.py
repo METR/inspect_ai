@@ -1211,10 +1211,16 @@ async def _eval_async_inner(
                         more = await task_source.next_tasks()
                         return resolve_added_tasks(more) if more else None
 
+                    async def settled(log: EvalLog) -> None:
+                        more = await task_source.task_settled(log)
+                        if more:
+                            enqueuer.enqueue(more)
+
                     injection = TaskInjection(
                         drain=enqueuer.drain,
                         next=inject_next,
                         set_wake=lambda fn: setattr(enqueuer, "on_enqueue", fn),
+                        settled=settled,
                     )
                     logs = EvalLogs(
                         await run_batch(
