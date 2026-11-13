@@ -123,6 +123,14 @@ class TaskSource:
         """
         return None
 
+    async def task_settled(self, log: "EvalLog") -> list["Task"] | None:
+        """A task's last attempt finished: no task-level retry follows ``log``.
+
+        ``task_complete`` fires once per attempt; this fires once per task.
+        Return tasks to add to the run, or ``None``.
+        """
+        return None
+
     @classmethod
     def from_tasks(
         cls,

@@ -3677,11 +3677,11 @@ def test_eval_set_incomplete_action_error_recovers_once(
 
     attempts: list[str] = []
 
-    def failing_recover(log: str, *args: object, **kwargs: object) -> EvalLog:
+    async def failing_recover(log: str, *args: object, **kwargs: object) -> EvalLog:
         attempts.append(log)
         raise RuntimeError("simulated recovery failure")
 
-    monkeypatch.setattr(recover_module, "recover_eval_log", failing_recover)
+    monkeypatch.setattr(recover_module, "recover_eval_log_async", failing_recover)
 
     with tempfile.TemporaryDirectory() as log_dir:
         started_log = eval(

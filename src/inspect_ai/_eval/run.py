@@ -141,6 +141,9 @@ class TaskInjection:
     set_wake: Callable[[Callable[[], None]], None]
     """Register a callback fired when new tasks are enqueued (wakes dispatch)."""
 
+    settled: Callable[[EvalLog], Awaitable[None]] | None = None
+    """Called with a task's log once no retry of it follows."""
+
 
 @dataclass
 class PreparedFeed:
@@ -149,6 +152,7 @@ class PreparedFeed:
     drain: Callable[[], Awaitable[list[TaskRunOptions]]]
     next: Callable[[], Awaitable[list[TaskRunOptions] | None]]
     set_wake: Callable[[Callable[[], None]], None]
+    settled: Callable[[EvalLog], Awaitable[None]] | None = None
 
 
 async def eval_run(
@@ -518,7 +522,10 @@ async def eval_run(
                 return await prepare_options(more) if more else None
 
             feed = PreparedFeed(
-                drain=feed_drain, next=feed_next, set_wake=inject.set_wake
+                drain=feed_drain,
+                next=feed_next,
+                set_wake=inject.set_wake,
+                settled=inject.settled,
             )
 
         # `parallel` is the max concurrent (task × model) units; the
@@ -1029,6 +1036,9 @@ async def run_task_retry_attempts(
                             await options.logger.discard(
                                 keep_destination=True, keep_buffer=True
                             )
+
+                    if retry_item is None and result is not None and feed.settled:
+                        await feed.settled(result)
 
                     # finalize atomically (no awaits below) so the dispatcher sees
                     # a consistent (in_flight, pending) snapshot
