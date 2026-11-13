@@ -86,7 +86,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from inspect_ai._util.registry import extract_named_params
+from inspect_ai._util.registry import (
+    extract_named_params,
+    registry_info,
+    registry_lookup,
+)
 
 from .eval_set_manifest import task_args_hash
 from .eval_set_selection import INSPECT_EVAL_SET_SELECTION
@@ -208,20 +212,30 @@ class _Pruner:
         except Exception:
             return set()
 
-        facets = {
+        # all or nothing. A selection where only some entries carry facets is a
+        # runner mid-upgrade or a runner with a bug, and pruning on a partial
+        # set would skip exactly the tasks whose facets were omitted
+        every_entry_has_facets = all(
+            entry.registry_name is not None and entry.args_hash is not None
+            for entry in selection.tasks
+        )
+        # a set, not a list: entries share a pair when one task runs against
+        # several models
+        selected = {
             (entry.registry_name, entry.args_hash)
             for entry in selection.tasks
             if entry.registry_name is not None and entry.args_hash is not None
         }
-        # all or nothing. A selection where only some entries carry facets is a
-        # runner mid-upgrade or a runner with a bug, and pruning on a partial
-        # set would skip exactly the tasks whose facets were omitted
-        return facets if len(facets) == len(selection.tasks) else set()
+        return selected if every_entry_has_facets else set()
+
+    def is_selected(self, registry_name: str, args_hash: str) -> bool:
+        """Whether the selection names a task with these facets. `True` when nothing is being pruned."""
+        facets = self._facets_now()
+        return not facets or (registry_name, args_hash) in facets
 
     def should_prune(self, registry_name: str, args_hash: str) -> bool:
         """Whether a task with these facets is definitely not selected."""
-        facets = self._facets_now()
-        if not facets or (registry_name, args_hash) in facets:
+        if self.is_selected(registry_name, args_hash):
             return False
         self._pruned = True
         return True
@@ -300,6 +314,33 @@ def prune_task_call(
     if args_hash is None:
         return False
     return _pruner.should_prune(registry_name, args_hash)
+
+
+def task_call_selected(registry_name: str, task_args: dict[str, Any]) -> bool:
+    """Whether the worker's selection names this task call.
+
+    For a runner that builds the tasks itself, one call at a time (`registry_create("task", registry_name, **task_args)`). It asks this before each call and leaves an unselected task unbuilt, so it gets no placeholder and can build the rest in parallel: it knows its calls are eval-set entries, which the `@task` wrapper cannot know about a call it sees (see *Only an outermost construction is a candidate* above).
+
+    A selection names a task before it is built by its registered name and a hash of its arguments. This looks the task up, hashes `task_args` as capture hashed them, and tests the pair against the selection.
+
+    Args:
+        registry_name: The name the task is registered under, as `registry_create` takes it.
+        task_args: The keyword arguments the task would be called with.
+
+    Returns:
+        `False` only when the selection definitely does not name the call. `True` on any uncertainty, as for pruning: no selection, a selection without the two fields, a name that is not registered, arguments that do not bind. The real call then raises whatever it was going to raise, and `eval_set()` still decides what runs.
+    """
+    if not _pruner.active():
+        return True
+    task = registry_lookup("task", registry_name)
+    # `__wrapped__` is the function `@task` decorates, whose signature binds the arguments
+    task_type = getattr(task, "__wrapped__", None)
+    if task_type is None:
+        return True
+    args_hash = _args_hash_of_call(task_type, (), task_args)
+    if args_hash is None:
+        return True
+    return _pruner.is_selected(registry_info(task).name, args_hash)
 
 
 def materialize_pruned(tasks: Any) -> Any:

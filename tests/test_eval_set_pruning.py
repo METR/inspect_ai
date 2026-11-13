@@ -29,6 +29,7 @@ from inspect_ai._eval.eval_set_pruning import (
     INSPECT_EVAL_SET_NO_PRUNE,
     is_placeholder,
     reset_pruning,
+    task_call_selected,
 )
 from inspect_ai._eval.eval_set_selection import (
     EVAL_SET_SELECTION_VERSION,
@@ -36,6 +37,8 @@ from inspect_ai._eval.eval_set_selection import (
     EvalSetSelection,
     EvalSetSelectionTask,
 )
+from inspect_ai._eval.loader import resolve_task_args
+from inspect_ai._util.registry import registry_info
 from inspect_ai.dataset import Sample
 from inspect_ai.scorer import exact
 from inspect_ai.solver import generate
@@ -379,6 +382,111 @@ def test_partial_facets_prune_nothing(
     assert success
     assert sorted(log.eval.task for log in logs) == ["prune_one", "prune_two"]
     assert sorted(CONSTRUCTED) == ["prune_one(hard)", "prune_renamed", "prune_two"]
+
+
+def test_a_task_selected_for_two_models_still_prunes_the_others(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One task against two models is two entries carrying one pair of facets."""
+    manifest = capture(monkeypatch, tmp_path)
+    selection = selection_naming(manifest, "prune_two")
+    selection.tasks.append(
+        selection.tasks[0].model_copy(update={"identifier": "prune_two/other-model"})
+    )
+    path = tmp_path / "two-models.json"
+    path.write_text(selection.model_dump_json())
+    monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(path))
+
+    assert is_placeholder(prune_one(difficulty="hard"))
+    assert not is_placeholder(prune_two())
+
+
+# --- a runner that builds tasks itself asks before each call --------------
+
+
+@task
+def prune_ordered(first: str, second: str = "b") -> Task:
+    CONSTRUCTED.append(f"prune_ordered({first},{second})")
+    return Task(dataset=[Sample(input="1", target="1")])
+
+
+@task
+def prune_kwargs(**kwargs: str) -> Task:
+    CONSTRUCTED.append(f"prune_kwargs({kwargs})")
+    return Task(dataset=[Sample(input="1", target="1")])
+
+
+def select_calls(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *tasks: Task, models: int = 1
+) -> None:
+    """Make the active selection name these built tasks, each for `models` models, as capture records them."""
+    selection = EvalSetSelection(
+        version=EVAL_SET_SELECTION_VERSION,
+        eval_set_id="pruning-test",
+        tasks=[
+            EvalSetSelectionTask(
+                identifier=f"{registry_info(built).name}/{index}/model-{model}",
+                registry_name=registry_info(built).name,
+                args_hash=task_args_hash(resolve_task_args(built)),
+            )
+            for index, built in enumerate(tasks)
+            for model in range(models)
+        ],
+    )
+    path = tmp_path / "calls.json"
+    path.write_text(selection.model_dump_json())
+    monkeypatch.setenv(INSPECT_EVAL_SET_SELECTION, str(path))
+    CONSTRUCTED.clear()
+
+
+@pytest.mark.parametrize(
+    ("registry_name", "task_args", "expected"),
+    [
+        pytest.param("prune_ordered", {"first": "a", "second": "z"}, True, id="same"),
+        pytest.param(
+            "prune_ordered", {"second": "z", "first": "a"}, True, id="out-of-order"
+        ),
+        pytest.param(
+            "prune_ordered", {"first": "a", "second": "y"}, False, id="other-args"
+        ),
+        pytest.param("prune_ordered", {"first": "c"}, True, id="default-omitted"),
+        pytest.param("prune_kwargs", {"flavour": "x"}, True, id="kwargs"),
+        pytest.param("prune_kwargs", {"flavour": "y"}, False, id="other-kwargs"),
+        pytest.param("prune_two", {}, False, id="other-task"),
+        pytest.param("prune_ordered", {"nope": "a"}, True, id="args-do-not-bind"),
+        pytest.param("not_a_registered_task", {}, True, id="not-registered"),
+    ],
+)
+def test_task_call_selected_answers_before_the_task_is_built(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    registry_name: str,
+    task_args: dict[str, Any],
+    expected: bool,
+) -> None:
+    select_calls(
+        monkeypatch,
+        tmp_path,
+        prune_ordered(first="a", second="z"),
+        prune_ordered(first="c"),
+        prune_kwargs(flavour="x"),
+    )
+
+    assert task_call_selected(registry_name, task_args) is expected
+    assert CONSTRUCTED == []
+
+
+def test_task_call_selected_for_a_task_selected_for_two_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    select_calls(monkeypatch, tmp_path, prune_two(), models=2)
+
+    assert task_call_selected("prune_two", {})
+    assert not task_call_selected("prune_one", {"difficulty": "hard"})
+
+
+def test_task_call_selected_without_a_selection() -> None:
+    assert task_call_selected("prune_two", {})
 
 
 def test_the_kill_switch_disables_pruning(
