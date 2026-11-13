@@ -5,13 +5,12 @@ import logging
 import os
 import threading
 import time
-
-import anyio
 from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Set, TypeVar, cast
 
+import anyio
 import rich
 from pydantic import BaseModel
 from rich.status import Status
@@ -60,6 +59,7 @@ from inspect_ai._eval.task.scan import (
 )
 from inspect_ai._sentinel._config import SentinelSpec, resolve_sentinel_spec
 from inspect_ai._util._async import run_coroutine
+from inspect_ai._util.asyncfiles import get_async_filesystem
 from inspect_ai._util.azure import call_with_azure_auth_fallback
 from inspect_ai._util.dotenv import init_dotenv
 from inspect_ai._util.error import PrerequisiteError
@@ -81,6 +81,7 @@ from inspect_ai.log._file import (
     ReadEvalLogsProgress,
     list_eval_logs,
     read_eval_log_headers,
+    read_eval_log_headers_async,
     write_log_dir_manifest,
     write_log_listing,
 )
@@ -1646,6 +1647,47 @@ def _recover_crashed_log(
     return eval_log, log_info
 
 
+async def _recover_crashed_log_async(
+    eval_log: EvalLog,
+    log_info: EvalLogInfo,
+    incomplete_action: IncompleteAction = "retry",
+    incomplete_max: int | float | None = None,
+) -> tuple[EvalLog, EvalLogInfo]:
+    """`_recover_crashed_log` for a caller on the event loop."""
+    if eval_log.status == "started" and eval_log.location:
+        from inspect_ai.log._recover import (
+            RecoveryNotAvailable,
+            RecoveryThresholdExceeded,
+            recover_eval_log_async,
+        )
+
+        try:
+            try:
+                recovered = await recover_eval_log_async(
+                    eval_log.location,
+                    cleanup="finalized",
+                    incomplete_action=incomplete_action,
+                    incomplete_max=incomplete_max,
+                )
+            except RecoveryThresholdExceeded as ex:
+                logger.warning(
+                    f"Recovery for {eval_log.location} exceeded incomplete_max; "
+                    f"falling back to recover-and-retry: {ex}"
+                )
+                recovered = await recover_eval_log_async(
+                    eval_log.location, cleanup=False
+                )
+            if recovered.location:
+                log_info = log_info.model_copy(update={"name": recovered.location})
+            eval_log = recovered
+        except RecoveryNotAvailable:
+            pass  # no recovery data available
+        except Exception as ex:
+            logger.warning(f"Recovery failed for {eval_log.location}: {ex}")
+
+    return eval_log, log_info
+
+
 # eval-set selection (worker) mode. `eval_set()` delegates here once it has
 # resolved its tasks; everything specific to running a worker's share of an
 # eval set lives in the three functions below. See eval_set_selection.py for
@@ -1703,6 +1745,7 @@ def _run_eval_set_selection(
         run_eval: Runs the selected tasks under an eval set id, returning their logs.
         log_dir: Log directory (for the keep-alive park's launch handoff).
         definition: The definition's settings under `completion="definition"`, or `None` under `completion="runner"`.
+        room: With a selection feed, how many tasks the worker runs at once.
 
     Returns:
         Whether every selected task succeeded, and the logs they produced.
@@ -1765,18 +1808,19 @@ class _FedSelection(TaskSource):
         self.running = 0
         self.done = False
         self.logs: list[EvalLog] = []
-        self._lock = anyio.Lock()
         # eval() needs a first batch: wait for one unless there is no work at all
-        self._seed = self._take()
+        self._seed = run_coroutine(self._take())
         while not self._seed and not self.done:
             time.sleep(1)
-            self._seed = self._take()
+            self._seed = run_coroutine(self._take())
+        # tasks that settle together must not each count the same free room
+        self._lock = anyio.Lock()
 
-    def _take(self) -> list[ResolvedTask | PreviousTask]:
+    async def _take(self) -> list[ResolvedTask | PreviousTask]:
         """Claim until the run is full or the feed has nothing to give right now."""
         taken: list[ResolvedTask | PreviousTask] = []
         while not self.done and self.running < self.room:
-            claimed = self.feed.claim(self.room - self.running)
+            claimed = await self.feed.claim(self.room - self.running)
             if claimed is None:
                 self.done = True
             if not claimed:
@@ -1784,7 +1828,7 @@ class _FedSelection(TaskSource):
             entries = [claim.entry for claim in claimed]
             for claim, task in zip(
                 claimed,
-                _selected_eval_set_tasks(
+                await _selected_eval_set_tasks_async(
                     self.resolved_tasks,
                     self.selection.model_copy(update={"tasks": entries}),
                     self.eval_set_args,
@@ -1804,26 +1848,36 @@ class _FedSelection(TaskSource):
     def initial_tasks(self) -> list[Any]:
         return self._seed
 
-    async def _take_off_loop(self) -> list[ResolvedTask | PreviousTask]:
-        # Recovering a `resume` log reads it with Inspect's sync API, which drives
-        # the event loop itself: it cannot run on the loop the eval is using.
-        async with self._lock:
-            return await anyio.to_thread.run_sync(self._take)
-
     async def task_settled(self, log: EvalLog) -> list[Any] | None:
         self.running -= 1
         self.feed.settled(task_identifier(log, None), log)
-        return await self._take_off_loop()
+        async with self._lock:
+            return await self._take()
 
     async def next_tasks(self) -> list[Any] | None:
         while not self.done:
-            if taken := await self._take_off_loop():
+            async with self._lock:
+                taken = await self._take()
+            if taken:
                 return taken
             await anyio.sleep(1)
         return None
 
 
 def _selected_eval_set_tasks(
+    resolved_tasks: list[ResolvedTask],
+    selection: EvalSetSelection,
+    eval_set_args: EvalSetArgsInTaskIdentifier,
+    definition: _DefinitionCompletion | None = None,
+) -> list[ResolvedTask | PreviousTask | EvalLog]:
+    return run_coroutine(
+        _selected_eval_set_tasks_async(
+            resolved_tasks, selection, eval_set_args, definition
+        )
+    )
+
+
+async def _selected_eval_set_tasks_async(
     resolved_tasks: list[ResolvedTask],
     selection: EvalSetSelection,
     eval_set_args: EvalSetArgsInTaskIdentifier,
@@ -1886,7 +1940,9 @@ def _selected_eval_set_tasks(
                 "eval set must be uniquely identified."
             )
         selected.append(
-            _resumed_task(matches[0], entry.identifier, entry.resume, definition)
+            await _resumed_task_async(
+                matches[0], entry.identifier, entry.resume, definition
+            )
             if entry.resume is not None
             else matches[0]
         )
@@ -1895,6 +1951,15 @@ def _selected_eval_set_tasks(
 
 
 def _resumed_task(
+    task: ResolvedTask,
+    identifier: str,
+    resume: str,
+    definition: _DefinitionCompletion | None = None,
+) -> PreviousTask | EvalLog:
+    return run_coroutine(_resumed_task_async(task, identifier, resume, definition))
+
+
+async def _resumed_task_async(
     task: ResolvedTask,
     identifier: str,
     resume: str,
@@ -1911,17 +1976,17 @@ def _resumed_task(
     leaves a complete log (as `incomplete_action="error"` can), the recovered
     log is returned in place of a PreviousTask, so the task does not run again.
     """
-    from inspect_ai.log._file import log_file_info
+    from inspect_ai.log._file import log_file_info_async
 
-    fs = filesystem(resume)
-    if not fs.exists(resume):
+    fs = get_async_filesystem()
+    if not await fs.exists(resume):
         raise PrerequisiteError(
             f"[bold]ERROR[/bold]: The log '{resume}' selected for resuming task "
             f"'{identifier}' does not exist."
         )
 
-    log_info = log_file_info(fs.info(resume))
-    eval_log = read_eval_log_headers([log_info])[0]
+    log_info = await log_file_info_async(await fs.info(resume))
+    eval_log = (await read_eval_log_headers_async([log_info]))[0]
     log_identifier = task_identifier(eval_log, None)
     if log_identifier != identifier:
         raise PrerequisiteError(
@@ -1930,9 +1995,9 @@ def _resumed_task(
         )
 
     if definition is None:
-        eval_log, log_info = _recover_crashed_log(eval_log, log_info)
+        eval_log, log_info = await _recover_crashed_log_async(eval_log, log_info)
     else:
-        recovered, recovered_info = _recover_crashed_log(
+        recovered, recovered_info = await _recover_crashed_log_async(
             eval_log,
             log_info,
             incomplete_action=definition.incomplete_action,

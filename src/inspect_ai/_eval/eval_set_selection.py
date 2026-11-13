@@ -148,8 +148,8 @@ class SelectionFeed(Protocol):
     task once no further attempt at it follows.
     """
 
-    def claim(self, room: int) -> list[ClaimedTask] | None:
-        """Up to `room` more tasks for this worker; `[]` when none can be had right now, `None` when none ever will."""
+    async def claim(self, room: int) -> list[ClaimedTask] | None:
+        """Up to `room` more tasks for this worker; `[]` when none can be had right now, `None` when none ever will. Runs on the eval's event loop."""
         ...
 
     def settled(self, identifier: str, log: "EvalLog") -> None:
