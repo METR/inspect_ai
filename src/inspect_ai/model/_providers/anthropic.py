@@ -1520,15 +1520,25 @@ class AnthropicAPI(ModelAPI):
         if config.stop_seqs is not None:
             params["stop_sequences"] = config.stop_seqs
 
-        # structured output
+        # structured output goes in `output_config.format`, next to any effort
+        # set above: the top-level `output_format` is deprecated, and
+        # Anthropic-compatible servers (e.g. vLLM) read only `output_config`
         if config.response_schema is not None:
             schema = config.response_schema.json_schema.model_copy(deep=True)
             set_additional_properties_false(schema)
             betas.append("structured-outputs-2025-11-13")
-            extra_body["output_format"] = {
-                "type": "json_schema",
-                "schema": json_schema_dump(schema, exclude=JSON_SCHEMA_EXTENDED_FIELDS),
-            }
+            output_config = cast(
+                OutputConfigParam, params.get("output_config", OutputConfigParam())
+            )
+            params["output_config"] = OutputConfigParam(
+                **output_config,
+                format={
+                    "type": "json_schema",
+                    "schema": json_schema_dump(
+                        schema, exclude=JSON_SCHEMA_EXTENDED_FIELDS
+                    ),
+                },
+            )
 
         # server-side refusal fallback (first-party Claude API only). routed
         # via extra_body as the SDK only exposes `fallbacks` on
