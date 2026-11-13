@@ -456,7 +456,7 @@ def test_a_wrong_pruning_decision_costs_time_rather_than_the_run(
     selection = selection_naming(manifest, "prune_two")
 
     monkeypatch.setattr(
-        "inspect_ai._eval.eval_set_pruning._args_hash_of_call",
+        "inspect_ai._eval.eval_set_pruning.args_hash_of_call",
         lambda task_type, args, kwargs: "poisoned",
     )
 
