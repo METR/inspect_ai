@@ -65,7 +65,7 @@ altered task still matches. Task bodies being independent of one another is the
 one thing pruning needs from a definition and the one thing it cannot verify;
 `INSPECT_EVAL_SET_NO_PRUNE` is the answer where that does not hold.
 
-**The hash is not an approximation.** `args_hash_of_call` computes
+**The hash is not an approximation.** `_args_hash_of_call` computes
 `extract_named_params(task_type, False, *args, **kwargs)` — literally the call
 `registry_tag` makes a few lines later in the wrapper, whose result becomes
 `REGISTRY_PARAMS`, which `resolve_task_args()` reads back and capture hashes.
@@ -86,7 +86,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from inspect_ai._util.registry import extract_named_params
+from inspect_ai._util.registry import (
+    extract_named_params,
+    registry_info,
+    registry_lookup,
+)
 
 from .eval_set_manifest import task_args_hash
 from .eval_set_selection import INSPECT_EVAL_SET_SELECTION
@@ -224,10 +228,14 @@ class _Pruner:
         }
         return selected if every_entry_has_facets else set()
 
+    def is_selected(self, registry_name: str, args_hash: str) -> bool:
+        """Whether the selection names a task with these facets. `True` when nothing is being pruned."""
+        facets = self._facets_now()
+        return not facets or (registry_name, args_hash) in facets
+
     def should_prune(self, registry_name: str, args_hash: str) -> bool:
         """Whether a task with these facets is definitely not selected."""
-        facets = self._facets_now()
-        if not facets or (registry_name, args_hash) in facets:
+        if self.is_selected(registry_name, args_hash):
             return False
         self._pruned = True
         return True
@@ -302,10 +310,37 @@ def prune_task_call(
         return False
     if not _pruner.active():
         return False
-    args_hash = args_hash_of_call(task_type, args, kwargs)
+    args_hash = _args_hash_of_call(task_type, args, kwargs)
     if args_hash is None:
         return False
     return _pruner.should_prune(registry_name, args_hash)
+
+
+def task_call_selected(registry_name: str, task_args: dict[str, Any]) -> bool:
+    """Whether the worker's selection names this task call.
+
+    For a runner that builds the tasks itself, one call at a time (`registry_create("task", registry_name, **task_args)`). It asks this before each call and leaves an unselected task unbuilt, so it gets no placeholder and can build the rest in parallel: it knows its calls are eval-set entries, which the `@task` wrapper cannot know about a call it sees (see *Only an outermost construction is a candidate* above).
+
+    A selection names a task before it is built by its registered name and a hash of its arguments. This looks the task up, hashes `task_args` as capture hashed them, and tests the pair against the selection.
+
+    Args:
+        registry_name: The name the task is registered under, as `registry_create` takes it.
+        task_args: The keyword arguments the task would be called with.
+
+    Returns:
+        `False` only when the selection definitely does not name the call. `True` on any uncertainty, as for pruning: no selection, a selection without the two fields, a name that is not registered, arguments that do not bind. The real call then raises whatever it was going to raise, and `eval_set()` still decides what runs.
+    """
+    if not _pruner.active():
+        return True
+    task = registry_lookup("task", registry_name)
+    # `__wrapped__` is the function `@task` decorates, whose signature binds the arguments
+    task_type = getattr(task, "__wrapped__", None)
+    if task_type is None:
+        return True
+    args_hash = _args_hash_of_call(task_type, (), task_args)
+    if args_hash is None:
+        return True
+    return _pruner.is_selected(registry_info(task).name, args_hash)
 
 
 def materialize_pruned(tasks: Any) -> Any:
@@ -332,12 +367,10 @@ def _materialized(task: Any) -> Any:
     )
 
 
-def args_hash_of_call(
+def _args_hash_of_call(
     task_type: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> str | None:
     """Hash this call's arguments the way capture hashed the same task's.
-
-    Also for an external runner that builds the tasks itself: it can ask, before a call, whether its selection names that call's `registry_name` and this hash.
 
     The equality this rests on is exact rather than parallel: `registry_tag` records `extract_named_params(task_type, False, *args, **kwargs)` as the task's registry params, `resolve_task_args()` reads those back, and capture hashes *that*. This calls the same function with the same arguments.
 
