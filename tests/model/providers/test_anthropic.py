@@ -471,6 +471,67 @@ def test_anthropic_opus_5_5_reasoning_effort_is_adaptive(
     assert params["output_config"]["effort"] == effort
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("config", "effort"),
+    [
+        (GenerateConfig(max_tokens=64), None),
+        (GenerateConfig(max_tokens=64, effort="low"), "low"),
+        (GenerateConfig(max_tokens=64, reasoning_effort="medium"), "medium"),
+    ],
+)
+async def test_anthropic_response_schema_sent_as_output_config_format(
+    config: GenerateConfig, effort: str | None
+) -> None:
+    """A response_schema is sent as `output_config.format`, keeping any effort.
+
+    The top-level `output_format` is deprecated, and Anthropic-compatible
+    servers such as vLLM read only `output_config.format`, silently ignoring
+    the schema otherwise.
+    """
+    from pydantic import BaseModel
+
+    from inspect_ai.model import ResponseSchema
+    from inspect_ai.model._model_output import ModelOutput
+    from inspect_ai.util import json_schema
+
+    class Color(BaseModel):
+        red: int
+        green: int
+
+    api = AnthropicAPI(model_name="claude-opus-4-6", api_key="test-key")
+    sent: list[dict[str, Any]] = []
+
+    async def fake_perform(
+        request: dict[str, Any], *args: Any, **kwargs: Any
+    ) -> tuple[dict[str, Any], ModelOutput]:
+        sent.append(request)
+        return request, ModelOutput.from_content(api.model_name, "{}")
+
+    with patch.object(api, "_perform_request_and_continuations", fake_perform):
+        await api.generate(
+            input=[ChatMessageUser(content="What is the RGB color for white?")],
+            tools=[],
+            tool_choice="auto",
+            config=config.merge(
+                GenerateConfig(
+                    response_schema=ResponseSchema(
+                        name="color", json_schema=json_schema(Color)
+                    )
+                )
+            ),
+        )
+
+    (request,) = sent
+    output_config = request["output_config"]
+    assert output_config.get("effort") == effort
+    assert output_config["format"]["type"] == "json_schema"
+    schema = output_config["format"]["schema"]
+    assert set(schema["properties"]) == {"red", "green"}
+    assert schema["additionalProperties"] is False
+    assert "output_format" not in request.get("extra_body", {})
+
+
 def test_anthropic_opus_5_5_rejects_reasoning_tokens() -> None:
     """An explicit thinking budget fails fast on Opus 5.5 (the API 400s on it)."""
     from inspect_ai._util.error import PrerequisiteError
