@@ -77,6 +77,39 @@ eval_set(
 )
 ```
 
+### Spend Cap
+
+Use `spend_cap` to stop an eval set when its estimated model spend reaches a
+dollar amount:
+
+```python
+eval_set(tasks, log_dir="logs-run-42", spend_cap=500)
+```
+
+The CLI equivalent is `inspect eval-set tasks.py --log-dir logs-run-42 --spend-cap 500`.
+You can also set `INSPECT_EVAL_SET_SPEND_CAP` for the CLI. With no cap, behavior
+is unchanged.
+
+Spend accumulates across tasks, models, and retries. At the cap, Inspect cancels
+unfinished work without scoring it and stops dispatching tasks. Completed results
+and partial transcripts are kept. Re-run against the same log directory with a
+higher cap to keep completed samples and retry unfinished ones. `cost_limit`
+continues to limit each sample separately.
+
+Costs use Inspect's model prices or the prices you supply in `model_cost_config`.
+Models without cost data produce a warning and are uncounted. Calls made outside
+Inspect's model API are also uncounted. Calls already in flight can exceed the cap.
+
+Totals are saved in `.eval-set-spend.json` in the log directory, periodically and
+at shutdown. A crash can lose charges since the last successful save. An unreadable
+or invalid saved total prevents startup; Inspect will not overwrite it with a
+fresh budget. Runs made without a cap do not record spend in this file, so enabling
+a cap later does not include those earlier charges.
+
+The cap requires a single process to own the eval set. Selection workers
+(`INSPECT_EVAL_SET_SELECTION`) cannot use it; their coordinator must enforce a
+shared budget.
+
 ### Dynamic Tasks
 
 In the above examples tasks are ready from the filesystem. It is also possible to dynamically create a set of tasks and pass them to the `eval_set()` function. For example:

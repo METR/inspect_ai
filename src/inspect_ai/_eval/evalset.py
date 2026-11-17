@@ -142,6 +142,7 @@ from .eval_set_selection import (
     read_eval_set_selection,
 )
 from .loader import resolve_task_args, solver_from_spec
+from .spend_cap import SpendCap, spend_cap_scope
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -305,6 +306,7 @@ def eval_set(
     eval_set_id: str | None = None,
     embed_viewer: bool = False,
     sentinel: SentinelSpec | None = None,
+    spend_cap: float | None = None,
     **kwargs: Unpack[GenerateConfigArgs],
 ) -> tuple[bool, list[EvalLog]]:
     r"""Evaluate a set of tasks.
@@ -474,6 +476,10 @@ def eval_set(
         sentinel: Monitors and protocols that watch the agent's steps (requires the `inspect_sentinel` package). Experimental: not yet a stable API; may change without notice.
             A protocol, a list or mapping of monitors and protocols with at least one protocol, a config file path or registered protocol name, or a parsed configuration. Monitors alone are an error: wrap them in `observe_only()` to record without acting.
             Overrides the task's sentinel. Defaults to no sentinel.
+        spend_cap: Limit on total model spend (in dollars) across the eval set,
+            including retries and resumes. Cancels unfinished work without
+            scoring. Calls already in flight can exceed the cap. Models without
+            cost data are uncounted; supply prices with `model_cost_config`.
         **kwargs: Model generation options.
 
     Returns:
@@ -538,6 +544,7 @@ def eval_set(
     # of them is an attempt this process ran and knows has ended, which is what
     # lets the retry-cleanup sweep remove it (see latest_completed_task_eval_logs)
     run_ids: set[str] = set()
+    spend: SpendCap | None = None
 
     def run_eval(
         eval_set_id: str,
@@ -548,84 +555,85 @@ def eval_set(
         selection_mode: bool = False,
     ) -> list[EvalLog]:
         # run evals
-        results = eval(
-            tasks=tasks,
-            eval_set_tasks=eval_set_tasks,
-            model=None,  # ResolvedTask/PreviousTask already carries its model
-            model_base_url=model_base_url,
-            model_args=model_args,
-            model_roles=model_roles,
-            task_args=task_args,
-            sandbox=sandbox,
-            sandbox_cleanup=sandbox_cleanup,
-            sandbox_prebuilt=sandbox_prebuilt,
-            checkpoint=checkpoint,
-            solver=solver,
-            scanner=scanner,
-            tags=tags,
-            metadata=metadata,
-            trace=trace,
-            display=display,
-            approval=approval,
-            review=review,
-            sentinel=sentinel,
-            notification=notification,
-            log_level=log_level,
-            log_level_transcript=log_level_transcript,
-            log_dir=log_dir,
-            log_format=log_format,
-            limit=limit,
-            sample_id=sample_id,
-            sample_shuffle=sample_shuffle,
-            epochs=epochs,
-            fail_on_error=False if selection_mode else fail_on_error,
-            continue_on_fail=continue_on_fail,
-            retry_on_error=retry_on_error,
-            score_on_error=score_on_error,
-            debug_errors=debug_errors,
-            message_limit=message_limit,
-            token_limit=token_limit,
-            turn_limit=turn_limit,
-            time_limit=time_limit,
-            working_limit=working_limit,
-            cost_limit=cost_limit,
-            model_cost_config=model_cost_config,
-            max_samples=max_samples,
-            max_dataset_memory=max_dataset_memory,
-            max_tasks=max_tasks,
-            max_subprocesses=max_subprocesses,
-            max_sandboxes=max_sandboxes,
-            log_samples=log_samples,
-            log_realtime=log_realtime,
-            log_images=log_images,
-            log_model_api=log_model_api,
-            log_refusals=log_refusals,
-            log_buffer=log_buffer,
-            log_shared=log_shared,
-            log_header_only=True,
-            score=score,
-            score_display=score_display,
-            eval_set_id=eval_set_id,
-            task_retry_attempts=0 if selection_mode else task_retry_attempts,
-            # On in selection mode, and not an override a definition can
-            # decline. A selection-mode worker is detached: human input
-            # dispatches ACP -> Textual panel -> console, and with no display
-            # and a closed stdin the last of those raises EOFError into the
-            # tool call -- so `approver: human` and `ask_user` neither park nor
-            # fail loudly, they land as errored samples in successful logs.
-            # A property of running detached rather than of any one runner,
-            # which is why it is decided here beside the other two and not left
-            # to the caller: of the definition shapes an external runner drives,
-            # only some can pass the flag at all. A failed bind fails the
-            # worker (see `acp_server`) rather than degrading, because the
-            # channel it would degrade to is the dead end above.
-            acp_server=True if selection_mode else acp_server,
-            # Demoted to a plain on/off: eval-set owns the keep-alive park
-            # itself (after the display closes), so the inner eval() must
-            # not park inside the task display. See the park below.
-            ctl_server=ctl.enabled,
-            **kwargs,
-        )
+        with spend_cap_scope(spend):
+            results = eval(
+                tasks=tasks,
+                eval_set_tasks=eval_set_tasks,
+                model=None,  # ResolvedTask/PreviousTask already carries its model
+                model_base_url=model_base_url,
+                model_args=model_args,
+                model_roles=model_roles,
+                task_args=task_args,
+                sandbox=sandbox,
+                sandbox_cleanup=sandbox_cleanup,
+                sandbox_prebuilt=sandbox_prebuilt,
+                checkpoint=checkpoint,
+                solver=solver,
+                scanner=scanner,
+                tags=tags,
+                metadata=metadata,
+                trace=trace,
+                display=display,
+                approval=approval,
+                review=review,
+                sentinel=sentinel,
+                notification=notification,
+                log_level=log_level,
+                log_level_transcript=log_level_transcript,
+                log_dir=log_dir,
+                log_format=log_format,
+                limit=limit,
+                sample_id=sample_id,
+                sample_shuffle=sample_shuffle,
+                epochs=epochs,
+                fail_on_error=False if selection_mode else fail_on_error,
+                continue_on_fail=continue_on_fail,
+                retry_on_error=retry_on_error,
+                score_on_error=score_on_error,
+                debug_errors=debug_errors,
+                message_limit=message_limit,
+                token_limit=token_limit,
+                turn_limit=turn_limit,
+                time_limit=time_limit,
+                working_limit=working_limit,
+                cost_limit=cost_limit,
+                model_cost_config=model_cost_config,
+                max_samples=max_samples,
+                max_dataset_memory=max_dataset_memory,
+                max_tasks=max_tasks,
+                max_subprocesses=max_subprocesses,
+                max_sandboxes=max_sandboxes,
+                log_samples=log_samples,
+                log_realtime=log_realtime,
+                log_images=log_images,
+                log_model_api=log_model_api,
+                log_refusals=log_refusals,
+                log_buffer=log_buffer,
+                log_shared=log_shared,
+                log_header_only=True,
+                score=score,
+                score_display=score_display,
+                eval_set_id=eval_set_id,
+                task_retry_attempts=0 if selection_mode else task_retry_attempts,
+                # On in selection mode, and not an override a definition can
+                # decline. A selection-mode worker is detached: human input
+                # dispatches ACP -> Textual panel -> console, and with no display
+                # and a closed stdin the last of those raises EOFError into the
+                # tool call -- so `approver: human` and `ask_user` neither park nor
+                # fail loudly, they land as errored samples in successful logs.
+                # A property of running detached rather than of any one runner,
+                # which is why it is decided here beside the other two and not left
+                # to the caller: of the definition shapes an external runner drives,
+                # only some can pass the flag at all. A failed bind fails the
+                # worker (see `acp_server`) rather than degrading, because the
+                # channel it would degrade to is the dead end above.
+                acp_server=True if selection_mode else acp_server,
+                # Demoted to a plain on/off: eval-set owns the keep-alive park
+                # itself (after the display closes), so the inner eval() must
+                # not park inside the task display. See the park below.
+                ctl_server=ctl.enabled,
+                **kwargs,
+            )
         run_ids.update(log.eval.run_id for log in results)
 
         # check for cancelled
@@ -640,6 +648,11 @@ def eval_set(
     # are never active at once.
     capture_path = eval_set_capture_requested()
     selection_path = eval_set_selection_requested()
+    if selection_path is not None and spend_cap is not None:
+        raise PrerequisiteError(
+            "spend_cap is not supported with eval-set selection workers; "
+            "a shared cap across processes requires external accounting."
+        )
     if capture_path is not None and selection_path is not None:
         raise PrerequisiteError(
             f"{INSPECT_EVAL_SET_CAPTURE} and {INSPECT_EVAL_SET_SELECTION} "
@@ -686,6 +699,8 @@ def eval_set(
         # that with is the capture's top-level `scan` field, not this bool).
         scanners=scanner is not None,
     )
+    if spend_cap is not None:
+        definition_options["spend_cap"] = spend_cap
 
     # a runner may override how this run is operated, run-wide (read in capture
     # mode too, so the manifest describes the run that actually happens) and
@@ -849,6 +864,9 @@ def eval_set(
     # relative log_dir an eval set already uses
     if log_dir is None:
         log_dir = os.environ.get("INSPECT_LOG_DIR", "./logs")
+
+    if spend_cap is not None:
+        spend = SpendCap(spend_cap, log_dir)
 
     # ensure log_dir
     fs = filesystem(log_dir)
@@ -1181,7 +1199,10 @@ def eval_set(
 
     # create retry policy
     retry = Retrying(
-        retry=retry_if_not_result(all_evals_succeeded),
+        retry=retry_if_not_result(
+            lambda logs: all_evals_succeeded(logs)
+            or (spend is not None and spend.tripped)
+        ),
         retry_error_callback=return_last_value,
         reraise=True,
         stop=stop_after_attempt(num_retry_attempts),
@@ -1225,7 +1246,9 @@ def eval_set(
             )
 
         # report final status
-        success = all_evals_succeeded(results)
+        success = all_evals_succeeded(results) and not (
+            spend is not None and spend.tripped
+        )
         if success:
             msg = status_msg(f"Completed all tasks in '{log_dir}' successfully")
         else:

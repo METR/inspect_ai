@@ -20,6 +20,7 @@ import anyio
 from anyio.abc import TaskGroup
 from typing_extensions import Unpack
 
+from inspect_ai._eval.spend_cap import spend_cap_reached, spend_cap_task
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._util._async import Wake, unwrap_exception_group
 from inspect_ai._util.environ import environ_vars
@@ -644,7 +645,9 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                 async def run() -> None:
                     nonlocal result, abandoned
                     try:
-                        result = await task_run(options, task_cancel=task_cancel)
+                        with spend_cap_task(lambda: cancel_task("abort")):
+                            await anyio.lowlevel.checkpoint_if_cancelled()
+                            result = await task_run(options, task_cancel=task_cancel)
                     except TaskRetryAbandonedError:
                         # abandoned at attempt start (a drain/cancel stamped
                         # the retry-abandoned registry between the
@@ -1076,6 +1079,7 @@ async def run_task_retry_attempts(
                     # raise reaches a waiting dispatcher immediately)
                     while (
                         not cancelled
+                        and not spend_cap_reached()
                         and in_flight < effective_max_tasks(parallel)
                         and pending
                     ):
@@ -1088,7 +1092,7 @@ async def run_task_retry_attempts(
                         in_flight += 1
                         tg.start_soon(run_one, item)
 
-                    if cancelled:
+                    if cancelled or spend_cap_reached():
                         break
 
                     # work still queued or running (incl. pending retries): wait

@@ -43,6 +43,7 @@ from tenacity import (
 )
 from tenacity.wait import WaitBaseT
 
+from inspect_ai._eval.spend_cap import record_spend
 from inspect_ai._sentinel._context import is_agent_generate
 from inspect_ai._util.constants import (
     DEFAULT_MAX_CONNECTIONS,
@@ -1358,7 +1359,8 @@ class Model:
 
             # Record and check usage
             if usage:
-                record_and_check_model_usage(self, usage, role=self.role)
+                if record_and_check_model_usage(self, usage, role=self.role):
+                    await anyio.lowlevel.checkpoint()
 
             return compacted_messages, usage
 
@@ -1738,9 +1740,10 @@ class Model:
 
             # record usage
             if output.usage:
-                record_and_check_model_usage(
+                if record_and_check_model_usage(
                     self, output.usage, role=self.role, output=output
-                )
+                ):
+                    await anyio.lowlevel.checkpoint()
 
                 # send telemetry to hooks
                 await emit_model_usage(
@@ -3216,7 +3219,8 @@ def record_and_check_model_usage(
     usage: ModelUsage,
     role: str | None = None,
     output: ModelOutput | None = None,
-) -> None:
+) -> bool:
+    """Record usage before checking limits; True requests a cancellation checkpoint."""
     from inspect_ai.log._samples import (
         set_active_sample_token_limit_usage,
         set_active_sample_total_cost,
@@ -3248,18 +3252,25 @@ def record_and_check_model_usage(
 
     record_model_usage(usage)
 
+    if total_cost is not None:
+        record_model_cost(total_cost)
+        set_active_sample_total_cost(sample_total_cost())
+
+    cap_reached = record_spend(model_name, usage.total_cost)
+
     # compute total tokens and update active sample (before check_token_limit()
     # so the control channel sees the usage that tripped the limit)
     total_tokens = sample_total_tokens()
     set_active_sample_total_tokens(total_tokens)
     set_active_sample_token_limit_usage(token_limit_usage())
+    if cap_reached:
+        return True
     check_token_limit()
 
     # record cost to limit tree and check
     if total_cost is not None:
-        record_model_cost(total_cost)
-        set_active_sample_total_cost(sample_total_cost())
         check_cost_limit()
+    return False
 
 
 def model_usage_cost(
