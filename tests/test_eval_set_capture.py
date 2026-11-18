@@ -12,7 +12,7 @@ from pydantic import JsonValue
 from test_helpers.buffer import simulate_crashed_buffer_db
 from test_helpers.utils import identity_solver
 
-from inspect_ai import Task, TaskSource, eval, eval_set, task
+from inspect_ai import SampleSource, Task, TaskSource, eval, eval_set, task
 from inspect_ai._eval.eval_set_manifest import (
     EVAL_SET_CAPTURE_VERSION,
     INSPECT_EVAL_SET_CAPTURE,
@@ -67,17 +67,28 @@ def capture_task_two() -> Task:
 
 
 @task
-def capture_task_ids(early_stopping: bool = False) -> Task:
+def capture_task_ids(
+    early_stopping: bool = False,
+    fail_on_error: float | None = None,
+    ids: list[str | int] | None = None,
+    source: bool = False,
+) -> Task:
+    samples = [Sample(input="x", target="x", id=id) for id in ids or ["a", "b", 3]]
     return Task(
-        dataset=[
-            Sample(input="a", target="a", id="a"),
-            Sample(input="b", target="b", id="b"),
-            Sample(input="c", target="c", id=3),
-        ],
+        dataset=Seeded(samples) if source else samples,
         solver=[generate()],
         scorer=exact(),
         early_stopping=NeverStops() if early_stopping else None,
+        fail_on_error=fail_on_error,
     )
+
+
+class Seeded(SampleSource):
+    def __init__(self, samples: list[Sample]) -> None:
+        self._samples = samples
+
+    def initial_samples(self) -> list[Sample]:
+        return self._samples
 
 
 class NeverStops:
@@ -711,32 +722,38 @@ def test_sample_ids_selected_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    "selection,early_stopping,expected",
+    "selection,task_args,expected",
     [
-        ({}, False, ["a", "b", 3]),
-        ({"limit": 2}, False, ["a", "b"]),
+        ({}, {}, ["a", "b", 3]),
+        ({"limit": 2}, {}, ["a", "b"]),
         # dataset order, not the selector's
-        ({"sample_id": [3, "a"]}, False, ["a", 3]),
-        ({}, True, None),
+        ({"sample_id": [3, "a"]}, {}, ["a", 3]),
+        # each worker would draw its own subset
+        ({"limit": 2, "sample_shuffle": True}, {}, None),
+        # "01" and 1 select each other
+        ({}, {"ids": ["01", 1, "b"]}, None),
+        ({}, {"source": True}, None),
+        ({}, {"early_stopping": True}, None),
+        # each worker would judge the count over its part only
+        ({}, {"fail_on_error": 2}, None),
     ],
 )
 def test_eval_set_capture_sample_ids(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     selection: dict[str, Any],
-    early_stopping: bool,
+    task_args: dict[str, Any],
     expected: list[str | int] | None,
 ) -> None:
     tasks = capture_logs(
         monkeypatch,
         tmp_path,
         tmp_path / "logs",
-        [capture_task_ids(early_stopping=early_stopping)],
+        [capture_task_ids(**task_args)],
         **selection,
     )
 
     assert tasks["capture_task_ids"].sample_ids == expected
-    assert tasks["capture_task_ids"].samples == (3 if expected is None else len(expected))
 
 
 def test_eval_set_capture_verdict_ignores_shard_logs(
@@ -754,6 +771,18 @@ def test_eval_set_capture_verdict_ignores_shard_logs(
     # the task's only log is a shard, which belongs to the merged log
     assert tasks["capture_task_one"].log is None
     assert tasks["capture_task_one"].complete is None
+
+
+def test_eval_set_capture_verdict_in_a_shard_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a worker writing one shard runs in that directory, and its retries need its logs
+    log_dir = tmp_path / "logs" / "run.shards" / "0"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
+
+    assert tasks["capture_task_one"].log == location
 
 
 # Golden values for the capture schema. These must NOT be changed for an

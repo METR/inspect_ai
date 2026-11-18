@@ -30,6 +30,7 @@ from inspect_ai._eval.task.run import plan_agent_name, resolve_plan
 from inspect_ai._eval.task.task import resolve_epochs, resolve_task_epochs
 from inspect_ai._eval.task.util import resolve_task_sample_ids, sample_id_filter
 from inspect_ai.dataset import Dataset
+from inspect_ai.dataset._util import normalise_sample_id
 from inspect_ai.model._model import ModelName
 from inspect_ai.model._model_config import model_args_for_log
 
@@ -103,9 +104,9 @@ class EvalSetCaptureTask(BaseModel):
     """Number of dataset samples that would run (after any `limit`)."""
 
     sample_ids: list[str | int] | None = None
-    """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split by them. Added in version 5.
+    """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split between workers by them. Added in version 5.
 
-    A runner that splits a task between workers selects each worker's part by these ids. A sample without an id answers to its position, which a dataset shuffled at load changes between processes, and early stopping can leave selected samples unrun, which a merge of the parts refuses; such a task has none.
+    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part).
     """
 
     epochs: int
@@ -235,7 +236,13 @@ def samples_selected(
     Returns:
         Number of samples that would run.
     """
-    return len(sample_ids_selected(dataset, limit, sample_id, task, task_names))
+    if sample_id is None:
+        return len(
+            range(len(dataset))[
+                slice(*limit) if isinstance(limit, tuple) else slice(limit)
+            ]
+        )
+    return len(sample_ids_selected(dataset, None, sample_id, task, task_names))
 
 
 def sample_ids_selected(
@@ -276,6 +283,25 @@ def sample_ids_selected(
     return ids if limit is None else ids[:limit]
 
 
+def _split_ids(
+    task: ResolvedTask,
+    ids: list[str | int | None],
+    limit: int | tuple[int, int] | None,
+    sample_shuffle: bool | int | None,
+) -> list[str | int] | None:
+    """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
+    selected = [id for id in ids if id is not None]
+    unsplittable = (
+        len(selected) < len(ids)
+        or len({normalise_sample_id(id) for id in selected}) < len(selected)
+        or (limit is not None and bool(sample_shuffle or task.task.dataset.shuffled))
+        or task.task.sample_source is not None
+        or task.task.early_stopping is not None
+        or not isinstance(task.task.fail_on_error, bool | None)
+    )
+    return None if unsplittable else selected
+
+
 def build_eval_set_capture(
     resolved_tasks: list[ResolvedTask],
     eval_set_args: "EvalSetArgsInTaskIdentifier",
@@ -288,6 +314,7 @@ def build_eval_set_capture(
     overrides: "EvalSetOverrides | None" = None,
     scan: "EvalSetCaptureScan | None" = None,
     task_logs: Mapping[str, TaskLogVerdict],
+    sample_shuffle: bool | int | None = None,
 ) -> EvalSetCapture:
     """Build a capture manifest for a set of resolved tasks.
 
@@ -302,6 +329,7 @@ def build_eval_set_capture(
         overrides: Operational overrides in force, or `None`.
         scan: Serialized scanner configuration, or `None` when the definition declares no scanners.
         task_logs: Each task's log and completion verdict by task identifier, for tasks that have a log.
+        sample_shuffle: Eval-set level sample shuffle.
 
     Returns:
         Capture manifest for the eval set.
@@ -353,9 +381,7 @@ def build_eval_set_capture(
                 sequence=task.sequence,
                 identifier=identifier,
                 samples=len(ids),
-                sample_ids=None
-                if None in ids or task.task.early_stopping is not None
-                else [i for i in ids if i is not None],
+                sample_ids=_split_ids(task, ids, limit, sample_shuffle),
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
                 complete=task_log.complete if task_log else None,
