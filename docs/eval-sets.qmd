@@ -96,9 +96,14 @@ with the error "Eval-set spend cap reached". Re-run against the same log directo
 higher cap to keep completed samples and retry unfinished ones. `cost_limit`
 continues to limit each sample separately.
 
-Costs use Inspect's model prices or the prices you supply in `model_cost_config`.
-Models without cost data produce a warning and are uncounted. Calls made outside
-Inspect's model API are also uncounted. Calls already in flight can exceed the cap.
+Like `cost_limit`, the cap requires cost data for every task and role model,
+configured with `set_model_cost()` or `model_cost_config` (see
+[Model Cost](setting-limits.qmd#model-cost)). Inspect raises an error before
+running if any is missing; a price of zero is valid and leaves that model
+uncounted. Other models that task code calls, such as a `get_model()` inside a
+solver or scorer, produce a warning when they have no cost data and are
+uncounted. Calls made outside Inspect's model API are also uncounted. Calls
+already in flight can exceed the cap.
 
 Totals are saved in `.eval-set-spend.json` in the log directory, periodically and
 at shutdown. A crash can lose charges since the last successful save. An unreadable

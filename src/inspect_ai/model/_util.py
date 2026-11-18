@@ -65,11 +65,21 @@ def resolve_model(model: str | Model | None) -> Model | None:
 
 
 def resolve_model_costs(
-    resolved_tasks: list[ResolvedTask], cost_limit: float | None
+    resolved_tasks: list[ResolvedTask],
+    cost_limit: float | None,
+    spend_cap: bool = False,
 ) -> None:
+    """Require cost data for the models of tasks that limit cost.
+
+    Args:
+        resolved_tasks: Tasks about to run.
+        cost_limit: Eval-level sample cost limit (a task's own applies otherwise).
+        spend_cap: Whether an eval-set spend cap is active, which needs cost
+            data for every task.
+    """
     for task in resolved_tasks:
         task_cost_limit = cost_limit if cost_limit is not None else task.task.cost_limit
-        if task_cost_limit is None:
+        if task_cost_limit is None and not spend_cap:
             continue
 
         models: set[Model] = {task.model}
@@ -90,8 +100,9 @@ def resolve_model_costs(
                 missing.append(model_name)
 
         if missing:
+            option = "cost_limit" if task_cost_limit is not None else "spend_cap"
             raise PrerequisiteError(
-                f"cost_limit requires cost data for all models. "
+                f"{option} requires cost data for all models. "
                 f"Missing cost data for: {', '.join(missing)}. "
                 f"Use set_model_cost() or --model-cost-config to "
                 f"configure pricing."

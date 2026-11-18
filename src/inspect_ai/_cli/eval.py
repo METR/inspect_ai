@@ -1442,7 +1442,7 @@ def _eval_command_impl(
     "--spend-cap",
     type=float,
     envvar="INSPECT_EVAL_SET_SPEND_CAP",
-    help="Cancel unfinished eval-set work without scoring at this total dollar spend.",
+    help="Cancel unfinished eval-set work without scoring at this total dollar spend. Requires model cost data (--model-cost-config).",
 )
 @click.option(
     "--id",

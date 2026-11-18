@@ -479,8 +479,10 @@ def eval_set(
             Overrides the task's sentinel. Defaults to no sentinel.
         spend_cap: Limit on total model spend (in dollars) across the eval set,
             including retries and resumes. Cancels unfinished work without
-            scoring. Calls already in flight can exceed the cap. Models without
-            cost data are uncounted; supply prices with `model_cost_config`.
+            scoring. Calls already in flight can exceed the cap. Requires cost
+            data for every task and role model, via set_model_cost() or
+            `model_cost_config`; other models that task code calls are
+            uncounted when they have none.
         **kwargs: Model generation options.
 
     Returns:
@@ -572,92 +574,89 @@ def eval_set(
             )
 
         # run evals
-        with spend_cap_scope(spend):
-            results = eval(
-                tasks=tasks,
-                eval_set_tasks=eval_set_tasks,
-                model=None,  # ResolvedTask/PreviousTask already carries its model
-                model_base_url=model_base_url,
-                model_args=model_args,
-                model_roles=model_roles,
-                task_args=task_args,
-                sandbox=sandbox,
-                sandbox_cleanup=sandbox_cleanup,
-                sandbox_prebuilt=sandbox_prebuilt,
-                checkpoint=checkpoint,
-                solver=solver,
-                scanner=scanner,
-                tags=tags,
-                metadata=metadata,
-                trace=trace,
-                display=display,
-                approval=approval,
-                review=review,
-                sentinel=sentinel,
-                notification=notification,
-                log_level=log_level,
-                log_level_transcript=log_level_transcript,
-                log_dir=log_dir,
-                log_format=log_format,
-                limit=limit,
-                sample_id=sample_id,
-                sample_shuffle=sample_shuffle,
-                epochs=epochs,
-                fail_on_error=False
-                if selection_completion == "runner"
-                else fail_on_error,
-                continue_on_fail=continue_on_fail,
-                retry_on_error=retry_on_error,
-                score_on_error=score_on_error,
-                debug_errors=debug_errors,
-                message_limit=message_limit,
-                token_limit=token_limit,
-                turn_limit=turn_limit,
-                time_limit=time_limit,
-                working_limit=working_limit,
-                cost_limit=cost_limit,
-                model_cost_config=model_cost_config,
-                max_samples=max_samples,
-                max_dataset_memory=max_dataset_memory,
-                max_tasks=max_tasks,
-                max_subprocesses=max_subprocesses,
-                max_sandboxes=max_sandboxes,
-                log_samples=log_samples,
-                log_realtime=log_realtime,
-                log_images=log_images,
-                log_model_api=log_model_api,
-                log_refusals=log_refusals,
-                log_buffer=log_buffer,
-                log_shared=log_shared,
-                log_header_only=True,
-                score=score,
-                score_display=score_display,
-                eval_set_id=eval_set_id,
-                task_retry_attempts=retries,
-                # On in selection mode, and not an override a definition can
-                # decline. A selection-mode worker is detached: human input
-                # dispatches ACP -> Textual panel -> console, and with no display
-                # and a closed stdin the last of those raises EOFError into the
-                # tool call -- so `approver: human` and `ask_user` neither park nor
-                # fail loudly, they land as errored samples in successful logs.
-                # A property of running detached rather than of any one runner,
-                # which is why it is decided here beside the other two and not left
-                # to the caller: of the definition shapes an external runner drives,
-                # only some can pass the flag at all. A failed bind fails the
-                # worker (see `acp_server`) rather than degrading, because the
-                # channel it would degrade to is the dead end above. A transport
-                # the definition passes (a port, `host:port` or socket path) is
-                # kept, so a runner that reaches its workers over TCP can attach;
-                # anything that would leave ACP off binds the default socket.
-                acp_server=(acp_server or True)
-                if selection_completion is not None
-                else acp_server,
-                # Demoted to a plain on/off: eval-set owns the keep-alive park
-                # itself (after the display closes), so the inner eval() must
-                # not park inside the task display. See the park below.
-                ctl_server=ctl.enabled,
-                **kwargs,
-            )
+        results = eval(
+            tasks=tasks,
+            eval_set_tasks=eval_set_tasks,
+            model=None,  # ResolvedTask/PreviousTask already carries its model
+            model_base_url=model_base_url,
+            model_args=model_args,
+            model_roles=model_roles,
+            task_args=task_args,
+            sandbox=sandbox,
+            sandbox_cleanup=sandbox_cleanup,
+            sandbox_prebuilt=sandbox_prebuilt,
+            checkpoint=checkpoint,
+            solver=solver,
+            scanner=scanner,
+            tags=tags,
+            metadata=metadata,
+            trace=trace,
+            display=display,
+            approval=approval,
+            review=review,
+            sentinel=sentinel,
+            notification=notification,
+            log_level=log_level,
+            log_level_transcript=log_level_transcript,
+            log_dir=log_dir,
+            log_format=log_format,
+            limit=limit,
+            sample_id=sample_id,
+            sample_shuffle=sample_shuffle,
+            epochs=epochs,
+            fail_on_error=False if selection_completion == "runner" else fail_on_error,
+            continue_on_fail=continue_on_fail,
+            retry_on_error=retry_on_error,
+            score_on_error=score_on_error,
+            debug_errors=debug_errors,
+            message_limit=message_limit,
+            token_limit=token_limit,
+            turn_limit=turn_limit,
+            time_limit=time_limit,
+            working_limit=working_limit,
+            cost_limit=cost_limit,
+            model_cost_config=model_cost_config,
+            max_samples=max_samples,
+            max_dataset_memory=max_dataset_memory,
+            max_tasks=max_tasks,
+            max_subprocesses=max_subprocesses,
+            max_sandboxes=max_sandboxes,
+            log_samples=log_samples,
+            log_realtime=log_realtime,
+            log_images=log_images,
+            log_model_api=log_model_api,
+            log_refusals=log_refusals,
+            log_buffer=log_buffer,
+            log_shared=log_shared,
+            log_header_only=True,
+            score=score,
+            score_display=score_display,
+            eval_set_id=eval_set_id,
+            task_retry_attempts=retries,
+            # On in selection mode, and not an override a definition can
+            # decline. A selection-mode worker is detached: human input
+            # dispatches ACP -> Textual panel -> console, and with no display
+            # and a closed stdin the last of those raises EOFError into the
+            # tool call -- so `approver: human` and `ask_user` neither park nor
+            # fail loudly, they land as errored samples in successful logs.
+            # A property of running detached rather than of any one runner,
+            # which is why it is decided here beside the other two and not left
+            # to the caller: of the definition shapes an external runner drives,
+            # only some can pass the flag at all. A failed bind fails the
+            # worker (see `acp_server`) rather than degrading, because the
+            # channel it would degrade to is the dead end above. A transport
+            # the definition passes (a port, `host:port` or socket path) is
+            # kept, so a runner that reaches its workers over TCP can attach;
+            # anything that would leave ACP off binds the default socket.
+            acp_server=(acp_server or True)
+            if selection_completion is not None
+            else acp_server,
+            # Demoted to a plain on/off: eval-set owns the keep-alive park
+            # itself (after the display closes), so the inner eval() must
+            # not park inside the task display. See the park below.
+            ctl_server=ctl.enabled,
+            **kwargs,
+        )
         run_ids.update(log.eval.run_id for log in results)
 
         # check for cancelled
@@ -1278,12 +1277,13 @@ def eval_set(
             # emit start event
             run_coroutine(emit_eval_set_start(eval_set_id, log_dir))
 
-            if retry_immediate:
-                # retry handled by eval
-                results = try_eval()
-            else:
-                # execute w/ retry
-                results = retry(try_eval)
+            with spend_cap_scope(spend):
+                if retry_immediate:
+                    # retry handled by eval
+                    results = try_eval()
+                else:
+                    # execute w/ retry
+                    results = retry(try_eval)
 
             # final sweep to remove failed log files
             if retry_cleanup:

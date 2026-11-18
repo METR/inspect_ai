@@ -115,19 +115,14 @@ from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 
-def _spend_model(calls: list[str], priced: bool = True) -> Model:
+def _spend_model(calls: list[str], name: str = "mockllm/spend") -> Model:
     def output(*args: Any) -> ModelOutput:
         calls.append("call")
-        result = ModelOutput.from_content("mockllm/spend", "answer")
-        result.usage = ModelUsage(
-            input_tokens=1000,
-            output_tokens=0,
-            total_tokens=1000,
-            total_cost=0.01 if priced else None,
-        )
+        result = ModelOutput.from_content(name, "answer")
+        result.usage = ModelUsage(input_tokens=1000, output_tokens=0, total_tokens=1000)
         return result
 
-    return get_model("mockllm/spend", custom_outputs=output)
+    return get_model(name, custom_outputs=output)
 
 
 def _spend_task(name: str = "spend", samples: int = 6) -> Task:
@@ -155,6 +150,21 @@ def spend_model_prices() -> Generator[dict[str, ModelCost], None, None]:
 
 
 @pytest.fixture
+def spend_model_priced() -> Generator[None, None, None]:
+    """Price mockllm/spend so that each 1,000-token call costs $0.01."""
+    set_model_info(
+        "mockllm/spend",
+        ModelInfo(
+            cost=ModelCost(input=10, output=10, input_cache_read=0, input_cache_write=0)
+        ),
+    )
+    try:
+        yield
+    finally:
+        clear_model_info_cache()
+
+
+@pytest.fixture
 def spend_hooks_registry(isolated_hooks_registry: None) -> Generator[None, None, None]:
     from inspect_ai._util.registry import _registry
 
@@ -167,6 +177,7 @@ def spend_hooks_registry(isolated_hooks_registry: None) -> Generator[None, None,
                 del _registry[key]
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 @pytest.mark.parametrize("retry_immediate", [False, True])
 @pytest.mark.parametrize("file_uri", [False, True])
 @pytest.mark.parametrize("backend", ["asyncio", "trio"])
@@ -233,6 +244,7 @@ def test_spend_cap_cancels_without_scoring_and_resumes(
     assert not (tmp_path / "uncapped" / SPEND_FILE).exists()
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 @pytest.mark.parametrize("retry_immediate", [False, True])
 def test_spend_cap_stops_queued_tasks(tmp_path: Path, retry_immediate: bool) -> None:
     calls: list[str] = []
@@ -301,6 +313,7 @@ def test_spend_cap_uses_configured_model_prices(
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 def test_spend_cap_counts_failed_sample_attempts(tmp_path: Path) -> None:
     from inspect_ai._eval.spend_cap import SPEND_FILE
 
@@ -338,6 +351,7 @@ def test_spend_cap_counts_failed_sample_attempts(tmp_path: Path) -> None:
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 def test_spend_cap_cancels_concurrent_samples(tmp_path: Path) -> None:
     from inspect_ai._eval.spend_cap import SPEND_FILE
 
@@ -419,13 +433,30 @@ def test_spend_cap_refuses_invalid_saved_spend(tmp_path: Path, data: str) -> Non
     assert saved.read_text() == data
 
 
-def test_spend_cap_warns_for_unpriced_models(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_spend_cap_requires_cost_data_for_task_models(tmp_path: Path) -> None:
+    calls: list[str] = []
+    with pytest.raises(PrerequisiteError, match="spend_cap requires cost data"):
+        eval_set(
+            _spend_task(),
+            model=_spend_model(calls),
+            spend_cap=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+    assert calls == []
+
+
+def test_spend_cap_accepts_a_zero_price(
+    tmp_path: Path, spend_model_prices: dict[str, ModelCost]
 ) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    spend_model_prices["mockllm/spend"].input = 0
     calls: list[str] = []
     success, _ = eval_set(
         _spend_task(),
-        model=_spend_model(calls, priced=False),
+        model=_spend_model(calls),
+        model_cost_config=spend_model_prices,
         spend_cap=0.005,
         log_dir=str(tmp_path),
         display="none",
@@ -433,10 +464,44 @@ def test_spend_cap_warns_for_unpriced_models(
 
     assert success
     assert len(calls) == 6
-    assert (
-        sum("spend cap cannot count" in record.message for record in caplog.records)
-        == 1
+    assert not (tmp_path / SPEND_FILE).exists()
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+def test_spend_cap_warns_for_unpriced_models_called_by_task_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    helper_calls: list[str] = []
+    helper = _spend_model(helper_calls, "mockllm/helper")
+
+    @solver
+    def ask_helper() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            await helper.generate("question")
+            return await generate(state)
+
+        return solve
+
+    calls: list[str] = []
+    task = _spend_task()
+    task.solver = ask_helper()
+    success, _ = eval_set(
+        task,
+        model=_spend_model(calls),
+        spend_cap=1,
+        log_dir=str(tmp_path),
+        display="none",
     )
+
+    assert success
+    assert len(calls) == len(helper_calls) == 6
+    assert json.loads((tmp_path / SPEND_FILE).read_text())[
+        "spent_usd"
+    ] == pytest.approx(0.06)
+    warnings = [r for r in caplog.records if "spend cap cannot count" in r.message]
+    assert len(warnings) == 1 and "mockllm/helper" in warnings[0].getMessage()
 
 
 async def test_spend_cap_flushes_on_external_cancellation(tmp_path: Path) -> None:
@@ -484,7 +549,7 @@ def test_spend_cap_cancels_task_registered_after_cap_reached(tmp_path: Path) -> 
     assert cancelled == ["running", "late"]
 
 
-@pytest.mark.usefixtures("spend_hooks_registry")
+@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
 def test_spend_cap_reports_the_call_that_reached_it(tmp_path: Path) -> None:
     from inspect_ai.hooks import Hooks, ModelUsageData, hooks
 
@@ -535,6 +600,26 @@ async def test_spend_cap_warns_and_continues_when_save_fails(
     )
 
 
+async def test_spend_cap_interrupted_save_keeps_the_previous_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
+
+    saved = tmp_path / SPEND_FILE
+    saved.write_text('{"spent_usd": 0.5}')
+
+    async def torn_write(self: AsyncFilesystem, filename: str, content: bytes) -> None:
+        Path(filename).write_bytes(content[:5])
+        raise OSError("killed mid-write")
+
+    monkeypatch.setattr(AsyncFilesystem, "write_file", torn_write)
+    cap = SpendCap(1, str(tmp_path))
+    async with cap.run():
+        cap.record("model", 0.01)
+
+    assert json.loads(saved.read_text())["spent_usd"] == 0.5
+
+
 @pytest.mark.parametrize("cost", [-0.01, float("nan"), float("inf")])
 def test_spend_cap_rejects_invalid_model_cost(tmp_path: Path, cost: float) -> None:
     from inspect_ai._eval.spend_cap import SpendCap
@@ -565,7 +650,7 @@ async def test_spend_cap_keeps_its_log_directory_when_cwd_changes(
     assert not (task_dir / "logs" / SPEND_FILE).exists()
 
 
-@pytest.mark.usefixtures("spend_hooks_registry")
+@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
 @pytest.mark.parametrize("stage", ["start", "end"])
 def test_spend_cap_counts_run_hooks(tmp_path: Path, stage: str) -> None:
     from inspect_ai._eval.spend_cap import SPEND_FILE
@@ -603,7 +688,7 @@ def test_spend_cap_counts_run_hooks(tmp_path: Path, stage: str) -> None:
     assert sum(bool(sample.scores) for sample in samples) == (stage == "end")
 
 
-@pytest.mark.usefixtures("spend_hooks_registry")
+@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
 def test_spend_cap_reached_in_start_hook_does_not_complete_the_set(
     tmp_path: Path,
 ) -> None:
@@ -632,6 +717,7 @@ def test_spend_cap_reached_in_start_hook_does_not_complete_the_set(
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 def test_spend_cap_counts_native_compaction(tmp_path: Path) -> None:
     from inspect_ai._eval.spend_cap import SPEND_FILE
     from inspect_ai._util.registry import RegistryInfo, registry_tag
@@ -724,6 +810,7 @@ def test_spend_cap_refuses_selection_workers(
         eval_set(_spend_task(), spend_cap=1, log_dir=str(tmp_path), display="none")
 
 
+@pytest.mark.usefixtures("spend_model_priced")
 @pytest.mark.parametrize("from_env", [False, True])
 def test_spend_cap_cli(
     tmp_path: Path, from_env: bool, monkeypatch: pytest.MonkeyPatch
@@ -742,7 +829,7 @@ def test_spend_cap_cli(
         "def spend():\n"
         "    output = ModelOutput.from_content('mockllm/spend', 'answer')\n"
         "    output.usage = ModelUsage(input_tokens=1000, output_tokens=0, "
-        "total_tokens=1000, total_cost=0.01)\n"
+        "total_tokens=1000)\n"
         "    return Task(dataset=[Sample(input='question')], solver=generate(),\n"
         "                model=get_model('mockllm/spend', custom_outputs=[output]))\n"
     )

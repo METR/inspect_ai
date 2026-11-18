@@ -113,7 +113,7 @@ from inspect_ai.util._notify import build_apprise, init_apprise
 from .context import init_eval_context
 from .loader import resolve_task_file_sandbox, resolve_task_source, resolve_tasks
 from .run import TaskInjection, eval_run
-from .spend_cap import spend_cap_reached, spend_cap_run
+from .spend_cap import spend_cap_active, spend_cap_reached, spend_cap_run
 from .task import Epochs, PreviousTask, Task, TaskSource
 from .task.enqueue import (
     TaskEnqueuer,
@@ -866,7 +866,7 @@ async def _eval_async_inner(
                 "Error: No inspect tasks were found at the specified paths."
             )
 
-        resolve_model_costs(resolved_tasks, cost_limit)
+        resolve_model_costs(resolved_tasks, cost_limit, spend_cap_active())
 
         # make every resolved task's model addressable by the model pause
         # directives up-front, ahead of the dispatcher's own registration
@@ -1340,7 +1340,7 @@ def _resolve_enqueued_tasks(
     ]
     if not resolved:
         raise ValueError("No tasks to enqueue (resolution produced none).")
-    resolve_model_costs(resolved, cost_limit)
+    resolve_model_costs(resolved, cost_limit, spend_cap_active())
     return resolved
 
 

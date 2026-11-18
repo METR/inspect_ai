@@ -2,6 +2,7 @@
 
 import logging
 import math
+import os
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -11,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.error import PrerequisiteError
-from inspect_ai._util.file import absolute_file_path
+from inspect_ai._util.file import absolute_file_path, filesystem, local_path
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,15 @@ class SpendCap:
         if self.spent == self._saved:
             return
         snapshot = self.spent
+        data = SpendLedger(spent_usd=snapshot).model_dump_json().encode()
+        # A local write truncates the file first, so a process killed mid-write
+        # would leave a total that blocks the next start. Replace it instead.
+        local = filesystem(self._path).is_local()
+        target = f"{self._path}.tmp" if local else self._path
         try:
-            await fs.write_file(
-                self._path, SpendLedger(spent_usd=snapshot).model_dump_json().encode()
-            )
+            await fs.write_file(target, data)
+            if local:
+                os.replace(local_path(target), local_path(self._path))
         except Exception as ex:
             logger.warning("Could not save eval-set spend to %s: %s", self._path, ex)
         else:
@@ -176,6 +182,10 @@ def record_spend(model: str, cost: float | None) -> None:
     cap = _spend_cap.get()
     if cap is not None:
         cap.record(model, cost)
+
+
+def spend_cap_active() -> bool:
+    return _spend_cap.get() is not None
 
 
 def spend_cap_reached() -> bool:
