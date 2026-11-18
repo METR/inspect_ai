@@ -66,13 +66,13 @@ from inspect_ai._util.file import (
     filesystem,
 )
 from inspect_ai._util.json import to_json_safe
-from inspect_ai._util.log_layout import merged_log_candidates_for_shard
 from inspect_ai._util.notgiven import NOT_GIVEN, NotGiven
 from inspect_ai.agent._agent import Agent, is_agent
 from inspect_ai.agent._as_solver import as_solver
 from inspect_ai.approval._policy import ApprovalPolicy, ApprovalPolicyConfig
 from inspect_ai.log import EvalLog, IncompleteAction
 from inspect_ai.log._bundle import bundle_log_dir, embed_log_dir
+from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.log._file import (
     EvalLogInfo,
     ReadEvalLogsProgress,
@@ -877,6 +877,7 @@ def eval_set(
                 sample_id=sample_id,
                 sample_shuffle=sample_shuffle,
             ),
+            sample_shuffle=sample_shuffle,
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
@@ -1893,7 +1894,7 @@ def list_all_eval_logs(
         info
         for info in list_eval_logs(log_dir, recursive=recursive)
         # a shard's log belongs to its merged log, never to the task itself
-        if merged_log_candidates_for_shard(info.name) is None
+        if not is_shard_path(log_dir, info.name)
     ]
     log_headers = read_eval_log_headers(log_files, progress)
     task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
