@@ -732,6 +732,7 @@ def test_sample_ids_selected_limit() -> None:
         ({"limit": 2, "sample_shuffle": True}, {}, None),
         # "01" and 1 select each other
         ({}, {"ids": ["01", 1, "b"]}, None),
+        ({}, {"ids": ["capture_task_ids:a", "b"]}, None),
         ({}, {"source": True}, None),
         ({}, {"early_stopping": True}, None),
         # each worker would judge the count over its part only

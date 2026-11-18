@@ -106,7 +106,7 @@ class EvalSetCaptureTask(BaseModel):
     sample_ids: list[str | int] | None = None
     """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split between workers by them. Added in version 5.
 
-    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part).
+    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part).
     """
 
     epochs: int
@@ -290,6 +290,12 @@ def _split_ids(
     unsplittable = (
         len(selected) < len(ids)
         or len({normalise_sample_id(id) for id in selected}) < len(selected)
+        # a worker reads `<task>:<id>` as naming the task (resolve_task_sample_ids)
+        or any(
+            isinstance(id, str) and id.partition(":")[0].lower() == task.task.name.lower()
+            for id in selected
+            if ":" in str(id)
+        )
         or (limit is not None and bool(sample_shuffle or task.task.dataset.shuffled))
         or task.task.sample_source is not None
         or task.task.early_stopping is not None
