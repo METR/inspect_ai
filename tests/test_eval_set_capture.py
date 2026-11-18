@@ -17,14 +17,14 @@ from inspect_ai._eval.eval_set_manifest import (
     INSPECT_EVAL_SET_CAPTURE,
     EvalSetCapture,
     EvalSetCaptureTask,
-    samples_for_limit,
+    sample_ids_selected,
     task_args_hash,
 )
 from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import local_path
 from inspect_ai._util.json import to_json_str_safe
-from inspect_ai.dataset import Sample
+from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import (
     ProvenanceData,
@@ -60,6 +60,19 @@ def capture_task_two() -> Task:
         solver=[generate()],
         scorer=exact(),
         epochs=3,
+    )
+
+
+@task
+def capture_task_ids() -> Task:
+    return Task(
+        dataset=[
+            Sample(input="a", target="a", id="a"),
+            Sample(input="b", target="b", id="b"),
+            Sample(input="c", target="c", id=3),
+        ],
+        solver=[generate()],
+        scorer=exact(),
     )
 
 
@@ -114,6 +127,8 @@ def test_eval_set_capture_manifest(
     assert task_one.args_full == {"difficulty": "hard"}
     assert task_one.args_hash == task_args_hash({"difficulty": "hard"})
     assert task_one.samples == 3
+    # its samples have no ids of their own
+    assert task_one.sample_ids is None
     assert task_one.epochs == 1
     assert task_one.solver == "generate"
 
@@ -659,17 +674,58 @@ def test_eval_set_capture_verdict_crashed_log(
         buffer.cleanup()
 
 
-def test_samples_for_limit() -> None:
-    cases: list[tuple[int, int | tuple[int, int] | None, int]] = [
-        (10, None, 10),
-        (10, 3, 3),
-        (2, 3, 2),
-        (10, (2, 5), 3),
-        (10, (12, 15), 0),
-        (4, (2, 15), 2),
+def test_sample_ids_selected_limit() -> None:
+    cases: list[tuple[int, int | tuple[int, int] | None, list[int]]] = [
+        (10, None, list(range(1, 11))),
+        (10, 3, [1, 2, 3]),
+        (2, 3, [1, 2]),
+        (10, (2, 5), [3, 4, 5]),
+        (10, (12, 15), []),
+        (4, (2, 15), [3, 4]),
     ]
     for count, limit, expected in cases:
-        assert samples_for_limit(count, limit) == expected, (count, limit)
+        dataset = MemoryDataset([Sample(input="x", id=i) for i in range(1, count + 1)])
+        assert sample_ids_selected(dataset, limit, None) == expected, (count, limit)
+
+
+@pytest.mark.parametrize(
+    "selection,expected",
+    [
+        ({}, ["a", "b", 3]),
+        ({"limit": 2}, ["a", "b"]),
+        # dataset order, not the selector's
+        ({"sample_id": [3, "a"]}, ["a", 3]),
+    ],
+)
+def test_eval_set_capture_sample_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selection: dict[str, Any],
+    expected: list[str | int],
+) -> None:
+    tasks = capture_logs(
+        monkeypatch, tmp_path, tmp_path / "logs", [capture_task_ids()], **selection
+    )
+
+    assert tasks["capture_task_ids"].sample_ids == expected
+    assert tasks["capture_task_ids"].samples == len(expected)
+
+
+def test_eval_set_capture_verdict_ignores_shard_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    log = Path(local_path(location))
+    shard = log_dir / f"{log.stem}.shards" / "0" / log.name
+    shard.parent.mkdir(parents=True)
+    log.rename(shard)
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
+
+    # the task's only log is a shard, which belongs to the merged log
+    assert tasks["capture_task_one"].log is None
+    assert tasks["capture_task_one"].complete is None
 
 
 # Golden values for the capture schema. These must NOT be changed for an
@@ -754,6 +810,11 @@ _EXPECTED_CAPTURE_FIELDS: dict[int, set[str]] = {
     },
 }
 _EXPECTED_CAPTURE_FIELDS[4] = _EXPECTED_CAPTURE_FIELDS[3]
+
+# v5 added the ids of each task's selected samples (`sample_ids`), so a runner
+# can split a task between workers by sample id.
+_EXPECTED_CAPTURE_TASK_FIELDS[5] = _EXPECTED_CAPTURE_TASK_FIELDS[4] | {"sample_ids"}
+_EXPECTED_CAPTURE_FIELDS[5] = _EXPECTED_CAPTURE_FIELDS[4]
 
 
 def test_eval_set_capture_schema_stability() -> None:

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 INSPECT_EVAL_SET_CAPTURE = "INSPECT_EVAL_SET_CAPTURE"
 
-EVAL_SET_CAPTURE_VERSION = 4
+EVAL_SET_CAPTURE_VERSION = 5
 
 
 def eval_set_capture_requested() -> str | None:
@@ -101,6 +101,12 @@ class EvalSetCaptureTask(BaseModel):
 
     samples: int
     """Number of dataset samples that would run (after any `limit`)."""
+
+    sample_ids: list[str | int] | None = None
+    """Ids of the samples that would run, in dataset order, or `None` when one of them has no id of its own. Added in version 5.
+
+    A runner that splits a task between workers selects each worker's part by these ids. A sample without an id answers to its position, which a dataset shuffled at load changes between processes, so such a task has none.
+    """
 
     epochs: int
     """Effective number of epochs."""
@@ -185,27 +191,6 @@ def task_args_hash(task_args: dict[str, Any]) -> str:
     ).hexdigest()
 
 
-def samples_for_limit(count: int, limit: int | tuple[int, int] | None) -> int:
-    """Number of dataset samples selected by a `limit`.
-
-    Args:
-        count: Total samples in the dataset.
-        limit: Eval limit (first n samples, or [start, stop] range).
-
-    Returns:
-        Number of samples that would run.
-    """
-    if isinstance(limit, tuple):
-        start, stop = limit
-        if start >= count:
-            count = 0
-        else:
-            count = min(stop, count) - start
-    elif isinstance(limit, int):
-        count = min(limit, count)
-    return count
-
-
 def samples_selected(
     dataset: Dataset,
     limit: int | tuple[int, int] | None,
@@ -250,20 +235,45 @@ def samples_selected(
     Returns:
         Number of samples that would run.
     """
+    return len(sample_ids_selected(dataset, limit, sample_id, task, task_names))
+
+
+def sample_ids_selected(
+    dataset: Dataset,
+    limit: int | tuple[int, int] | None,
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None,
+    task: str | None = None,
+    task_names: Iterable[str] | None = None,
+) -> list[str | int | None]:
+    """Ids of the dataset samples `samples_selected` counts, in dataset order.
+
+    Args:
+        dataset: The task's dataset.
+        limit: Eval limit (first n samples, or [start, stop] range).
+        sample_id: Sample id pattern(s) selected, if any.
+        task: The task's registry name, for resolving `task:id` selectors (see `samples_selected`).
+        task_names: Names of every task in the run (see `samples_selected`).
+
+    Returns:
+        Each selected sample's id, or `None` for a sample with no id of its own.
+    """
     if sample_id is not None:
         if task is not None:
             resolved = resolve_task_sample_ids(task, sample_id, task_names)
             if resolved is None or resolved == []:
                 # every selector named some other task
-                return 0
+                return []
             sample_id = resolved
         matcher = sample_id_filter(sample_id)
-        return sum(
-            1
+        return [
+            sample.id
             for position, sample in enumerate(dataset, start=1)
             if matcher.matches(sample.id if sample.id is not None else position)
-        )
-    return samples_for_limit(len(dataset), limit)
+        ]
+    ids = [sample.id for sample in dataset]
+    if isinstance(limit, tuple):
+        return ids[limit[0] : limit[1]]
+    return ids if limit is None else ids[:limit]
 
 
 def build_eval_set_capture(
@@ -314,6 +324,9 @@ def build_eval_set_capture(
         args_full = getattr(task.task, TASK_ALL_PARAMS_ATTR, None)
         identifier = task_identifier(task, eval_set_args)
         task_log = task_logs.get(identifier)
+        ids = sample_ids_selected(
+            task.task.dataset, limit, sample_id, task.task.name, task_names
+        )
 
         capture_tasks.append(
             EvalSetCaptureTask(
@@ -339,9 +352,8 @@ def build_eval_set_capture(
                 ),
                 sequence=task.sequence,
                 identifier=identifier,
-                samples=samples_selected(
-                    task.task.dataset, limit, sample_id, task.task.name, task_names
-                ),
+                samples=len(ids),
+                sample_ids=None if None in ids else [i for i in ids if i is not None],
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
                 complete=task_log.complete if task_log else None,
