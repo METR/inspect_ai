@@ -103,9 +103,9 @@ class EvalSetCaptureTask(BaseModel):
     """Number of dataset samples that would run (after any `limit`)."""
 
     sample_ids: list[str | int] | None = None
-    """Ids of the samples that would run, in dataset order, or `None` when one of them has no id of its own. Added in version 5.
+    """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split by them. Added in version 5.
 
-    A runner that splits a task between workers selects each worker's part by these ids. A sample without an id answers to its position, which a dataset shuffled at load changes between processes, so such a task has none.
+    A runner that splits a task between workers selects each worker's part by these ids. A sample without an id answers to its position, which a dataset shuffled at load changes between processes, and early stopping can leave selected samples unrun, which a merge of the parts refuses; such a task has none.
     """
 
     epochs: int
@@ -353,7 +353,9 @@ def build_eval_set_capture(
                 sequence=task.sequence,
                 identifier=identifier,
                 samples=len(ids),
-                sample_ids=None if None in ids else [i for i in ids if i is not None],
+                sample_ids=None
+                if None in ids or task.task.early_stopping is not None
+                else [i for i in ids if i is not None],
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
                 complete=task_log.complete if task_log else None,

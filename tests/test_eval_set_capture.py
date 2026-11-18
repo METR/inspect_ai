@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import JsonValue
 from test_helpers.buffer import simulate_crashed_buffer_db
 from test_helpers.utils import identity_solver
 
@@ -27,6 +28,7 @@ from inspect_ai._util.json import to_json_str_safe
 from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import (
+    EvalSpec,
     ProvenanceData,
     invalidate_samples,
     read_eval_log,
@@ -36,8 +38,9 @@ from inspect_ai.log._log import EvalSampleSummary
 from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
 from inspect_ai.log._recorders.eval import LogStart
 from inspect_ai.log._recorders.types import SampleEvent
-from inspect_ai.scorer import Score, exact
+from inspect_ai.scorer import SampleScore, Score, exact
 from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
+from inspect_ai.util import EarlyStop
 
 
 @task
@@ -64,7 +67,7 @@ def capture_task_two() -> Task:
 
 
 @task
-def capture_task_ids() -> Task:
+def capture_task_ids(early_stopping: bool = False) -> Task:
     return Task(
         dataset=[
             Sample(input="a", target="a", id="a"),
@@ -73,7 +76,26 @@ def capture_task_ids() -> Task:
         ],
         solver=[generate()],
         scorer=exact(),
+        early_stopping=NeverStops() if early_stopping else None,
     )
+
+
+class NeverStops:
+    async def start_task(
+        self, task: EvalSpec, samples: list[Sample], epochs: int
+    ) -> str:
+        return "never"
+
+    async def schedule_sample(self, id: str | int, epoch: int) -> EarlyStop | None:
+        return None
+
+    async def complete_sample(
+        self, id: str | int, epoch: int, scores: dict[str, SampleScore]
+    ) -> None:
+        return None
+
+    async def complete_task(self) -> dict[str, JsonValue]:
+        return {}
 
 
 def capture_eval_set(
@@ -689,26 +711,32 @@ def test_sample_ids_selected_limit() -> None:
 
 
 @pytest.mark.parametrize(
-    "selection,expected",
+    "selection,early_stopping,expected",
     [
-        ({}, ["a", "b", 3]),
-        ({"limit": 2}, ["a", "b"]),
+        ({}, False, ["a", "b", 3]),
+        ({"limit": 2}, False, ["a", "b"]),
         # dataset order, not the selector's
-        ({"sample_id": [3, "a"]}, ["a", 3]),
+        ({"sample_id": [3, "a"]}, False, ["a", 3]),
+        ({}, True, None),
     ],
 )
 def test_eval_set_capture_sample_ids(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     selection: dict[str, Any],
-    expected: list[str | int],
+    early_stopping: bool,
+    expected: list[str | int] | None,
 ) -> None:
     tasks = capture_logs(
-        monkeypatch, tmp_path, tmp_path / "logs", [capture_task_ids()], **selection
+        monkeypatch,
+        tmp_path,
+        tmp_path / "logs",
+        [capture_task_ids(early_stopping=early_stopping)],
+        **selection,
     )
 
     assert tasks["capture_task_ids"].sample_ids == expected
-    assert tasks["capture_task_ids"].samples == len(expected)
+    assert tasks["capture_task_ids"].samples == (3 if expected is None else len(expected))
 
 
 def test_eval_set_capture_verdict_ignores_shard_logs(
