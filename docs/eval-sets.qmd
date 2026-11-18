@@ -87,12 +87,12 @@ eval_set(tasks, log_dir="logs-run-42", spend_cap=500)
 ```
 
 The CLI equivalent is `inspect eval-set tasks.py --log-dir logs-run-42 --spend-cap 500`.
-You can also set `INSPECT_EVAL_SET_SPEND_CAP` for the CLI. With no cap, behavior
-is unchanged.
+You can also set `INSPECT_EVAL_SET_SPEND_CAP` for the CLI.
 
 Spend accumulates across tasks, models, and retries. At the cap, Inspect cancels
 unfinished work without scoring it and stops dispatching tasks. Completed results
-and partial transcripts are kept. Re-run against the same log directory with a
+and partial transcripts are kept, and each cancelled task's log has status `error`
+with the error "Eval-set spend cap reached". Re-run against the same log directory with a
 higher cap to keep completed samples and retry unfinished ones. `cost_limit`
 continues to limit each sample separately.
 

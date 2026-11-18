@@ -201,7 +201,10 @@ def test_spend_cap_cancels_without_scoring_and_resumes(
 
     assert not success
     assert len(calls) == 3
-    samples = read_eval_log(logs[0].location).samples
+    log = read_eval_log(logs[0].location)
+    assert log.status == "error"
+    assert log.error is not None and "spend cap reached" in log.error.message
+    samples = log.samples
     assert samples is not None
     assert sum(bool(sample.scores) for sample in samples) == 2
     unfinished = [sample for sample in samples if not sample.scores]
@@ -383,14 +386,16 @@ def test_spend_cap_cancels_concurrent_samples(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("cap", [0, -1, float("inf"), float("-inf"), float("nan")])
 def test_spend_cap_rejects_invalid_amount(tmp_path: Path, cap: float) -> None:
-    with pytest.raises(ValueError, match="finite, positive"):
+    log_dir = tmp_path / "logs"
+    with pytest.raises(PrerequisiteError, match="finite, positive"):
         eval_set(
             _spend_task(),
             model="mockllm/model",
             spend_cap=cap,
-            log_dir=str(tmp_path),
+            log_dir=str(log_dir),
             display="none",
         )
+    assert not log_dir.exists()
 
 
 @pytest.mark.parametrize(
@@ -445,6 +450,101 @@ async def test_spend_cap_flushes_on_external_cancellation(tmp_path: Path) -> Non
             await anyio.lowlevel.checkpoint()
 
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
+
+
+async def test_spend_cap_saves_periodically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_ai._eval import spend_cap
+    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
+
+    monkeypatch.setattr(spend_cap, "FLUSH_INTERVAL", 0.01)
+    saved = tmp_path / SPEND_FILE
+    cap = SpendCap(1, str(tmp_path))
+    async with cap.run():
+        cap.record("model", 0.01)
+        with anyio.fail_after(30):
+            while not saved.exists():
+                await anyio.sleep(0.01)
+        assert json.loads(saved.read_text())["spent_usd"] == 0.01
+
+
+def test_spend_cap_cancels_task_registered_after_cap_reached(tmp_path: Path) -> None:
+    from inspect_ai._eval.spend_cap import SpendCap
+
+    cap = SpendCap(0.01, str(tmp_path))
+    cancelled: list[str] = []
+    with cap.task(lambda: cancelled.append("running")):
+        cap.record("model", 0.01)
+    assert cancelled == ["running"]
+
+    with cap.task(lambda: cancelled.append("late")):
+        assert cancelled == ["running", "late"]
+    cap.record("model", 0.01)
+    assert cancelled == ["running", "late"]
+
+
+@pytest.mark.usefixtures("spend_hooks_registry")
+def test_spend_cap_reports_the_call_that_reached_it(tmp_path: Path) -> None:
+    from inspect_ai.hooks import Hooks, ModelUsageData, hooks
+
+    reported: list[float | None] = []
+
+    @hooks("spend_usage_hook", "Record reported model usage")
+    class UsageHooks(Hooks):
+        @override
+        async def on_model_usage(self, data: ModelUsageData) -> None:
+            reported.append(data.usage.total_cost)
+
+    calls: list[str] = []
+    success, _ = eval_set(
+        _spend_task(),
+        model=_spend_model(calls),
+        spend_cap=0.005,
+        max_samples=1,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+
+    assert not success
+    assert len(calls) == 1
+    assert reported == [0.01]
+
+
+async def test_spend_cap_warns_and_continues_when_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
+
+    async def fail_write(self: AsyncFilesystem, filename: str, content: bytes) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(AsyncFilesystem, "write_file", fail_write)
+    cap = SpendCap(1, str(tmp_path))
+    async with cap.run():
+        cap.record("model", 0.01)
+
+    assert cap.spent == 0.01
+    assert not (tmp_path / SPEND_FILE).exists()
+    assert any(
+        "Could not save eval-set spend" in record.message
+        and "disk full" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("cost", [-0.01, float("nan"), float("inf")])
+def test_spend_cap_rejects_invalid_model_cost(tmp_path: Path, cost: float) -> None:
+    from inspect_ai._eval.spend_cap import SpendCap
+
+    cap = SpendCap(1, str(tmp_path))
+    cap.record("model", 0.01)
+    with pytest.raises(ValueError, match="Invalid model cost"):
+        cap.record("model", cost)
+    assert cap.spent == 0.01
+    assert not cap.tripped
 
 
 async def test_spend_cap_keeps_its_log_directory_when_cwd_changes(

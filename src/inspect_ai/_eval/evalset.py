@@ -142,7 +142,7 @@ from .eval_set_selection import (
     read_eval_set_selection,
 )
 from .loader import resolve_task_args, solver_from_spec
-from .spend_cap import SpendCap, spend_cap_scope
+from .spend_cap import SpendCap, spend_cap_scope, validate_spend_cap
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -648,11 +648,13 @@ def eval_set(
     # are never active at once.
     capture_path = eval_set_capture_requested()
     selection_path = eval_set_selection_requested()
-    if selection_path is not None and spend_cap is not None:
-        raise PrerequisiteError(
-            "spend_cap is not supported with eval-set selection workers; "
-            "a shared cap across processes requires external accounting."
-        )
+    if spend_cap is not None:
+        validate_spend_cap(spend_cap)
+        if selection_path is not None:
+            raise PrerequisiteError(
+                "spend_cap is not supported with eval-set selection workers; "
+                "a shared cap across processes requires external accounting."
+            )
     if capture_path is not None and selection_path is not None:
         raise PrerequisiteError(
             f"{INSPECT_EVAL_SET_CAPTURE} and {INSPECT_EVAL_SET_SELECTION} "

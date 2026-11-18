@@ -59,6 +59,8 @@ class TaskCancel:
     can_retry: bool
     cancel_task: Callable[[CancelType], None]
     cancel_type: CancelType = None
+    reason: str | None = None
+    """Why the task was cancelled, when not by the user (recorded as the log's error)."""
 
 
 @dataclass

@@ -3,7 +3,7 @@
 import logging
 import math
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 
 import anyio
@@ -19,8 +19,18 @@ SPEND_FILE = ".eval-set-spend.json"
 FLUSH_INTERVAL = 30
 
 
+SPEND_CAP_REACHED = "Eval-set spend cap reached"
+
+
 class SpendLedger(BaseModel):
     spent_usd: float = Field(ge=0, allow_inf_nan=False)
+
+
+def validate_spend_cap(limit: float) -> None:
+    if not math.isfinite(limit) or limit <= 0:
+        raise PrerequisiteError(
+            f"spend_cap must be a finite, positive dollar amount: {limit}"
+        )
 
 
 class SpendCap:
@@ -32,8 +42,6 @@ class SpendCap:
     """
 
     def __init__(self, limit: float, log_dir: str) -> None:
-        if not math.isfinite(limit) or limit <= 0:
-            raise ValueError("spend_cap must be a finite, positive dollar amount")
         self.limit = limit
         self.spent = 0.0
         self.tripped = False
@@ -41,7 +49,6 @@ class SpendCap:
         self._loaded = False
         self._saved = 0.0
         self._tasks: set[Callable[[], None]] = set()
-        self._wake: anyio.Event | None = None
         self._unpriced: set[str] = set()
         self._warned = False
 
@@ -63,14 +70,13 @@ class SpendCap:
         if self.spent >= self.limit:
             self.tripped = True
             logger.warning(
-                "Eval-set spend cap reached: $%.2f of $%.2f. "
+                "%s: $%.2f of $%.2f. "
                 "Cancelling unfinished work without scoring. "
                 "Resume with a higher spend_cap to continue.",
+                SPEND_CAP_REACHED,
                 self.spent,
                 self.limit,
             )
-            if self._wake is not None:
-                self._wake.set()
             for cancel in tuple(self._tasks):
                 cancel()
         elif not self._warned and self.spent >= self.limit * 0.8:
@@ -133,17 +139,14 @@ class SpendCap:
 
     async def _write_periodically(self, fs: AsyncFilesystem) -> None:
         while True:
-            self._wake = anyio.Event()
-            with anyio.move_on_after(FLUSH_INTERVAL):
-                await self._wake.wait()
+            await anyio.sleep(FLUSH_INTERVAL)
             await self._flush(fs)
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
-        async with AsyncExitStack() as stack:
-            fs = await stack.enter_async_context(AsyncFilesystem())
+        async with AsyncFilesystem() as fs:
+            await self._load(fs)
             try:
-                await self._load(fs)
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(self._write_periodically, fs)
                     try:
@@ -151,15 +154,10 @@ class SpendCap:
                     finally:
                         tg.cancel_scope.cancel()
             finally:
-                # Join the periodic writer before saving the latest total, so
-                # an interrupted older write cannot overwrite the final one.
+                # The periodic writer has been joined, so an interrupted older
+                # write cannot overwrite this one.
                 with anyio.CancelScope(shield=True):
-                    try:
-                        if self._loaded:
-                            await self._flush(fs)
-                    finally:
-                        self._wake = None
-                        await stack.aclose()
+                    await self._flush(fs)
 
 
 _spend_cap: ContextVar[SpendCap | None] = ContextVar("eval_set_spend_cap", default=None)
@@ -174,13 +172,10 @@ def spend_cap_scope(cap: SpendCap | None) -> Iterator[None]:
         _spend_cap.reset(token)
 
 
-def record_spend(model: str, cost: float | None) -> bool:
-    """Record a charge and report whether task cancellation was requested."""
+def record_spend(model: str, cost: float | None) -> None:
     cap = _spend_cap.get()
     if cap is not None:
         cap.record(model, cost)
-        return cap.tripped
-    return False
 
 
 def spend_cap_reached() -> bool:

@@ -43,7 +43,7 @@ from tenacity import (
 )
 from tenacity.wait import WaitBaseT
 
-from inspect_ai._eval.spend_cap import record_spend
+from inspect_ai._eval.spend_cap import record_spend, spend_cap_reached
 from inspect_ai._sentinel._context import is_agent_generate
 from inspect_ai._util.constants import (
     DEFAULT_MAX_CONNECTIONS,
@@ -1359,8 +1359,8 @@ class Model:
 
             # Record and check usage
             if usage:
-                if record_and_check_model_usage(self, usage, role=self.role):
-                    await anyio.lowlevel.checkpoint()
+                record_and_check_model_usage(self, usage, role=self.role)
+                await _deliver_spend_cap_cancellation()
 
             return compacted_messages, usage
 
@@ -1740,10 +1740,9 @@ class Model:
 
             # record usage
             if output.usage:
-                if record_and_check_model_usage(
+                record_and_check_model_usage(
                     self, output.usage, role=self.role, output=output
-                ):
-                    await anyio.lowlevel.checkpoint()
+                )
 
                 # send telemetry to hooks
                 await emit_model_usage(
@@ -1756,6 +1755,8 @@ class Model:
 
             if cache_policy and cache_entry:
                 cache_store(entry=cache_entry, output=output)
+
+            await _deliver_spend_cap_cancellation()
 
             return output, event
 
@@ -3219,8 +3220,7 @@ def record_and_check_model_usage(
     usage: ModelUsage,
     role: str | None = None,
     output: ModelOutput | None = None,
-) -> bool:
-    """Record usage before checking limits; True requests a cancellation checkpoint."""
+) -> None:
     from inspect_ai.log._samples import (
         set_active_sample_token_limit_usage,
         set_active_sample_total_cost,
@@ -3256,21 +3256,32 @@ def record_and_check_model_usage(
         record_model_cost(total_cost)
         set_active_sample_total_cost(sample_total_cost())
 
-    cap_reached = record_spend(model_name, usage.total_cost)
+    record_spend(model_name, usage.total_cost)
 
     # compute total tokens and update active sample (before check_token_limit()
     # so the control channel sees the usage that tripped the limit)
     total_tokens = sample_total_tokens()
     set_active_sample_total_tokens(total_tokens)
     set_active_sample_token_limit_usage(token_limit_usage())
-    if cap_reached:
-        return True
+    # the spend cap cancels the task without scoring, so it takes priority
+    # over a sample limit (which would score the sample)
+    if spend_cap_reached():
+        return
     check_token_limit()
 
     # record cost to limit tree and check
     if total_cost is not None:
         check_cost_limit()
-    return False
+
+
+async def _deliver_spend_cap_cancellation() -> None:
+    """Raise the spend cap's task cancellation before the caller continues.
+
+    Without a checkpoint the cancellation waits for the next suspension, which
+    may come after the sample has been scored.
+    """
+    if spend_cap_reached():
+        await anyio.lowlevel.checkpoint()
 
 
 def model_usage_cost(

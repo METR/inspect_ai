@@ -20,7 +20,11 @@ import anyio
 from anyio.abc import TaskGroup
 from typing_extensions import Unpack
 
-from inspect_ai._eval.spend_cap import spend_cap_reached, spend_cap_task
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._util._async import Wake, unwrap_exception_group
 from inspect_ai._util.environ import environ_vars
@@ -642,10 +646,14 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
 
                 task_cancel.cancel_task = cancel_task
 
+                def cancel_for_spend_cap() -> None:
+                    task_cancel.reason = SPEND_CAP_REACHED
+                    cancel_task("abort")
+
                 async def run() -> None:
                     nonlocal result, abandoned
                     try:
-                        with spend_cap_task(lambda: cancel_task("abort")):
+                        with spend_cap_task(cancel_for_spend_cap):
                             await anyio.lowlevel.checkpoint_if_cancelled()
                             result = await task_run(options, task_cancel=task_cancel)
                     except TaskRetryAbandonedError:
