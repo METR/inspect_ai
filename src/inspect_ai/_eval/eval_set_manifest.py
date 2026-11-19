@@ -324,8 +324,7 @@ def _split_ids(
     unsplittable = (
         len(selected) < len(ids)
         or aliased
-        # a worker reads `<task>:<id>` as naming any task in the set, and drops the
-        # id when the name is another task's (resolve_task_sample_ids)
+        # a worker reads `<task>:<id>` as a selector when `<task>` is in the set
         or any(
             isinstance(id, str) and id.partition(":")[0].lower() in named
             for id in selected
