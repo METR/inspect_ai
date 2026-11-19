@@ -230,14 +230,13 @@ async def test_read_zstd_compressed_member(zstd_zip_file: Path) -> None:
         assert parsed["message"] == "hello zstd"
 
 
+@pytest.mark.timeout(10)
 async def test_closing_a_file_stream_does_not_wait_for_a_worker_thread(
     test_zip_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member stream closes its source from a cancelled task's cleanup.
+    """A member stream closes its source in-process.
 
-    A worker thread may never be scheduled there, so a close that waits for one
-    never returns: the member's async generator is left running and the reader
-    that closes it deadlocks (Scout's interrupted eval-log reads did).
+    The close runs in a cancelled read's cleanup, which cannot wait for a worker thread.
     """
     from inspect_ai._util import asyncfiles
 
@@ -248,10 +247,12 @@ async def test_closing_a_file_stream_does_not_wait_for_a_worker_thread(
         await anyio.sleep_forever()
 
     monkeypatch.setattr(anyio.to_thread, "run_sync", never_returns)
-    with anyio.fail_after(10):
-        await stream.aclose()
+    assert stream._file is not None
+    wrapped = stream._file.wrapped
+    await stream.aclose()
 
     assert stream._file is None
+    assert wrapped.closed
 
 
 async def test_read_member_fully_deflated(test_zip_file: Path) -> None:
