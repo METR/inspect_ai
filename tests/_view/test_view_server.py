@@ -1031,8 +1031,8 @@ def test_api_log_files_merge_with_same_count_gives_full(
 def test_api_log_files_merge_tying_the_token_gives_full(
     view_client: ViewTestClient,
 ) -> None:
-    # the client holds a log from the merge's second (S3 mtimes are whole seconds)
-    _write_sharded_run(view_client.log_dir, [1000], merged_mtime=2000)
+    # slice 1 and the merge land between polls, keeping the client's (mtime, count)
+    _write_sharded_run(view_client.log_dir, [1000, 1001], merged_mtime=2000)
     other = write_eval_log_named(
         view_client.log_dir, "2025-01-01T00-01-00+00-00_t2_id2.eval", "t2", "id2"
     )
