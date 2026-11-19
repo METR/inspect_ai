@@ -255,7 +255,9 @@ async def get_log_files(
             listing.hiding_mtime is not None and listing.hiding_mtime >= mtime
         )
 
-    if len(logs) != file_count or refresh:
+    # the token is the client's newest mtime, so a newest log older than it was removed
+    newest = max((log.mtime or 0.0 for log in logs), default=0.0)
+    if len(logs) != file_count or refresh or newest < mtime:
         # Has the number of files changed? could be a delete
         # so send a complete list
         return log_files_response(

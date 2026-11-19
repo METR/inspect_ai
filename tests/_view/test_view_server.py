@@ -1048,6 +1048,22 @@ def test_api_log_files_merge_tying_the_token_gives_full(
     assert {f["task_id"] for f in body["files"]} == {"merged", "id2"}
 
 
+def test_api_log_files_newest_log_replaced_by_older_merge_gives_full(
+    view_client: ViewTestClient,
+) -> None:
+    # the client's only log (3000) is gone and a merged log at 2000 took its place
+    _write_sharded_run(view_client.log_dir, [1000], merged_mtime=2000)
+    resp = view_client.request(
+        "GET",
+        f"/log-files?log_dir={urllib.parse.quote_plus(str(view_client.log_dir))}",
+        headers={"If-None-Match": "3000000.0-1"},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    assert body["response_type"] == "full"
+    assert {f["task_id"] for f in body["files"]} == {"merged"}
+
+
 def test_api_log_files_merged_log_deleted_gives_full(
     view_client: ViewTestClient,
 ) -> None:
@@ -1267,10 +1283,14 @@ def test_api_log_files_hidden_shards_stay_incremental(
 ) -> None:
     # with a token newer than the merge, hidden shards do not force full listings
     _write_sharded_run(view_client.log_dir, [1000, 1001], merged_mtime=2000)
+    newer = write_eval_log_named(
+        view_client.log_dir, "2025-01-01T00-01-00+00-00_t2_id2.eval", "t2", "id2"
+    )
+    os.utime(newer, (2001, 2001))
     resp = view_client.request(
         "GET",
         f"/log-files?log_dir={urllib.parse.quote_plus(str(view_client.log_dir))}",
-        headers={"If-None-Match": "2001000.0-1"},
+        headers={"If-None-Match": "2001000.0-2"},
     )
     resp.raise_for_status()
     assert resp.json()["response_type"] == "incremental"
