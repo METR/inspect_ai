@@ -10,6 +10,7 @@ from aiohttp.web import Application, Request, Response, run_app
 from jsonrpcserver import Success, async_dispatch, method
 
 from inspect_sandbox_tools._util.constants import (
+    EXEC_REMOTE_JOBS_PATH,
     SERVER_DIR,
     SERVER_DIR_ENV,
     SERVER_PID_PATH,
@@ -101,6 +102,14 @@ def main() -> None:
 
     ensure_private_server_dir(SERVER_DIR)
     _prepare_socket_parent()
+
+    # METR fork: a restart does not clear the server directory, so this server
+    # learns here which exec_remote jobs an earlier one started.
+    from inspect_sandbox_tools._remote_tools._exec_remote.json_rpc_methods import (
+        controller as exec_remote_controller,
+    )
+
+    exec_remote_controller.persist_launches(EXEC_REMOTE_JOBS_PATH)
 
     # Remove stale socket file
     SOCKET_PATH.unlink(missing_ok=True)

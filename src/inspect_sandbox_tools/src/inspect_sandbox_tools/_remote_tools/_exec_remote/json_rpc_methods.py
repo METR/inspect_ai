@@ -34,13 +34,19 @@ async def exec_remote_start(params: SubmitParams) -> SubmitResult:
         can_switch_user=_can_switch_user,
         job_key=params.job_key,
     )
-    return SubmitResult(pid=pid)
+    result = None
+    if params.wait > 0 and not params.stdin_open:
+        # The first poll, in the same request (METR fork).
+        result = await controller.poll(pid, 0, params.wait, params.job_key)
+    return SubmitResult(pid=pid, result=result)
 
 
 @validated_json_rpc_method(PollParams)
 async def exec_remote_poll(params: PollParams) -> PollResult:
     """Poll job state and get incremental output."""
-    return await controller.poll(params.pid, params.ack_seq, params.wait)
+    return await controller.poll(
+        params.pid, params.ack_seq, params.wait, params.job_key
+    )
 
 
 @validated_json_rpc_method(KillParams)

@@ -323,6 +323,32 @@ class Job:
         seq, chunks = self._acked_buffer.collect(ack_seq)
         return OutputChunk(seq, *self._combine_chunks(chunks))
 
+    def replay(self, ack_seq: int) -> PollResult:
+        """The final reply again, for a poll repeated after the job ended.
+
+        The poll that first reported the end handed all the job's output to the
+        acked buffer, so this pushes nothing: it returns the job's final state
+        with whatever the host has not acknowledged, which is the reply it lost.
+        """
+        seq, chunks = self._acked_buffer.collect(ack_seq)
+        stdout, stderr = self._combine_chunks(chunks)
+        return PollResult(
+            state=self._state,
+            exit_code=self._exit_code,
+            seq=seq,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    @property
+    def unacked_chars(self) -> int:
+        """Size of the output held for the host to acknowledge."""
+        return self._acked_buffer.held_size(lambda chunk: len(chunk[0]) + len(chunk[1]))
+
+    def forget_unacked(self) -> None:
+        """Drop the output held for the host to acknowledge."""
+        self._acked_buffer = AckedChunkBuffer()
+
     async def await_termination(self) -> None:
         """Wait for an in-progress kill to finish, if one exists."""
         if self._termination is not None:

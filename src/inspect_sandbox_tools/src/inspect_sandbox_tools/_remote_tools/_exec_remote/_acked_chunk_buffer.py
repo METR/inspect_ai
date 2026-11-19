@@ -4,6 +4,7 @@ Holds output chunks until the host confirms receipt, preventing data loss
 when RPC responses are lost in transit.
 """
 
+from collections.abc import Callable
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -55,3 +56,7 @@ class AckedChunkBuffer(Generic[T]):
         """
         self._held = [(s, c) for s, c in self._held if s > ack_seq]
         return (self._seq, [c for _, c in self._held])
+
+    def held_size(self, size: Callable[[T], int]) -> int:
+        """Total size of the chunks not yet acknowledged, measured by `size`."""
+        return sum(size(chunk) for _, chunk in self._held)
