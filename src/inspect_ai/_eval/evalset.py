@@ -1120,7 +1120,7 @@ def eval_set(
         # not recursive: folders below the log dir (artifacts/) hold agent-written files
         all_logs = list_all_eval_logs(log_dir, recursive=False)
         if len(all_logs) > 0:
-            write_log_dir_manifest(log_dir)
+            write_log_dir_manifest(log_dir, recursive=False)
 
         eval_set_args = EvalSetArgsInTaskIdentifier(
             config=config,
@@ -1290,7 +1290,7 @@ def eval_set(
             print_scan_status(log_dir, scanner)
 
         # update manifest
-        write_log_dir_manifest(log_dir)
+        write_log_dir_manifest(log_dir, recursive=False)
 
         # emit end event
         run_coroutine(emit_eval_set_end(eval_set_id, log_dir))

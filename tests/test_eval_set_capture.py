@@ -859,6 +859,23 @@ def test_eval_set_cleanup_keeps_its_log_beside_a_newer_copy_among_artifacts(
     assert log.exists() and copy.exists()
 
 
+def test_eval_set_runs_and_resumes_beside_junk_among_artifacts(tmp_path: Path) -> None:
+    # an agent can write any file into artifacts/, one that is not an eval log too
+    log_dir = tmp_path / "logs"
+    junk = log_dir / "artifacts" / "uuid-1" / "junk.eval"
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"PK\x03\x04 not an eval log")
+
+    for attempt in ("run", "resume"):
+        success, _ = eval_set(
+            tasks=[capture_task_one()],
+            model="mockllm/model",
+            log_dir=str(log_dir),
+            display="plain",
+        )
+        assert success, attempt
+
+
 def test_eval_set_capture_verdict_in_a_shard_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
