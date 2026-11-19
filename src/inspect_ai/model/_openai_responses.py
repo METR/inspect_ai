@@ -186,7 +186,7 @@ from inspect_ai.model._model_output import (
     TopLogprob,
     collect_stop_details,
 )
-from inspect_ai.model._openai import is_gpt_5_model
+from inspect_ai.model._openai import is_gpt_5_model, openai_reported_cost
 from inspect_ai.tool._mcp._config import MCPServerConfigHTTP
 from inspect_ai.tool._mcp._remote import is_mcp_server_tool
 from inspect_ai.tool._tool_call import ToolCall
@@ -916,6 +916,7 @@ def model_usage_from_response_usage(usage: ResponseUsage | None) -> ModelUsage |
         if usage.output_tokens_details is not None
         else None,
         total_tokens=usage.total_tokens,
+        total_cost=openai_reported_cost(usage),
     )
 
 

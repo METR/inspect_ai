@@ -115,11 +115,17 @@ from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 
-def _spend_model(calls: list[str], name: str = "mockllm/spend") -> Model:
+def _spend_model(
+    calls: list[str], name: str = "mockllm/spend", reported: float | None = None
+) -> Model:
+    """A model whose calls use 1,000 input tokens and report `reported` as their charge."""
+
     def output(*args: Any) -> ModelOutput:
         calls.append("call")
         result = ModelOutput.from_content(name, "answer")
-        result.usage = ModelUsage(input_tokens=1000, output_tokens=0, total_tokens=1000)
+        result.usage = ModelUsage(
+            input_tokens=1000, output_tokens=0, total_tokens=1000, total_cost=reported
+        )
         return result
 
     return get_model(name, custom_outputs=output)
@@ -311,6 +317,30 @@ def test_spend_cap_uses_configured_model_prices(
     assert not success
     assert len(calls) == 1
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
+
+
+def test_spend_cap_counts_the_charge_a_provider_reports(
+    tmp_path: Path, spend_model_prices: dict[str, ModelCost]
+) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    # cost data prices each call at $0.01; the provider says it charged $0.03
+    calls: list[str] = []
+    success, logs = eval_set(
+        _spend_task(),
+        model=_spend_model(calls, reported=0.03),
+        model_cost_config=spend_model_prices,
+        spend_cap=0.025,
+        log_dir=str(tmp_path),
+        max_samples=1,
+        display="none",
+    )
+
+    assert not success
+    assert len(calls) == 1
+    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.03
+    usage = read_eval_log(logs[0].location).stats.model_usage["mockllm/spend"]
+    assert usage.total_cost == 0.03
 
 
 @pytest.mark.usefixtures("spend_model_priced")

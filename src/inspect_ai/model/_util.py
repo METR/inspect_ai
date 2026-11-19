@@ -71,6 +71,8 @@ def resolve_model_costs(
 ) -> None:
     """Require cost data for the models of tasks that limit cost.
 
+    A model whose provider reports each call's charge needs none.
+
     Args:
         resolved_tasks: Tasks about to run.
         cost_limit: Eval-level sample cost limit (a task's own applies otherwise).
@@ -96,7 +98,7 @@ def resolve_model_costs(
             # instantiated, so resolving a provider here would re-instantiate
             # them (reloading local weights)
             info = _get_model_info_direct(model)
-            if info is None or info.cost is None:
+            if (info is None or info.cost is None) and not model.api.reports_cost():
                 missing.append(model_name)
 
         if missing:

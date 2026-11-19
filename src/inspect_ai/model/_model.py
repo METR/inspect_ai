@@ -410,6 +410,14 @@ class ModelAPI(abc.ABC):
         """Canonical model name for querying results."""
         return self.model_name
 
+    def reports_cost(self) -> bool:
+        """Whether the service reports what each call was charged.
+
+        A model that does needs no cost data for `cost_limit` or an eval-set
+        spend cap: the reported charge is the call's cost.
+        """
+        return False
+
     def service_model_name(self) -> str:
         """Model name used by the provider service."""
         return self.model_name
@@ -3230,11 +3238,14 @@ def record_and_check_model_usage(
     # full "provider/model" identifier, used as the usage-bookkeeping dict key
     model_name = f"{model}"
 
-    # compute cost and set on usage before recording (so ModelUsage.__add__
-    # accumulates it in the per-model usage dicts)
-    total_cost = model_usage_cost(model, usage, output)
-    if total_cost is not None:
-        usage.total_cost = total_cost
+    # set cost on usage before recording (so ModelUsage.__add__ accumulates it
+    # in the per-model usage dicts). A charge the provider reported is what the
+    # call cost; cost data only estimates it, so it applies when none came.
+    total_cost = usage.total_cost
+    if total_cost is None:
+        total_cost = model_usage_cost(model, usage, output)
+        if total_cost is not None:
+            usage.total_cost = total_cost
 
     # record usage
     set_model_usage(model_name, usage, sample_model_usage_context_var.get(None))

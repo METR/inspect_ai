@@ -412,6 +412,11 @@ class OpenAICompatibleAPI(ModelAPI):
         """Model name without any service prefix."""
         return self.model_name.replace(f"{self.service}/", "", 1)
 
+    @override
+    def reports_cost(self) -> bool:
+        # OpenRouter reports each call's charge in `usage.cost`
+        return self.service.lower() == "openrouter"
+
     def canonical_name(self) -> str:
         """Canonical model name for model info database lookup.
 

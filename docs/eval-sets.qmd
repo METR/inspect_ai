@@ -100,7 +100,9 @@ Like `cost_limit`, the cap requires cost data for every task and role model,
 configured with `set_model_cost()` or `model_cost_config` (see
 [Model Cost](setting-limits.qmd#model-cost)). Inspect raises an error before
 running if any is missing; a price of zero is valid and leaves that model
-uncounted. Other models that task code calls, such as a `get_model()` inside a
+uncounted. When a provider reports what a call was charged, as OpenRouter does,
+Inspect counts that charge and the cost data is not used for the call. Other
+models that task code calls, such as a `get_model()` inside a
 solver or scorer, produce a warning when they have no cost data and are
 uncounted. Calls made outside Inspect's model API are also uncounted. Calls
 already in flight can exceed the cap.
