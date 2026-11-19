@@ -7,7 +7,9 @@ long-running commands in sandbox environments with streaming output.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import shlex
 import time
 import uuid
@@ -26,8 +28,16 @@ from tenacity import (
 )
 
 from inspect_ai._util._async import current_async_backend
-from inspect_ai._util._json_rpc import GenericJSONRPCErrorMapper, exec_model_request
+from inspect_ai._util._json_rpc import (
+    GenericJSONRPCErrorMapper,
+    JSONRPCErrorMapper,
+    JSONRPCParamsType,
+    exec_model_request,
+)
+from inspect_ai._util.cpu import effective_cpu_count
+from inspect_ai._util.logger import warn_once
 from inspect_ai._util.retry import backoff_multiplier
+from inspect_ai.util._concurrency import ConcurrencySemaphore, get_or_create_semaphore
 
 from ._cli import tools_user_param
 from ._json_rpc_transport import SandboxJSONRPCTransport
@@ -252,6 +262,90 @@ KILL_KEY_TIMEOUT = 30
 SERVER_WAIT_WINDOW_SECONDS: float = 10.0
 """Time after the start reply during which polls wait on the server."""
 
+# METR fork. Everything below is used only when `SERVER_WAIT_ENV` is set, so
+# exec_remote polls exactly as upstream does when it is not.
+
+SERVER_WAIT_ENV = "INSPECT_EXEC_REMOTE_SERVER_WAIT"
+"""Selects the fork's polling, read when a command starts.
+
+`1` or `true`: polls wait on the server for `EXTENDED_WAIT_WINDOW_SECONDS` after
+the start, at most `EXTENDED_MAX_WAIT_SECONDS` each and at most
+`WAIT_CONCURRENCY_ENV` of them at once. Any other value: no poll waits on the
+server. Either way a poll that did not wait is followed by a pause that grows
+with the command's age (`_idle_wait`), an awaitable command that keeps printing
+is polled every `OUTPUT_REPOLL_SECONDS`, its kill returns no output, and an
+error the server reports for a poll is not retried."""
+
+WAIT_CONCURRENCY_ENV = "INSPECT_EXEC_REMOTE_WAIT_CONCURRENCY"
+"""Most polls that wait on the server at once; twice the CPUs, at least 4, if unset."""
+
+EXTENDED_WAIT_WINDOW_SECONDS: float = 60.0
+"""Time after the start reply during which polls wait on the server, then they
+are spaced by the interval, so a long command does not hold a sandbox exec for
+its whole life."""
+
+EXTENDED_MAX_WAIT_SECONDS: float = 5.0
+"""Longest a poll waits on the server: a waiting poll holds one of
+`WAIT_CONCURRENCY_ENV`'s slots, and short waits pass them round."""
+
+POLL_BACKOFF_SECONDS: float = 0.25
+"""Shortest pause after a poll that found the command running with no output."""
+
+OUTPUT_REPOLL_SECONDS: float = 0.5
+"""Pause in awaitable mode after a poll that returns output, not a full reply,
+when the poll before it did too."""
+
+MAX_POLL_OUTPUT_BYTES = 1024 * 1024
+"""Most new stdout (and stderr) bytes the sandbox drains for one poll reply (the
+sandbox tools' `_MAX_POLL_OUTPUT_BYTES`)."""
+
+
+def _server_wait_setting() -> bool | None:
+    """`SERVER_WAIT_ENV` as on or off, or `None` when it is unset."""
+    value = os.environ.get(SERVER_WAIT_ENV)
+    return None if value is None else value.strip().lower() in ("1", "true")
+
+
+def _wait_concurrency() -> int:
+    """Polls allowed to wait on the server at once."""
+    # Read the override first: counting CPUs reads cgroup files on every waiting poll.
+    value = os.environ.get(WAIT_CONCURRENCY_ENV)
+    if value is not None:
+        try:
+            return max(int(value), 0)
+        except ValueError:
+            pass
+    default = max(effective_cpu_count() * 2, 4)
+    if value is not None:
+        warn_once(
+            logger,
+            f"{WAIT_CONCURRENCY_ENV}={value!r} is not an integer; using {default}.",
+        )
+    return default
+
+
+class _ServerReplyError(RuntimeError):
+    """The server answered a request with an error, so resending it cannot help."""
+
+
+class _ServerReplyErrorMapper(GenericJSONRPCErrorMapper):
+    """Keep the generic error messages, marking the errors the server returned."""
+
+    @staticmethod
+    def server_error(
+        code: int, message: str, method: str, params: JSONRPCParamsType
+    ) -> Exception:
+        del code, method, params
+        return _ServerReplyError(message)
+
+    @staticmethod
+    def internal_error(
+        message: str, method: str, params: JSONRPCParamsType
+    ) -> Exception:
+        del method, params
+        return _ServerReplyError(message)
+
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -344,6 +438,13 @@ class ExecRemoteProcess:
         self._pid: int | None = None
         self._job_key = uuid.uuid4().hex
         self._server_wait_end: float | None = None
+        # METR fork (see SERVER_WAIT_ENV); all off until a start finds it set
+        self._fork_polling = False
+        self._max_wait: float | None = None
+        self._started_at = 0.0
+        self._held = False  # the last poll waited on the server
+        self._awaitable = False  # set by exec_remote_awaitable()
+        self._small_output = False  # the last poll returned output, not a full reply
         self._last_seq: int = 0
         self._killed = False
         self._completed = False
@@ -380,13 +481,15 @@ class ExecRemoteProcess:
         if self._server_wait_end is None:
             return 0
         remaining = self._server_wait_end - time.monotonic()
-        return max(0, min(remaining, self._rpc_timeout / 2))
+        wait = max(0, min(remaining, self._rpc_timeout / 2))
+        return wait if self._max_wait is None else min(wait, self._max_wait)
 
     async def _rpc(
         self,
         method: str,
         params: dict[str, object],
         result_type: type[T],
+        error_mapper: type[JSONRPCErrorMapper] = GenericJSONRPCErrorMapper,
         **overrides: object,
     ) -> T:
         """Make an RPC call to the sandbox.
@@ -411,7 +514,7 @@ class ExecRemoteProcess:
             params=params,
             result_type=result_type,
             transport=self._transport,
-            error_mapper=GenericJSONRPCErrorMapper,
+            error_mapper=error_mapper,
             **extra_args,
         )
 
@@ -453,13 +556,20 @@ class ExecRemoteProcess:
             await self._kill_key()
             raise
         self._pid = result.pid
+        self._started_at = time.monotonic()
+        setting = _server_wait_setting()
+        self._fork_polling = setting is not None
         # A waiting poll that overlaps a stdin write (same ack_seq) can return
         # output twice, so stdin_open processes do not wait on the server.
-        if result.poll_wait and not stdin_open:
-            self._server_wait_end = time.monotonic() + SERVER_WAIT_WINDOW_SECONDS
+        if result.poll_wait and not stdin_open and setting is not False:
+            window = SERVER_WAIT_WINDOW_SECONDS
+            if setting:
+                window = EXTENDED_WAIT_WINDOW_SECONDS
+                self._max_wait = EXTENDED_MAX_WAIT_SECONDS
+            self._server_wait_end = self._started_at + window
 
     async def _kill_key(self) -> None:
-        """Kill the job by key, or make the sandbox refuse its start.
+        """Kill the job by key, or make the sandbox refuse its start if it has none yet.
 
         Runs to completion even if the caller is cancelled, bounded by
         `KILL_KEY_TIMEOUT`, and outside sandbox concurrency limits so it
@@ -484,9 +594,10 @@ class ExecRemoteProcess:
             except Exception as ex:
                 error = ex
         logger.warning(
-            "exec_remote could not kill job %s after its start failed (%s); "
+            "exec_remote could not kill job %s %s (%s); "
             "the command may still be running in the sandbox",
             self._job_key,
+            "after its start failed" if self._pid is None else "by its key",
             error or f"timed out after {KILL_KEY_TIMEOUT}s",
         )
 
@@ -559,6 +670,9 @@ class ExecRemoteProcess:
                 # If we have events, return the first and queue the rest
                 if events:
                     self._pending_events = events[1:]
+                    if self._fork_polling and self._awaitable:
+                        if result.state == "running":
+                            await self._wait_after_output(result)
                     return events[0]
 
                 # If killed with no events, stop iteration
@@ -566,9 +680,11 @@ class ExecRemoteProcess:
                     raise StopAsyncIteration
 
                 # Still running with no output. Inside the server wait window
-                # the next poll waits on the server, so poll again at once.
-                if self._server_wait() == 0:
-                    await anyio.sleep(self._poll_interval)
+                # the next poll waits on the server, so poll again at once,
+                # unless this one found no room to wait (see `_poll`).
+                self._small_output = False
+                if self._server_wait() == 0 or (self._fork_polling and not self._held):
+                    await anyio.sleep(self._idle_wait())
 
         except anyio.get_cancelled_exc_class():
             # Kill the process on cancellation to avoid leaving orphaned processes.
@@ -576,13 +692,46 @@ class ExecRemoteProcess:
                 await self.kill()
             raise
 
+    def _idle_wait(self) -> float:
+        """Seconds to pause after a poll that found the command running with no output.
+
+        The interval, as upstream. With the fork's polling, and unless the
+        caller set `poll_interval`, as long as the command has run so far,
+        from `POLL_BACKOFF_SECONDS` up to the interval: a command that ends
+        early is seen within about its own running time, and one that has run
+        for a while is polled at the interval.
+        """
+        if not self._fork_polling or self._options.poll_interval:
+            return self._poll_interval
+        age = time.monotonic() - self._started_at
+        return min(self._poll_interval, max(POLL_BACKOFF_SECONDS, age))
+
+    async def _wait_after_output(self, result: _PollResult) -> None:
+        """Pace polls after one that found an awaitable command running with output.
+
+        Nobody reads the output before the command ends, so the next poll goes
+        out at once only to empty a full reply or to see whether the command
+        has ended. While polls in a row return output that is not a full
+        reply, pause `OUTPUT_REPOLL_SECONDS` after each, so a command that
+        keeps printing is not polled back to back and its end is still seen
+        soon after.
+        """
+        # the sandbox's UTF-8 decoder holds back up to 3 bytes of a split character
+        full = any(
+            len(output.encode("utf-8")) >= MAX_POLL_OUTPUT_BYTES - 3
+            for output in (result.stdout, result.stderr)
+        )
+        if self._small_output and not full:
+            await anyio.sleep(OUTPUT_REPOLL_SECONDS)
+        self._small_output = not full
+
     async def _poll(self) -> _PollResult:
         recovery_deadline: float | None = None
         retried_repoll_error: RuntimeError | None = None
 
         def retryable(ex: BaseException) -> bool:
             nonlocal retried_repoll_error
-            if not isinstance(ex, RuntimeError):
+            if not isinstance(ex, RuntimeError) or isinstance(ex, _ServerReplyError):
                 return False
             if recovery_deadline is not None:
                 # a re-issued poll is not retried once kill() has been called
@@ -609,11 +758,41 @@ class ExecRemoteProcess:
                 raise retried_repoll_error
 
             params: dict[str, object] = {"pid": self._pid, "ack_seq": self._last_seq}
-            if wait := self._server_wait():
+            wait = self._server_wait()
+            slot: ConcurrencySemaphore | None = None
+            if wait and self._max_wait is not None:
+                slot = await get_or_create_semaphore(
+                    "exec-remote-wait", _wait_concurrency(), None, False
+                )
+                if slot.value < 1:
+                    warn_once(
+                        logger,
+                        f"exec_remote polls waiting on the sandbox reached the "
+                        f"{WAIT_CONCURRENCY_ENV} limit ({slot.concurrency}): more "
+                        "are sent without a wait and paced on the host.",
+                    )
+                    # Never wait for a free slot: send the poll without a wait.
+                    wait, slot = 0, None
+            self._held = bool(wait)
+            if wait:
                 params["wait"] = wait
+            overrides: dict[str, object] = {}
+            if slot is not None:
+                # A waiting poll idles in the sandbox: it must not occupy a local
+                # subprocess slot that ordinary commands and cleanup need.
+                overrides["concurrency"] = False
             sandbox_proxy = cast(SandboxEnvironmentProxy, self._transport.sandbox)
-            with sandbox_proxy.no_events():
-                result = await self._rpc("exec_remote_poll", params, _PollResult)
+            async with slot.semaphore if slot is not None else contextlib.nullcontext():
+                with sandbox_proxy.no_events():
+                    result = await self._rpc(
+                        "exec_remote_poll",
+                        params,
+                        _PollResult,
+                        _ServerReplyErrorMapper
+                        if self._fork_polling
+                        else GenericJSONRPCErrorMapper,
+                        **overrides,
+                    )
             self._last_seq = result.seq
             return result
 
@@ -745,6 +924,11 @@ class ExecRemoteProcess:
             return
 
         self._killed = True
+        if self._fork_polling and self._awaitable:
+            # Nobody takes an awaitable command's output once it is killed, and
+            # exec_remote_kill would send all of it: up to 100 MiB a stream.
+            await self._kill_key()
+            return
         try:
             result = await self._rpc(
                 "exec_remote_kill",
@@ -833,6 +1017,7 @@ async def exec_remote_awaitable(
     proc = await exec_remote_streaming(
         sandbox, cmd, sandbox_default_poll_interval, opts
     )
+    proc._awaitable = True
 
     # Accumulate output chunks with memory limiting
     output_limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
