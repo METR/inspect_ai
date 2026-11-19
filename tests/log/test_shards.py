@@ -4018,14 +4018,14 @@ def _s3_objects(prefix: str) -> dict[str, bytes]:
 def test_s3_locations_s3_would_read_as_another_key_are_refused(
     s3_shards: tuple[str, str], s3_root: str, target: str, delete: bool
 ) -> None:
-    from inspect_ai._util.asyncfiles import s3_bucket_and_key
+    from inspect_ai.log._shards._walk import url_parsed_bucket_and_key
 
     location = target.format(root=s3_root, name=NAME)
     companion = location.removesuffix(".eval").removesuffix(".shards") + ".shards"
     _s3_copy(f"{s3_root}/{NAME}.shards/", f"{companion}/")
     # what S3 would read instead (for the leading slash, the ordinary
     # companion): another shard set, with an unrelated object that must survive
-    _, read_as = s3_bucket_and_key(f"s3://test-bucket/{companion}")
+    _, read_as = url_parsed_bucket_and_key(f"s3://test-bucket/{companion}")
     if read_as != f"{s3_root}/{NAME}.shards":
         _s3_copy(f"{s3_root}/{NAME}.shards/", f"{read_as}/")
     boto3.client("s3").put_object(

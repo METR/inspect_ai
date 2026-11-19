@@ -10,6 +10,7 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import NamedTuple
+from urllib.parse import urlparse
 
 import anyio
 
@@ -41,26 +42,45 @@ _HIDDEN_LOG = (
 _JSON_LOG = "json log in a shard directory; shards must be eval logs"
 
 
-def check_s3_location(location: str, error: type[Exception] = ValueError) -> None:
-    """Refuse an S3 URL that the S3 helpers would read as another key.
+_URL_PARSED_AWAY = ("#", "?", "\t", "\r", "\n")
+"""Key characters a reader that splits an s3:// URL with `urlparse` loses."""
 
-    They take the bucket and key with `urlparse`, which drops a `#` or `?`
-    and the text after it, removes tab, CR and LF characters, and strips
-    leading slashes from the key: `s3://bucket/logs/run#tag.eval` would
-    read, write and delete `logs/run`. Other locations are not checked.
+
+def url_parsed_bucket_and_key(location: str) -> tuple[str, str]:
+    """Bucket and key as a reader that splits the URL with `urlparse` takes them.
+
+    Inspect's own splitter is literal (see `s3_bucket_and_key`); this models the
+    readers that are not, which is what `check_s3_location` refuses a name for.
+    """
+    parsed = urlparse(location)
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def check_s3_location(location: str, error: type[Exception] = ValueError) -> None:
+    """Refuse an S3 URL that a URL-parsing reader would read as another key.
+
+    Such a reader drops a `#` or `?` and the text after it, removes tab, CR and
+    LF characters, and strips leading slashes from the key, so
+    `s3://bucket/logs/run#tag.eval` reads, writes and deletes `logs/run`.
+    Inspect's own splitter keeps them, but a shard set is listed by key prefix
+    and read by other tools, so these names stay refused here. Other locations
+    are not checked.
 
     Raises:
         Exception: `error`, when `location` is such an S3 URL.
     """
     if not is_s3_filename(location):
         return
-    bucket, key = s3_bucket_and_key(location)
-    if f"s3://{bucket}/{key}" != location:
-        raise error(
-            f"{location} cannot be used: S3 would read it as s3://{bucket}/{key}. "
-            "A '#' or '?' (and the text after it), a tab or line break, or a "
-            "leading '/' in the key is lost. Rename it."
-        )
+    _, key = s3_bucket_and_key(location)
+    if not key.startswith("/") and not any(c in key for c in _URL_PARSED_AWAY):
+        return
+    lenient_bucket, lenient_key = url_parsed_bucket_and_key(location)
+    raise error(
+        f"{location} cannot be used: S3 would read it as "
+        f"s3://{lenient_bucket}/{lenient_key}. "
+        "A '#' or '?' (and the text after it), a tab or line break, or a "
+        "leading '/' in the key is lost. Rename it."
+    )
 
 
 class StrayFile(NamedTuple):
