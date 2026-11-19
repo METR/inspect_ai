@@ -1891,8 +1891,8 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
 def list_all_eval_logs(
     log_dir: str, recursive: bool = True, progress: ReadEvalLogsProgress | None = None
 ) -> list[Log]:
-    # the listing's form of log_dir, as it names the files (`~` expanded)
-    root = filesystem(log_dir).path_as_uri(log_dir)
+    # the listing's form of log_dir, as it names the files (`~` expanded, `s3a` normalised)
+    root = filesystem(log_dir).dir_as_uri(log_dir)
     log_files = [
         info
         for info in list_eval_logs(log_dir, recursive=recursive)
