@@ -327,15 +327,28 @@ def is_shard_path(root: str, path: str) -> bool:
     Raises:
         ValueError: If ``path`` is not below ``root``.
     """
-    root_parts = _location_parts(root)
-    path_parts = _location_parts(path)
-    if path_parts[: len(root_parts)] != root_parts:
-        raise ValueError(f"{path} is not below {root}")
-    relative = path_parts[len(root_parts) :]
+    relative = _relative_parts(root, path)
     for depth, part in enumerate(relative[:-1]):
         if part.endswith(_SHARDS_SUFFIX) and part != _SHARDS_SUFFIX:
             return len(relative) - depth <= 3
     return False
+
+
+def is_nested_path(root: str, path: str) -> bool:
+    """Whether ``path`` is in a directory below ``root`` rather than directly in it.
+
+    Raises:
+        ValueError: If ``path`` is not below ``root``.
+    """
+    return len(_relative_parts(root, path)) > 1
+
+
+def _relative_parts(root: str, path: str) -> list[str]:
+    root_parts = _location_parts(root)
+    path_parts = _location_parts(path)
+    if path_parts[: len(root_parts)] != root_parts:
+        raise ValueError(f"{path} is not below {root}")
+    return path_parts[len(root_parts) :]
 
 
 def _shard_sort_key(shard: ShardDir) -> tuple[bool, int, str]:
