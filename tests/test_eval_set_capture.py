@@ -521,13 +521,13 @@ def eval_set_verdict(
 def test_eval_set_capture_verdict_shuffle_changed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, earlier_log: bool
 ) -> None:
-    # under a limit a log of another shuffle holds other samples. eval_set runs
-    # the task fresh when it has only such logs, but once it has a log of the
-    # current shuffle it classifies every log of the task, so an incomplete log
-    # of another shuffle makes it resume from that log
+    # under a limit a log of another shuffle holds other samples, so eval_set
+    # neither reuses nor retries it: with only such logs it runs the task
+    # fresh, and with a complete log of the current shuffle it runs nothing
     log_dir = tmp_path / "logs"
+    mine: str | None = None
     if earlier_log:
-        run_eval_set(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
+        [mine] = run_eval_set(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
     [other] = run_eval_set(
         tmp_path / "other", [capture_task_one()], limit=2, sample_shuffle=2
     )
@@ -537,7 +537,7 @@ def test_eval_set_capture_verdict_shuffle_changed(
     other_location = log_dir / Path(local_path(other)).name
     write_eval_log(other_log, location=str(other_location))
 
-    expected = (other_location.name, False) if earlier_log else (None, None)
+    expected = (Path(local_path(mine)).name, True) if mine is not None else (None, None)
     assert (
         eval_set_verdict(log_dir, [capture_task_one()], limit=2, sample_shuffle=1)
         == expected
@@ -585,19 +585,19 @@ def test_eval_set_capture_verdict_newest_log(
 
 
 @pytest.mark.parametrize(
-    "first_limit,complete",
+    "first_limit",
     [
-        # the eval-set path reruns the task from the incomplete log even though
-        # a newer complete one exists, so the verdict does too
-        pytest.param(1, False, id="incomplete-wins"),
-        pytest.param(2, True, id="newest-wins"),
+        # the first log was recorded for another limit, so it is not considered
+        pytest.param(1, id="other-limit"),
+        # both match the limit, so the run that started last wins
+        pytest.param(2, id="same-limit"),
     ],
 )
 def test_eval_set_capture_verdict_logs_of_two_runs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first_limit: int, complete: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, first_limit: int
 ) -> None:
     # two runs of one task that did not resume each other (two task ids); the
-    # second, complete one is newer
+    # eval-set path keeps one log per task identifier, so the verdict does too
     log_dir = tmp_path / "logs"
     [first] = run_eval_set(log_dir, [capture_task_one()], limit=first_limit)
     [other] = run_eval_set(tmp_path / "other", [capture_task_one()], limit=2)
@@ -605,8 +605,9 @@ def test_eval_set_capture_verdict_logs_of_two_runs(
 
     tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()], limit=2)
 
-    assert tasks["capture_task_one"].log == (second if complete else first)
-    assert tasks["capture_task_one"].complete is complete
+    assert first != second
+    assert tasks["capture_task_one"].log == second
+    assert tasks["capture_task_one"].complete is True
 
 
 def test_eval_set_capture_verdict_default_log_dir(

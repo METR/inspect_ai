@@ -2135,9 +2135,9 @@ def _captured_task_logs(
 
     Lists and classifies logs as the eval-set path does, from headers only, but never cleans up or recovers a log, since both write to the log directory. So a crashed (`started`) log is incomplete whatever `incomplete_action` says (a `completion="definition"` resume of it applies the disposition). Logs of tasks outside the eval set are skipped rather than refused: refusing them is the eval-set path's or the runner's decision.
 
-    A task can have a latest log per task id (two runs that did not resume each other). The eval-set path reruns the task if any of them is incomplete, resuming from that log, so the verdict here does the same.
+    A task can have a latest log per task id (two runs that did not resume each other). The eval-set path keeps one of them, so the verdict here comes from the same one.
 
-    Under a `limit`, a task none of whose logs has the current sample shuffle has no verdict, since the eval-set path runs it fresh. A task with such a log is classified on all of its logs, other shuffles included, as the eval-set path classifies it.
+    Under a `limit`, a log of another sample shuffle holds other samples, so the eval-set path neither reuses nor retries it. It is left out here too, and a task left with no log has no verdict, since the path runs it fresh.
 
     Returns:
         The log and verdict of every task that has a usable log, by task identifier.
@@ -2147,18 +2147,11 @@ def _captured_task_logs(
     ]
     identifiers = {identifier for identifier, _ in all_tasks}
     logs = [
-        log for log in list_all_eval_logs(log_dir) if log.task_identifier in identifiers
+        log
+        for log in list_all_eval_logs(log_dir)
+        if log.task_identifier in identifiers
+        and not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
     ]
-    # try_eval's pending check: a task with no log of the current shuffle runs
-    # fresh. try_eval then classifies all logs, so a pending task with an
-    # incomplete log of another shuffle is also resumed from it, which looks
-    # like a bug in try_eval; a verdict can't express both, and reports the
-    # fresh run.
-    pending = identifiers - {
-        log.task_identifier
-        for log in logs
-        if not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
-    }
     complete_logs, incomplete_logs = list_latest_eval_logs(
         all_tasks,
         logs,
@@ -2172,8 +2165,7 @@ def _captured_task_logs(
     task_logs: dict[str, TaskLogVerdict] = {}
     for complete, group in ((True, complete_logs), (False, incomplete_logs)):
         for log in sorted(group, key=lambda log: log.info.mtime or 0):
-            if log.task_identifier not in pending:
-                task_logs[log.task_identifier] = TaskLogVerdict(log.info.name, complete)
+            task_logs[log.task_identifier] = TaskLogVerdict(log.info.name, complete)
     return task_logs
 
 
