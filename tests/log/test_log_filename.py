@@ -79,6 +79,12 @@ def test_eval_log_name_matches_recorder(
     assert name == recorder_key
 
 
+def test_eval_log_name_replaces_backslashes() -> None:
+    with environ_var("INSPECT_EVAL_LOG_FILE_PATTERN", "{task}_{id}"):
+        name = eval_log_name(task="a\\b", task_id="c\\d", created="1", model="m")
+    assert name == "1_a-b_c-d"
+
+
 def test_eval_log_name_matches_eval_location() -> None:
     with environ_var("INSPECT_EVAL_LOG_FILE_PATTERN", "{task}_{model}_{id}"):
         log = eval(Task(), model="mockllm/model")[0]

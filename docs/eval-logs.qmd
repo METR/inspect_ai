@@ -618,6 +618,8 @@ inspect eval ctf.py
 
 As with other log file oriented environment variables, you may find it convenient to define this in a `.env` file from the location where you run your evals.
 
+`eval_set()` reads only the logs directly in its log dir, so it refuses a pattern containing `/` or `\`.
+
 ## Log Commands {#sec-log-commands}
 
 We've shown a number of Python functions that let you work with eval logs from code. However, you may be writing an orchestration or visualisation tool in another language (e.g. TypeScript) where its not particularly convenient to call the Python API. The Inspect CLI has a few commands intended to make it easier to work with Inspect logs from other languages:

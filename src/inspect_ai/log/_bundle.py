@@ -85,6 +85,7 @@ def bundle_log_dir(
     output_dir: str | None = None,
     overwrite: bool = False,
     fs_options: dict[str, Any] = {},
+    recursive: bool = True,
 ) -> None:
     r"""Bundle a log_dir into a statically deployable viewer
 
@@ -97,6 +98,7 @@ def bundle_log_dir(
             Defaults to False.
         fs_options (dict[str, Any]): Optional. Additional arguments to pass through
             to the filesystem provider (e.g. `S3FileSystem`).
+        recursive (bool): Bundle log files in subdirectories too (defaults to True).
     """
     # resolve the log directory
     if not log_dir:
@@ -152,7 +154,7 @@ def bundle_log_dir(
             # create a logs dir and copy logs into it
             view_logs_dir = os.path.join(working_dir, log_dir_name)
             os.makedirs(view_logs_dir)
-            copy_log_files(log_dir, view_logs_dir, p.update, fs_options)
+            copy_log_files(log_dir, view_logs_dir, p.update, fs_options, recursive)
             p.update(25)
 
             # the copies' mtimes no longer order shards against their merged
@@ -290,11 +292,12 @@ def copy_log_files(
     target_dir: str,
     p: Callable[[int], None],
     fs_options: dict[str, Any] = {},
+    recursive: bool = True,
 ) -> None:
     log_fs = filesystem(log_dir, fs_options)
     if log_fs.exists(log_dir):
         eval_logs = log_files_from_ls(
-            log_fs.ls(log_dir, recursive=True), ["json", "eval"], False
+            log_fs.ls(log_dir, recursive=recursive), ["json", "eval"], False
         )
         if len(eval_logs) == 0:
             raise PrerequisiteError(
@@ -422,6 +425,7 @@ def _copy_viewer_to_log_dir(from_dir: str, to_dir: str, output_fs: Any) -> None:
 def embed_log_dir(
     log_dir: str | None = None,
     fs_options: dict[str, Any] = {},
+    recursive: bool = True,
 ) -> None:
     r"""Embed a log viewer into a log_dir.
 
@@ -434,6 +438,7 @@ def embed_log_dir(
         log_dir: (str | None): The log_dir to embed the viewer in.
         fs_options (dict[str, Any]): Optional. Additional arguments to pass through
             to the filesystem provider (e.g. `S3FileSystem`).
+        recursive (bool): List log files recursively (defaults to True).
     """
     from inspect_ai._display import display
 
@@ -453,7 +458,7 @@ def embed_log_dir(
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as working_dir:
         _prepare_viewer(working_dir, log_dir=".", abs_log_dir=log_dir)
-        write_log_listing(log_dir, output_dir=working_dir)
+        write_log_listing(log_dir, output_dir=working_dir, recursive=recursive)
         _copy_viewer_to_log_dir(working_dir, log_dir, log_fs)
 
     if log_fs.is_local():

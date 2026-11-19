@@ -305,7 +305,7 @@ def run_eval_set(log_dir: Path, tasks: list[Task], **kwargs: Any) -> list[str]:
         display="plain",
         **kwargs,
     )
-    return [Path(log.location).as_uri() for log in logs]
+    return [Path(local_path(log.location)).as_uri() for log in logs]
 
 
 def log_dir_state(log_dir: Path) -> list[tuple[Path, int, int]] | None:
@@ -670,6 +670,30 @@ def test_samples_for_limit() -> None:
     ]
     for count, limit, expected in cases:
         assert samples_for_limit(count, limit) == expected, (count, limit)
+
+
+def test_eval_set_reads_only_its_log_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    logs = tmp_path / "logs"
+    junk = logs / "retry" / "junk.eval"
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"PK\x03\x04 not an eval log")
+    run_eval_set(logs, [capture_task_one()], embed_viewer=True)
+    [log] = run_eval_set(logs, [capture_task_one()], embed_viewer=True)
+    Path(local_path(log)).rename(junk.with_name("moved.eval"))  # a readable one too
+    [task] = capture_logs(monkeypatch, tmp_path, logs, [capture_task_one()]).values()
+    assert task.log is None and task.complete is None
+    monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
+    run_eval_set(logs, [capture_task_one()])
+    assert len(list(logs.glob("*.eval"))) == 1
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("INSPECT_EVAL_LOG_FILE_PATTERN", "")  # restored afterwards
+    for i, pattern in enumerate(("{task}/{id}", "{task}\\{id}")):  # also from a .env
+        os.environ.pop("INSPECT_EVAL_LOG_FILE_PATTERN")
+        (tmp_path / ".env").write_text(f"INSPECT_EVAL_LOG_FILE_PATTERN={pattern}\n")
+        with pytest.raises(PrerequisiteError, match="INSPECT_EVAL_LOG_FILE_PATTERN"):
+            run_eval_set(tmp_path / f"fresh{i}", [capture_task_one()])
 
 
 # Golden values for the capture schema. These must NOT be changed for an

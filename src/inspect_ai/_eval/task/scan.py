@@ -609,7 +609,7 @@ async def _cleanup_orphan_scan_rows(
     )
 
     live_tids: set[str] = set()
-    for log_info in list_eval_logs(log_dir):
+    for log_info in list_eval_logs(log_dir, recursive=False):
         for summary in await read_eval_log_sample_summaries_async(log_info.name):
             if summary.uuid is not None:
                 live_tids.add(summary.uuid)

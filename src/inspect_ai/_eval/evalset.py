@@ -512,6 +512,13 @@ def eval_set(
     # recover it later.
     init_dotenv()
     ctl = resolve_ctl_server(ctl_server)
+    pattern = os.environ.get("INSPECT_EVAL_LOG_FILE_PATTERN", "")
+    if "/" in pattern or "\\" in pattern:
+        raise PrerequisiteError(
+            "INSPECT_EVAL_LOG_FILE_PATTERN must name a file, not a path: eval_set "
+            "reads only the logs directly in its log dir, so it cannot contain '/' "
+            "or '\\'."
+        )
     # clear a stale keep-alive intent left by a prior run in this process;
     # needed here as well as in eval_async because the all-reused short-circuit
     # parks without ever calling eval()
@@ -1113,10 +1120,10 @@ def eval_set(
             )
         _validate_sentinel(sentinel)
 
-        # list all logs currently in the log directory (update manifest if there are some)
-        all_logs = list_all_eval_logs(log_dir)
+        # list the log dir's own logs, not agent files below it (update manifest if any)
+        all_logs = list_all_eval_logs(log_dir, recursive=False)
         if len(all_logs) > 0:
-            write_log_dir_manifest(log_dir)
+            write_log_dir_manifest(log_dir, recursive=False)
 
         eval_set_args = EvalSetArgsInTaskIdentifier(
             config=config,
@@ -1268,7 +1275,10 @@ def eval_set(
         # if specified, bundle the output directory
         if bundle_dir:
             bundle_log_dir(
-                log_dir=log_dir, output_dir=bundle_dir, overwrite=bundle_overwrite
+                log_dir=log_dir,
+                output_dir=bundle_dir,
+                overwrite=bundle_overwrite,
+                recursive=False,
             )
 
         # report final status
@@ -1286,7 +1296,7 @@ def eval_set(
             print_scan_status(log_dir, scanner)
 
         # update manifest
-        write_log_dir_manifest(log_dir)
+        write_log_dir_manifest(log_dir, recursive=False)
 
         # emit end event
         run_coroutine(emit_eval_set_end(eval_set_id, log_dir))
@@ -1307,7 +1317,7 @@ def eval_set(
 
 @contextlib.contextmanager
 def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
-    embed_log_dir(log_dir=log_dir)
+    embed_log_dir(log_dir=log_dir, recursive=False)
 
     stop_event = threading.Event()
     last_state: frozenset[tuple[str, float | None]] = frozenset()
@@ -1316,7 +1326,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         nonlocal last_state
         while not stop_event.wait(interval):
             try:
-                logs = list_eval_logs(log_dir)
+                logs = list_eval_logs(log_dir, recursive=False)
                 current_state = frozenset((log.name, log.mtime) for log in logs)
                 if current_state != last_state:
                     write_log_listing(log_dir, logs=logs)
@@ -1329,7 +1339,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         yield
     finally:
         stop_event.set()
-        write_log_listing(log_dir)
+        write_log_listing(log_dir, recursive=False)
 
 
 def _register_reused_logs(success_logs: list[Log]) -> None:
@@ -1883,6 +1893,10 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
         return []
 
 
+# eval_set reads only the logs directly in its log dir; callers can check for this.
+EVAL_SET_DIRECT_LOGS_ONLY = True
+
+
 # list all eval logs
 # recursive=False and progress are used by inspect_flow
 def list_all_eval_logs(
@@ -2059,7 +2073,9 @@ def _captured_task_logs(
     ]
     identifiers = {identifier for identifier, _ in all_tasks}
     logs = [
-        log for log in list_all_eval_logs(log_dir) if log.task_identifier in identifiers
+        log
+        for log in list_all_eval_logs(log_dir, recursive=False)
+        if log.task_identifier in identifiers
     ]
     # try_eval's pending check: a task with no log of the current shuffle runs
     # fresh. try_eval then classifies all logs, so a pending task with an
@@ -2131,7 +2147,7 @@ def cleanup_older_eval_logs(
 ) -> None:
     logs = [
         log
-        for log in list_all_eval_logs(log_dir)
+        for log in list_all_eval_logs(log_dir, recursive=False)
         if log.header.eval.task_id in task_ids
     ]
     latest_completed_task_eval_logs(

@@ -2406,6 +2406,7 @@ def test_eval_set_bundle_when_all_complete(tmp_path: Path) -> None:
             log_dir=log_dir,
             output_dir=bundle_dir,
             overwrite=True,
+            recursive=False,
         )
 
 
@@ -2423,6 +2424,9 @@ def test_eval_set_bundle_after_retries_once(tmp_path: Path) -> None:
         return solve
 
     bundle_dir = tmp_path / "bundle"
+    junk = tmp_path / "logs" / "artifacts" / "u" / "x.eval"  # an agent's, not a log
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"PK\x03\x04 not an eval log")
     success, logs = eval_set(
         tasks=Task(
             dataset=[Sample(input="hello", target="hello")],
@@ -2441,7 +2445,7 @@ def test_eval_set_bundle_after_retries_once(tmp_path: Path) -> None:
     assert logs[0].status == "success"
     assert (bundle_dir / "index.html").exists()
     assert (bundle_dir / "logs" / "listing.json").exists()
-    assert len(list((bundle_dir / "logs").glob("*.eval"))) == 1
+    assert len(list((bundle_dir / "logs").rglob("*.eval"))) == 1
 
 
 def test_invalidation(tmp_path: Path):
@@ -2627,7 +2631,8 @@ def test_embed_viewer_writes_on_change() -> None:
     # one periodic update (with pre-fetched logs) + one final update on context exit
     assert mock_write.call_count == 2
     mock_write.assert_any_call("/fake/dir", logs=[log1])
-    mock_write.assert_any_call("/fake/dir")
+    mock_write.assert_any_call("/fake/dir", recursive=False)
+    mock_list.assert_called_with("/fake/dir", recursive=False)
 
 
 def test_embed_viewer_skips_when_unchanged() -> None:
@@ -2643,8 +2648,7 @@ def test_embed_viewer_skips_when_unchanged() -> None:
             time.sleep(0.3)  # let several ticks pass
 
     # no periodic updates (state never changed), but one final update on context exit
-    assert mock_write.call_count == 1
-    mock_write.assert_called_once_with("/fake/dir")
+    mock_write.assert_called_once_with("/fake/dir", recursive=False)
 
 
 def test_eval_set_embed_viewer(tmp_path: Path) -> None:

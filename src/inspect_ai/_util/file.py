@@ -725,6 +725,7 @@ def clean_filename_component(component: str) -> str:
     return (
         component.replace("_", "-")
         .replace("/", "-")
+        .replace("\\", "-")
         .replace(":", "-")
         .replace("+", "-")
     )
