@@ -246,13 +246,13 @@ async def get_log_files(
     # hiding or un-hiding a shard can leave the file count unchanged and
     # involve files older than the client's token (a merge landing, a merged
     # log deleted), and only full responses remove rows from the client's
-    # listing; a finished run whose shards are all hidden stays incremental
+    # listing; S3 mtimes are whole seconds, so a merge tying the token counts
     refresh = False
     if not show_shards:
         listing = await hide_merged_shards(logs, can_read)
         logs = listing.logs
         refresh = listing.visible_shards or (
-            listing.hiding_mtime is not None and listing.hiding_mtime > mtime
+            listing.hiding_mtime is not None and listing.hiding_mtime >= mtime
         )
 
     if len(logs) != file_count or refresh:
