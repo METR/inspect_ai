@@ -6,10 +6,10 @@ import zipfile
 import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import anyio
 import ijson  # type: ignore
+import psutil
 import pytest
 import zstandard
 from botocore.exceptions import ClientError
@@ -230,29 +230,43 @@ async def test_read_zstd_compressed_member(zstd_zip_file: Path) -> None:
         assert parsed["message"] == "hello zstd"
 
 
-@pytest.mark.timeout(10)
-async def test_closing_a_file_stream_does_not_wait_for_a_worker_thread(
-    test_zip_file: Path, monkeypatch: pytest.MonkeyPatch
+# thread method: a signal cannot end a run stuck in the shielded close this guards
+@pytest.mark.timeout(10, method="thread")
+@pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+async def test_a_cancelled_member_read_closes_its_file_with_no_worker_thread_free(
+    tmp_path: Path, method: int
 ) -> None:
-    """A member stream closes its source in-process.
+    """A cancelled read's cleanup closes the file in-process: no worker thread is free."""
+    path = tmp_path / "test.zip"
+    with zipfile.ZipFile(path, "w", method) as zf:
+        zf.writestr("member", os.urandom(200_000))
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    tokens, borrower = limiter.total_tokens, object()
 
-    The close runs in a cancelled read's cleanup, which cannot wait for a worker thread.
-    """
-    from inspect_ai._util import asyncfiles
+    async with AsyncFilesystem() as fs:
+        reader = AsyncZipReader(fs, str(path))
+        async with await reader.open_member("member") as member:
+            chunks = aiter(member)
+            assert await anext(chunks)
+            limiter.total_tokens = 1
+            await limiter.acquire_on_behalf_of(borrower)
+            try:
+                with anyio.CancelScope() as scope:
+                    scope.cancel()
+                    await anext(chunks)
+                assert scope.cancelled_caught
+                assert not _is_open(path)
+            finally:
+                limiter.release_on_behalf_of(borrower)
+                limiter.total_tokens = tokens
+        assert await reader.read_member_fully("member")
 
-    stream = asyncfiles._AnyIOFileByteReceiveStream(str(test_zip_file), 0, None)
-    assert await stream.receive(16)
 
-    async def never_returns(*args: Any, **kwargs: Any) -> None:
-        await anyio.sleep_forever()
-
-    monkeypatch.setattr(anyio.to_thread, "run_sync", never_returns)
-    assert stream._file is not None
-    wrapped = stream._file.wrapped
-    await stream.aclose()
-
-    assert stream._file is None
-    assert wrapped.closed
+def _is_open(path: Path) -> bool:
+    return any(
+        os.path.realpath(f.path) == os.path.realpath(path)
+        for f in psutil.Process().open_files()
+    )
 
 
 async def test_read_member_fully_deflated(test_zip_file: Path) -> None:
