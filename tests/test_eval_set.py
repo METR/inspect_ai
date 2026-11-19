@@ -837,6 +837,20 @@ def test_eval_set_unknown_task_raises_prerequisite_error() -> None:
             )
 
 
+def test_eval_set_refuses_a_log_file_pattern_with_a_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # eval_set resumes only from the logs directly in its log dir
+    monkeypatch.setenv("INSPECT_EVAL_LOG_FILE_PATTERN", "{task}/{id}")
+    with pytest.raises(PrerequisiteError, match="INSPECT_EVAL_LOG_FILE_PATTERN"):
+        eval_set(
+            tasks=Task(dataset=[Sample(input="hello")]),
+            log_dir=str(tmp_path / "logs"),
+            model="mockllm/model",
+        )
+    assert not (tmp_path / "logs").exists()
+
+
 # Task file content used by the cwd-fallback tests below. Defined here so
 # `resolve_tasks` can load it from a temp dir representing the cwd.
 _CWD_TASK_FILE_SOURCE = """

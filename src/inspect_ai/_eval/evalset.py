@@ -512,6 +512,11 @@ def eval_set(
     # sees, and the value is passed down explicitly so the inner call can't
     # recover it later.
     init_dotenv()
+    if "/" in os.environ.get("INSPECT_EVAL_LOG_FILE_PATTERN", ""):
+        raise PrerequisiteError(
+            "INSPECT_EVAL_LOG_FILE_PATTERN must name a file, not a path: eval_set "
+            "reads only the logs directly in its log dir, so it cannot contain '/'."
+        )
     ctl = resolve_ctl_server(ctl_server)
     # clear a stale keep-alive intent left by a prior run in this process;
     # needed here as well as in eval_async because the all-reused short-circuit
