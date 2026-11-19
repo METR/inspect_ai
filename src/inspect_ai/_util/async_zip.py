@@ -392,9 +392,7 @@ class _ZipMemberBytes:
                         crc = zlib.crc32(chunk, crc)
                     yield chunk
             finally:
-                # a cancelled read must still close the source
-                with anyio.CancelScope(shield=True):
-                    await byte_stream.aclose()
+                await byte_stream.aclose()
         else:
             # Decompress using the appropriate method
             stream = CompressedToUncompressedStream(byte_stream, self._method)
@@ -406,8 +404,7 @@ class _ZipMemberBytes:
                     yield chunk
             finally:
                 self._active_streams.discard(stream)
-                with anyio.CancelScope(shield=True):
-                    await stream.aclose()
+                await stream.aclose()
         # reached only when the stream was consumed to its end: a stream
         # closed early is never treated as verified
         if self._verify is not None:
