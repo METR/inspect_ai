@@ -580,30 +580,43 @@ def test_spend_cap_cancels_task_registered_after_cap_reached(tmp_path: Path) -> 
 
 
 @pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
-def test_spend_cap_reports_the_call_that_reached_it(tmp_path: Path) -> None:
+def test_spend_cap_reports_and_caches_the_call_that_reached_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from inspect_ai.hooks import Hooks, ModelUsageData, hooks
 
+    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path / "cache"))
     reported: list[float | None] = []
 
     @hooks("spend_usage_hook", "Record reported model usage")
     class UsageHooks(Hooks):
         @override
         async def on_model_usage(self, data: ModelUsageData) -> None:
+            # a real hook awaits; the call's own task is already cancelled here
+            await anyio.sleep(0)
             reported.append(data.usage.total_cost)
 
     calls: list[str] = []
-    success, _ = eval_set(
-        _spend_task(),
-        model=_spend_model(calls),
-        spend_cap=0.005,
-        max_samples=1,
-        log_dir=str(tmp_path),
-        display="none",
-    )
+    task = _spend_task(samples=1)
+    task.solver = generate(cache=True)
 
-    assert not success
+    def run(cap: float) -> bool:
+        success, _ = eval_set(
+            task,
+            model=_spend_model(calls),
+            spend_cap=cap,
+            log_dir=str(tmp_path / "logs"),
+            display="none",
+        )
+        return success
+
+    assert not run(0.005)
     assert len(calls) == 1
     assert reported == [0.01]
+
+    # the resumed sample is answered from the cache, so nothing more is spent
+    assert run(1)
+    assert len(calls) == 1
 
 
 async def test_spend_cap_warns_and_continues_when_save_fails(

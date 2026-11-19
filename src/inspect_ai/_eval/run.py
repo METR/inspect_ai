@@ -932,7 +932,12 @@ async def run_task_retry_attempts(
                         )
                     elif result.status == "error":
                         retry = True
-                    retry = retry and item.retries_remaining > 0
+                    retry = (
+                        retry
+                        and item.retries_remaining > 0
+                        # the dispatcher starts nothing more once the cap is reached
+                        and not spend_cap_reached()
+                    )
 
                     # a drain/plain cancel issued while this attempt was
                     # tearing down (or between run_one iterations) stamped
@@ -1122,6 +1127,15 @@ async def run_task_retry_attempts(
                 # dispatch complete (only the `break` paths reach here) —
                 # stop the reporter so the task group can exit
                 reporter_scope.cancel()
+
+            # the spend cap stops dispatch with tasks still queued: release
+            # their log entries, which would otherwise live for the whole run
+            if spend_cap_reached():
+                with anyio.CancelScope(shield=True):
+                    for item in pending:
+                        await item.options.logger.discard(
+                            keep_destination=True, keep_buffer=True
+                        )
         finally:
             remove_dispatch_waker(wake.set)
             remove_task_dispatcher(dispatcher_stats)

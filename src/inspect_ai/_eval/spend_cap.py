@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 SPEND_FILE = ".eval-set-spend.json"
 FLUSH_INTERVAL = 30
-
-
 SPEND_CAP_REACHED = "Eval-set spend cap reached"
 
 

@@ -1176,6 +1176,10 @@ def openai_reported_cost(usage: BaseModel) -> float | None:
     provider key (`is_byok`), `cost` is only OpenRouter's fee and the
     provider's charge is `cost_details.upstream_inference_cost`: the charge is
     their sum, and unknown when either is missing.
+
+    Only a charge above zero counts. A zero would replace the cost data's
+    estimate with nothing, and a service that reports no real charge may still
+    send the field.
     """
 
     def dollars(value: object) -> float | None:
@@ -1192,8 +1196,8 @@ def openai_reported_cost(usage: BaseModel) -> float | None:
             if isinstance(details, dict)
             else None
         )
-        return cost + upstream if cost is not None and upstream is not None else None
-    return cost
+        cost = cost + upstream if cost is not None and upstream is not None else None
+    return cost if cost is not None and cost > 0 else None
 
 
 def model_output_from_openai(

@@ -1199,7 +1199,7 @@ async def _eval_async_inner(
                             )
                     return EvalLogs(results)
 
-                if task_source is not None and parallel > 1:
+                if task_source is not None and parallel > 1 and not spend_cap_reached():
                     # live (TaskSource-driven) run: one eval_run fed additional
                     # tasks while in progress. Injected tasks — from the source's
                     # next_tasks(), its sample/task_complete return values, or

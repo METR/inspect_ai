@@ -413,8 +413,8 @@ class ModelAPI(abc.ABC):
     def reports_cost(self) -> bool:
         """Whether the service reports what each call was charged.
 
-        A model that does needs no cost data for `cost_limit` or an eval-set
-        spend cap: the reported charge is the call's cost.
+        A model that does needs no cost data for an eval-set spend cap: the
+        reported charge is the call's cost.
         """
         return False
 
@@ -1752,14 +1752,21 @@ class Model:
                     self, output.usage, role=self.role, output=output
                 )
 
-                # send telemetry to hooks
-                await emit_model_usage(
-                    model_name=str(self), usage=output.usage, call_duration=output.time
-                )
-                await send_telemetry_legacy(
-                    "model_usage",
-                    json.dumps(dict(model=str(self), usage=output.usage.model_dump())),
-                )
+                # send telemetry to hooks. The call that reaches the spend cap
+                # has already cancelled its own task: shield the hooks so they
+                # still hear about it, and the cache write below still runs.
+                with anyio.CancelScope(shield=spend_cap_reached()):
+                    await emit_model_usage(
+                        model_name=str(self),
+                        usage=output.usage,
+                        call_duration=output.time,
+                    )
+                    await send_telemetry_legacy(
+                        "model_usage",
+                        json.dumps(
+                            dict(model=str(self), usage=output.usage.model_dump())
+                        ),
+                    )
 
             if cache_policy and cache_entry:
                 cache_store(entry=cache_entry, output=output)
@@ -3288,8 +3295,8 @@ def record_and_check_model_usage(
 async def _deliver_spend_cap_cancellation() -> None:
     """Raise the spend cap's task cancellation before the caller continues.
 
-    Without a checkpoint the cancellation waits for the next suspension, which
-    may come after the sample has been scored.
+    A cancelled task runs on until its next suspension. Suspending here stops
+    the call's caller from doing more work with a result the cap has cut off.
     """
     if spend_cap_reached():
         await anyio.lowlevel.checkpoint()

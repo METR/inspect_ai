@@ -1303,7 +1303,17 @@ async def test_reported_charge_becomes_the_calls_cost(stream: bool) -> None:
         # OpenAI reports no charge.
         pytest.param({}, None, id="none-reported"),
         pytest.param({"cost": 0.5, "is_byok": False}, 0.5, id="reported"),
-        pytest.param({"cost": 0}, 0.0, id="free"),
+        # A zero is not a charge: cost data, if any, prices the call.
+        pytest.param({"cost": 0}, None, id="zero"),
+        pytest.param(
+            {
+                "cost": 0,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.2},
+            },
+            0.2,
+            id="byok-no-fee",
+        ),
         # With the account's own provider key, `cost` is only OpenRouter's fee.
         pytest.param(
             {
@@ -1394,3 +1404,67 @@ def test_spend_cap_counts_reported_charges_without_cost_data(
     assert len(calls) == 3
     saved = json.loads((tmp_path / ".eval-set-spend.json").read_text())
     assert saved["spent_usd"] == pytest.approx(3 * 2.34e-06)
+
+
+def test_cost_limit_needs_cost_data_even_when_charges_are_reported(
+    tmp_path: Any,
+) -> None:
+    """Without cost data `cost_limit` could not check a call that reports no charge."""
+    from openai import DefaultAsyncHttpxClient
+
+    from inspect_ai import Task, eval_set
+    from inspect_ai._util.error import PrerequisiteError
+    from inspect_ai.dataset import Sample
+    from inspect_ai.solver import generate
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_OPENROUTER_COMPLETION, request=request)
+
+    with pytest.raises(PrerequisiteError, match="cost_limit requires cost data"):
+        eval_set(
+            Task(dataset=[Sample(input="question")], solver=generate()),
+            model=get_model(
+                "openai-api/openrouter/meta-llama/llama-3.3-70b-instruct",
+                api_key="test-key",
+                base_url="http://test/v1",
+                http_client=DefaultAsyncHttpxClient(
+                    transport=httpx2.MockTransport(handler)
+                ),
+                memoize=False,
+            ),
+            cost_limit=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+
+
+async def test_reported_charge_on_the_text_completions_route() -> None:
+    from openai import DefaultAsyncHttpxClient
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 0,
+                "model": "meta-llama/llama-3.3-70b-instruct",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                # the usage OpenRouter sent with the chat completion above
+                "usage": _OPENROUTER_COMPLETION["usage"],
+            },
+            request=request,
+        )
+
+    model = get_model(
+        "openai-api-completions/openrouter/meta-llama/llama-3.3-70b-instruct",
+        api_key="test-key",
+        base_url="http://test/v1",
+        http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
+        memoize=False,
+    )
+
+    output = await model.generate("Reply with the single word: ok")
+
+    assert output.usage is not None
+    assert output.usage.total_cost == 2.34e-06
