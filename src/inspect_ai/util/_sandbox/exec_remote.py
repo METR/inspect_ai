@@ -13,6 +13,7 @@ import os
 import shlex
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, Union, cast
@@ -204,6 +205,10 @@ class _StartResult(BaseModel):
     """The server supports the poll `wait` param. Older servers omit it."""
     poll_replay: bool = False
     """The server supports the poll `job_key` param (METR fork)."""
+    start_wait: bool = False
+    """The server supports the start `wait` param (METR fork)."""
+    result: "_PollResult | None" = None
+    """The first poll's result, from a start that waited (METR fork)."""
 
 
 class _PollResult(BaseModel):
@@ -214,6 +219,9 @@ class _PollResult(BaseModel):
     seq: int
     stdout: str
     stderr: str
+
+
+_StartResult.model_rebuild()
 
 
 class _KillResult(BaseModel):
@@ -324,6 +332,11 @@ def _wait_concurrency() -> int:
             f"{WAIT_CONCURRENCY_ENV}={value!r} is not an integer; using {default}.",
         )
     return default
+
+
+_START_WAITS: weakref.WeakKeyDictionary[object, bool] = weakref.WeakKeyDictionary()
+"""Whether each sandbox's tools take a start that waits, learned from its first
+start reply: the start's params forbid a field the server does not know."""
 
 
 class _ServerReplyError(RuntimeError):
@@ -447,6 +460,8 @@ class ExecRemoteProcess:
         self._held = False  # the last poll waited on the server
         self._awaitable = False  # set by exec_remote_awaitable()
         self._replay = False  # polls name the job's key (see `_poll`)
+        self._initial_result: _PollResult | None = None  # from a start that waited
+        self._start_waited = 0.0  # seconds a start that waited took
         self._small_output = False  # the last poll returned output, not a full reply
         self._last_seq: int = 0
         self._killed = False
@@ -553,15 +568,43 @@ class ExecRemoteProcess:
         if (user := tools_user_param(self._sandbox, self._options.user)) is not None:
             params["user"] = user
 
+        setting = _server_wait_setting()
+        self._fork_polling = setting is not None
+        # An awaitable command's start can wait for it in the sandbox, so a
+        # quick one takes one request: its reply carries the first poll's result.
+        hold = 0.0
+        if setting and self._awaitable and not stdin_open:
+            if _START_WAITS.get(self._sandbox):
+                hold = min(EXTENDED_MAX_WAIT_SECONDS, self._rpc_timeout / 2)
+                # the caller's timeout starts once the command has: don't wait past it
+                timeout = getattr(self._options, "timeout", None)
+                if timeout is not None:
+                    hold = min(hold, timeout)
+        slot = await self._wait_slot() if hold else None
+        overrides: dict[str, object] = {}
+        if slot is not None:
+            params["wait"] = hold
+            overrides["concurrency"] = False
+        sent = time.monotonic()
         try:
-            result = await self._rpc("exec_remote_start", params, _StartResult)
+            async with slot.semaphore if slot is not None else contextlib.nullcontext():
+                result = await self._rpc(
+                    "exec_remote_start",
+                    params,
+                    _StartResult,
+                    GenericJSONRPCErrorMapper,
+                    **overrides,
+                )
         except BaseException:
             await self._kill_key()
             raise
         self._pid = result.pid
         self._started_at = time.monotonic()
-        setting = _server_wait_setting()
-        self._fork_polling = setting is not None
+        with contextlib.suppress(TypeError):  # a sandbox no weak reference can name
+            _START_WAITS[self._sandbox] = result.start_wait
+        if result.result is not None:
+            self._initial_result = result.result
+            self._start_waited = self._started_at - sent
         self._replay = self._fork_polling and result.poll_replay
         # A waiting poll that overlaps a stdin write (same ack_seq) can return
         # output twice, so stdin_open processes do not wait on the server.
@@ -729,7 +772,31 @@ class ExecRemoteProcess:
             await anyio.sleep(OUTPUT_REPOLL_SECONDS)
         self._small_output = not full
 
+    async def _wait_slot(self) -> ConcurrencySemaphore | None:
+        """A slot for a request that waits on the server, or `None` if all are taken.
+
+        Never waits for one: the request then goes out without a wait.
+        """
+        slot = await get_or_create_semaphore(
+            "exec-remote-wait", _wait_concurrency(), None, False
+        )
+        if slot.value >= 1:
+            return slot
+        warn_once(
+            logger,
+            f"exec_remote requests waiting on the sandbox reached the "
+            f"{WAIT_CONCURRENCY_ENV} limit ({slot.concurrency}): more are sent "
+            "without a wait and paced on the host.",
+        )
+        return None
+
     async def _poll(self) -> _PollResult:
+        if self._initial_result is not None:
+            # the first poll's result came with the start reply
+            result, self._initial_result = self._initial_result, None
+            self._last_seq = result.seq
+            self._held = True
+            return result
         recovery_deadline: float | None = None
         retried_repoll_error: RuntimeError | None = None
 
@@ -770,18 +837,9 @@ class ExecRemoteProcess:
             wait = self._server_wait()
             slot: ConcurrencySemaphore | None = None
             if wait and self._max_wait is not None:
-                slot = await get_or_create_semaphore(
-                    "exec-remote-wait", _wait_concurrency(), None, False
-                )
-                if slot.value < 1:
-                    warn_once(
-                        logger,
-                        f"exec_remote polls waiting on the sandbox reached the "
-                        f"{WAIT_CONCURRENCY_ENV} limit ({slot.concurrency}): more "
-                        "are sent without a wait and paced on the host.",
-                    )
-                    # Never wait for a free slot: send the poll without a wait.
-                    wait, slot = 0, None
+                slot = await self._wait_slot()
+                if slot is None:
+                    wait = 0
             self._held = bool(wait)
             if wait:
                 params["wait"] = wait
@@ -1023,10 +1081,9 @@ async def exec_remote_awaitable(
     from .limits import SandboxEnvironmentLimits
 
     opts = options or ExecRemoteCommonOptions()
-    proc = await exec_remote_streaming(
-        sandbox, cmd, sandbox_default_poll_interval, opts
-    )
+    proc = ExecRemoteProcess(sandbox, cmd, opts, sandbox_default_poll_interval)
     proc._awaitable = True
+    await proc._start()
 
     # Accumulate output chunks with memory limiting
     output_limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
@@ -1034,6 +1091,9 @@ async def exec_remote_awaitable(
     stderr_buffer = CircularByteBuffer(output_limit)
 
     timeout = opts.timeout if isinstance(opts, ExecRemoteAwaitableOptions) else None
+    if timeout is not None:
+        # a start that waited (METR fork) has already given the command that long
+        timeout = max(0.0, timeout - proc._start_waited)
 
     try:
         with anyio.fail_after(timeout):

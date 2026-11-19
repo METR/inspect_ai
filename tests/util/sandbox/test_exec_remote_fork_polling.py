@@ -392,3 +392,154 @@ async def test_polls_name_no_key_to_a_server_that_does_not_take_one() -> None:
     _ = [event async for event in proc]
 
     assert all("job_key" not in params for params in _polls(sandbox))
+
+
+# --- a start that waits --------------------------------------------------------------
+
+_STARTED = _rpc({"pid": 42, "poll_wait": True, "poll_replay": True, "start_wait": True})
+
+
+def _started_with(result: dict[str, Any]) -> str:
+    """A start reply that carries the first poll's result."""
+    return _rpc({"pid": 43, "poll_wait": True, "start_wait": True, "result": result})
+
+
+_DONE = {"state": "completed", "exit_code": 3, "seq": 1, "stdout": "out", "stderr": ""}
+
+
+def _starts(sandbox: AsyncMock) -> list[dict[str, Any]]:
+    return [
+        params for method, params in sandbox.requests if method == "exec_remote_start"
+    ]
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_a_quick_awaitable_command_takes_one_request_once_the_tools_are_known() -> (
+    None
+):
+    sandbox = _make_scripted_sandbox([_STARTED, _poll_response(), _started_with(_DONE)])
+
+    await exec_remote_awaitable(sandbox, ["first"], 5)  # learns the tools wait
+    result = await exec_remote_awaitable(sandbox, ["second"], 5)
+
+    assert (result.returncode, result.stdout) == (3, "out")
+    assert [method for method, _ in sandbox.requests] == [
+        "exec_remote_start",
+        "exec_remote_poll",
+        "exec_remote_start",
+    ]
+    first, second = _starts(sandbox)
+    assert "wait" not in first
+    assert second["wait"] == er.EXTENDED_MAX_WAIT_SECONDS
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_a_command_still_running_after_its_start_waited_is_polled_on() -> None:
+    running = {
+        "state": "running",
+        "exit_code": None,
+        "seq": 1,
+        "stdout": "a",
+        "stderr": "",
+    }
+    sandbox = _make_scripted_sandbox(
+        [
+            _STARTED,
+            _poll_response(),
+            _started_with(running),
+            _poll_response(stdout="b", seq=2),
+        ]
+    )
+
+    await exec_remote_awaitable(sandbox, ["first"], 5)
+    result = await exec_remote_awaitable(sandbox, ["second"], 5)
+
+    assert result.stdout == "ab"
+    # the poll acknowledges what came with the start
+    assert _polls(sandbox)[-1]["ack_seq"] == 1
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_a_start_waits_no_longer_than_the_callers_timeout() -> None:
+    sandbox = _make_scripted_sandbox([_STARTED, _poll_response(), _started_with(_DONE)])
+
+    await exec_remote_awaitable(sandbox, ["first"], 5)
+    await exec_remote_awaitable(
+        sandbox, ["second"], 5, ExecRemoteAwaitableOptions(timeout=2)
+    )
+
+    assert _starts(sandbox)[1]["wait"] == 2
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_the_time_a_start_waited_counts_towards_the_callers_timeout() -> None:
+    running = {
+        "state": "running",
+        "exit_code": None,
+        "seq": 1,
+        "stdout": "",
+        "stderr": "",
+    }
+    sandbox = _answering(
+        {
+            "exec_remote_start": _started_with(running),
+            "exec_remote_poll": _RUNNING,
+            "exec_remote_kill_key": _rpc({"killed": True}),
+        }
+    )
+    er._START_WAITS[sandbox] = True
+    scripted = sandbox.exec.side_effect
+
+    async def slow_start(*args: Any, **kwargs: Any) -> ExecResult[str]:
+        if json.loads(kwargs["input"])["method"] == "exec_remote_start":
+            await anyio.sleep(0.3)  # the command ran this long inside the start
+        return await scripted(*args, **kwargs)
+
+    sandbox.exec.side_effect = slow_start
+
+    with pytest.raises(TimeoutError):
+        with anyio.fail_after(5):
+            await exec_remote_awaitable(
+                sandbox, ["sleep", "999"], 5, ExecRemoteAwaitableOptions(timeout=0.3)
+            )
+
+    # the timeout had run out when the start returned: no poll went out first
+    assert sandbox.methods == ["exec_remote_start", "exec_remote_kill_key"]
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_a_streamed_commands_start_does_not_wait() -> None:
+    sandbox = _make_scripted_sandbox([_STARTED, _poll_response()])
+    er._START_WAITS[sandbox] = True
+
+    proc = await exec_remote_streaming(sandbox, ["cmd"], 5)
+    _ = [event async for event in proc]
+
+    assert "wait" not in _starts(sandbox)[0]
+
+
+@pytest.mark.usefixtures("waits_on")
+async def test_a_start_with_no_slot_to_wait_in_does_not_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(er.WAIT_CONCURRENCY_ENV, "1")
+    sandbox = _make_scripted_sandbox([_STARTED, _poll_response()])
+    er._START_WAITS[sandbox] = True
+    slot = await get_or_create_semaphore("exec-remote-wait", 1, None, False)
+
+    async with slot.semaphore:  # another command's request is waiting
+        await exec_remote_awaitable(
+            sandbox, ["cmd"], 5, ExecRemoteAwaitableOptions(poll_interval=5)
+        )
+
+    assert "wait" not in _starts(sandbox)[0]
+
+
+@pytest.mark.usefixtures("waits_off")
+async def test_no_start_waits_when_waits_are_off() -> None:
+    sandbox = _make_scripted_sandbox([_STARTED, _poll_response()])
+    er._START_WAITS[sandbox] = True
+
+    await exec_remote_awaitable(sandbox, ["cmd"], 5)
+
+    assert "wait" not in _starts(sandbox)[0]

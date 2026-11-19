@@ -27,6 +27,10 @@ class SubmitParams(BaseModel):
     job_key: JobKey | None = None
     """Host-chosen key for the job, so the host can kill it with
     exec_remote_kill_key when the reply carrying its pid is lost."""
+    wait: float = Field(default=0, ge=0, le=60)
+    """Seconds to wait, once the job has started, for it to exit or buffer
+    output. The reply then carries the first poll's result, so a quick command
+    takes one request (METR fork). Ignored with stdin_open."""
     model_config = {"extra": "forbid"}
 
 
@@ -77,6 +81,10 @@ class SubmitResult(BaseModel):
     """The server supports PollParams.wait."""
     poll_replay: bool = True
     """The server supports PollParams.job_key (METR fork)."""
+    start_wait: bool = True
+    """The server supports SubmitParams.wait (METR fork)."""
+    result: "PollResult | None" = None
+    """The first poll's result, for a start that asked to wait."""
 
 
 class PollResult(BaseModel):
@@ -141,3 +149,6 @@ class CloseStdinResult(OutputResult):
     """Result from exec_remote_close_stdin."""
 
     pass
+
+
+SubmitResult.model_rebuild()
