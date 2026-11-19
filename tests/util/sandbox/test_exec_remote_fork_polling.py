@@ -6,10 +6,11 @@ Unset, exec_remote polls as upstream does, which test_exec_remote.py covers.
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import anyio
 import pytest
+from tenacity import wait_none
 from test_exec_remote import (
     _RUNNING,
     _make_scripted_sandbox,
@@ -353,3 +354,41 @@ async def test_an_error_the_server_reports_for_a_poll_is_raised_without_a_retry(
         _ = [event async for event in proc]
 
     assert len(_polls(sandbox)) == 1
+
+
+# --- a final reply lost in transit ---------------------------------------------------
+
+
+@pytest.mark.usefixtures("waits_off")
+async def test_a_poll_whose_final_reply_was_lost_is_repeated_with_the_jobs_key() -> (
+    None
+):
+    """The server answers a poll that names the job's key after the job ended."""
+    sandbox = _make_scripted_sandbox(
+        [
+            _rpc({"pid": 42, "poll_replay": True}),
+            RuntimeError("command terminated with exit code 137"),  # the reply, lost
+            _poll_response(stdout="out", exit_code=3, seq=1),
+        ]
+    )
+
+    with patch(
+        "inspect_ai.util._sandbox.exec_remote.wait_exponential_jitter",
+        new=lambda *a, **k: wait_none(),
+    ):
+        result = await exec_remote_awaitable(sandbox, ["cmd"], 5)
+
+    assert (result.returncode, result.stdout) == (3, "out")
+    start, lost, repeated = sandbox.requests
+    assert repeated == lost
+    assert lost[1]["job_key"] == start[1]["job_key"]
+
+
+@pytest.mark.usefixtures("waits_off")
+async def test_polls_name_no_key_to_a_server_that_does_not_take_one() -> None:
+    sandbox = _make_scripted_sandbox([_start_response(42), _poll_response()])
+    proc = await exec_remote_streaming(sandbox, ["cmd"], 5)
+
+    _ = [event async for event in proc]
+
+    assert all("job_key" not in params for params in _polls(sandbox))

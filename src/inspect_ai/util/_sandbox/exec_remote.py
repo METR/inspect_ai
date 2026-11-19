@@ -202,6 +202,8 @@ class _StartResult(BaseModel):
     pid: int
     poll_wait: bool = False
     """The server supports the poll `wait` param. Older servers omit it."""
+    poll_replay: bool = False
+    """The server supports the poll `job_key` param (METR fork)."""
 
 
 class _PollResult(BaseModel):
@@ -444,6 +446,7 @@ class ExecRemoteProcess:
         self._started_at = 0.0
         self._held = False  # the last poll waited on the server
         self._awaitable = False  # set by exec_remote_awaitable()
+        self._replay = False  # polls name the job's key (see `_poll`)
         self._small_output = False  # the last poll returned output, not a full reply
         self._last_seq: int = 0
         self._killed = False
@@ -559,6 +562,7 @@ class ExecRemoteProcess:
         self._started_at = time.monotonic()
         setting = _server_wait_setting()
         self._fork_polling = setting is not None
+        self._replay = self._fork_polling and result.poll_replay
         # A waiting poll that overlaps a stdin write (same ack_seq) can return
         # output twice, so stdin_open processes do not wait on the server.
         if result.poll_wait and not stdin_open and setting is not False:
@@ -758,6 +762,11 @@ class ExecRemoteProcess:
                 raise retried_repoll_error
 
             params: dict[str, object] = {"pid": self._pid, "ack_seq": self._last_seq}
+            if self._replay:
+                # With the key, the server answers a poll repeated after the
+                # command ended with its final reply again, so a reply lost in
+                # transit does not lose the exit status and the last output.
+                params["job_key"] = self._job_key
             wait = self._server_wait()
             slot: ConcurrencySemaphore | None = None
             if wait and self._max_wait is not None:

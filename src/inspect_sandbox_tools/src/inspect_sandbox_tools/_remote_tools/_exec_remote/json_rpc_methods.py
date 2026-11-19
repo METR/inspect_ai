@@ -40,7 +40,9 @@ async def exec_remote_start(params: SubmitParams) -> SubmitResult:
 @validated_json_rpc_method(PollParams)
 async def exec_remote_poll(params: PollParams) -> PollResult:
     """Poll job state and get incremental output."""
-    return await controller.poll(params.pid, params.ack_seq, params.wait)
+    return await controller.poll(
+        params.pid, params.ack_seq, params.wait, params.job_key
+    )
 
 
 @validated_json_rpc_method(KillParams)

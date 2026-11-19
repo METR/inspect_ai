@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from inspect_sandbox_tools._util.common_types import ToolException
 from inspect_sandbox_tools._util.user_switch import RunAs
@@ -11,6 +12,11 @@ from .tool_types import (
     PollResult,
     WriteStdinResult,
 )
+
+# METR fork: how long, and how much of, the final replies of ended jobs are kept
+# for a host whose poll lost one (see Controller.poll).
+_FINAL_REPLY_SECONDS = 300.0
+_FINAL_REPLY_CHARS = 32 * 1024 * 1024
 
 
 class Controller:
@@ -36,6 +42,11 @@ class Controller:
         # Keys killed before a start with them spawned a process; a start with
         # one is refused, including a retry after the killed start's spawn failed.
         self._refused_keys: set[str] = set()
+        # METR fork: the keys of running jobs, by PID, and the ended jobs whose
+        # final reply can still be sent again, oldest first, by key, with when
+        # they ended.
+        self._running_keys: dict[int, str] = {}
+        self._final_replies: dict[str, tuple[Job, float]] = {}
 
     async def submit(
         self,
@@ -100,6 +111,7 @@ class Controller:
             self._jobs[job.pid] = job
             if job_key is not None:
                 self._keyed_jobs[job_key] = job
+                self._running_keys[job.pid] = job_key
             spawned.set_result(job)
             await self._initialize(job, input=input, stdin_open=stdin_open)
             return job.pid
@@ -149,9 +161,20 @@ class Controller:
         await self.kill(job.pid, ack_seq=0)
         return KillKeyResult(killed=job.killed)
 
-    async def poll(self, pid: int, ack_seq: int, wait: float = 0) -> PollResult:
-        """Get job state and incremental output. Auto-cleanup on terminal state."""
-        job = self._get_job(pid)
+    async def poll(
+        self, pid: int, ack_seq: int, wait: float = 0, job_key: str | None = None
+    ) -> PollResult:
+        """Get job state and incremental output. Auto-cleanup on terminal state.
+
+        The reply that reports a job's end is the last the host asks for, so if
+        it is lost the host repeats the poll for a job that is gone. A poll
+        that names the job's key (METR fork) is then answered with that reply
+        again, for `_FINAL_REPLY_SECONDS` after the end and while the replies
+        kept are within `_FINAL_REPLY_CHARS`.
+        """
+        job = self._jobs.get(pid)
+        if job is None:
+            return self._final_reply(pid, ack_seq, job_key)
         result = await job.poll(ack_seq, wait)
 
         # Auto-cleanup after terminal state. Use pop to avoid KeyError if a
@@ -161,8 +184,36 @@ class Controller:
                 job.retire()
                 self._retired_jobs.append(job)
                 await job.cleanup()
+                self._keep_final_reply(job, self._running_keys.pop(pid, None))
 
         return result
+
+    def _final_reply(self, pid: int, ack_seq: int, job_key: str | None) -> PollResult:
+        """The final reply of the ended job `job_key` again, if it is still kept."""
+        self._drop_final_replies()
+        kept = self._final_replies.get(job_key) if job_key is not None else None
+        # The PID too: a new job may have been given an ended job's.
+        if kept is None or kept[0].pid != pid:
+            raise ToolException(f"No job found with pid {pid}")
+        return kept[0].replay(ack_seq)
+
+    def _keep_final_reply(self, job: Job, job_key: str | None) -> None:
+        if job_key is None:
+            job.forget_unacked()  # nothing can ask for it again
+            return
+        self._final_replies[job_key] = (job, time.monotonic())
+        self._drop_final_replies()
+
+    def _drop_final_replies(self) -> None:
+        """Forget the final replies kept too long, then the oldest while too much is kept."""
+        expired = time.monotonic() - _FINAL_REPLY_SECONDS
+        kept = sum(job.unacked_chars for job, _ in self._final_replies.values())
+        for key, (job, ended) in list(self._final_replies.items()):
+            if ended > expired and kept <= _FINAL_REPLY_CHARS:
+                break
+            kept -= job.unacked_chars
+            job.forget_unacked()
+            del self._final_replies[key]
 
     async def kill(self, pid: int, ack_seq: int) -> KillResult:
         """Terminate a running job and return any remaining buffered output."""
@@ -174,6 +225,8 @@ class Controller:
             job.retire()
             self._retired_jobs.append(job)
             await job.cleanup()
+            self._running_keys.pop(pid, None)
+            job.forget_unacked()  # a kill's reply is never asked for again
         return KillResult(seq=seq, stdout=stdout, stderr=stderr)
 
     async def write_stdin(self, pid: int, data: str, ack_seq: int) -> WriteStdinResult:
@@ -193,6 +246,8 @@ class Controller:
         jobs = [*self._jobs.values(), *self._retired_jobs]
         self._jobs.clear()
         self._retired_jobs.clear()
+        self._running_keys.clear()
+        self._final_replies.clear()
 
         async def shutdown_job(job: Job) -> None:
             errors: list[Exception] = []

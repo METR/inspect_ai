@@ -37,6 +37,9 @@ class PollParams(BaseModel):
     ack_seq: int
     wait: float = Field(default=0, ge=0, le=60)
     """Seconds to wait for the job to exit or buffer output before replying."""
+    job_key: JobKey | None = None
+    """The key the job was started with. With it, a poll repeated after the job
+    ended is answered with the final reply again (METR fork)."""
     model_config = {"extra": "forbid"}
 
 
@@ -72,6 +75,8 @@ class SubmitResult(BaseModel):
     pid: int
     poll_wait: bool = True
     """The server supports PollParams.wait."""
+    poll_replay: bool = True
+    """The server supports PollParams.job_key (METR fork)."""
 
 
 class PollResult(BaseModel):
