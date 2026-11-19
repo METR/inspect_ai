@@ -6,7 +6,9 @@ import zipfile
 import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
+import anyio
 import ijson  # type: ignore
 import pytest
 import zstandard
@@ -226,6 +228,30 @@ async def test_read_zstd_compressed_member(zstd_zip_file: Path) -> None:
         data = b"".join(chunks)
         parsed = json.loads(data.decode("utf-8"))
         assert parsed["message"] == "hello zstd"
+
+
+async def test_closing_a_file_stream_does_not_wait_for_a_worker_thread(
+    test_zip_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member stream closes its source from a cancelled task's cleanup.
+
+    A worker thread may never be scheduled there, so a close that waits for one
+    never returns: the member's async generator is left running and the reader
+    that closes it deadlocks (Scout's interrupted eval-log reads did).
+    """
+    from inspect_ai._util import asyncfiles
+
+    stream = asyncfiles._AnyIOFileByteReceiveStream(str(test_zip_file), 0, None)
+    assert await stream.receive(16)
+
+    async def never_returns(*args: Any, **kwargs: Any) -> None:
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", never_returns)
+    with anyio.fail_after(10):
+        await stream.aclose()
+
+    assert stream._file is None
 
 
 async def test_read_member_fully_deflated(test_zip_file: Path) -> None:
