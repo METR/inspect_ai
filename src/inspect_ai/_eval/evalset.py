@@ -6,7 +6,6 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Set, TypeVar, cast
 
 import rich
@@ -56,7 +55,7 @@ from inspect_ai._eval.task.scan import (
     verify_selection_scan_dir,
 )
 from inspect_ai._sentinel._config import SentinelSpec, resolve_sentinel_spec
-from inspect_ai._util._async import run_coroutine, tg_collect
+from inspect_ai._util._async import run_coroutine
 from inspect_ai._util.azure import call_with_azure_auth_fallback
 from inspect_ai._util.dotenv import init_dotenv
 from inspect_ai._util.error import PrerequisiteError
@@ -77,7 +76,6 @@ from inspect_ai.log._file import (
     EvalLogInfo,
     ReadEvalLogsProgress,
     list_eval_logs,
-    read_eval_log_async,
     read_eval_log_headers,
     write_log_dir_manifest,
     write_log_listing,
@@ -85,7 +83,7 @@ from inspect_ai.log._file import (
 from inspect_ai.log._log import EvalConfig
 from inspect_ai.log._recorders.buffer.buffer import cleanup_sample_buffers_for_log
 from inspect_ai.log._recorders.buffer.database import sample_buffer_shutdown_pending
-from inspect_ai.log._shards._walk import is_nested_path, is_shard_path
+from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.model import (
     GenerateConfigArgs,
     Model,
@@ -1901,41 +1899,14 @@ def list_all_eval_logs(
         # a shard's log belongs to its merged log, never to the task itself
         if not is_shard_path(root, info.name)
     ]
-    own = [info for info in log_files if not is_nested_path(root, info.name)]
-    headers = dict(
-        zip([info.name for info in own], read_eval_log_headers(own, progress))
-    )
-    headers.update(
-        _readable_headers([info for info in log_files if info.name not in headers])
-    )
+    log_headers = read_eval_log_headers(log_files, progress)
+    task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
     return [
-        Log(
-            info=info,
-            header=headers[info.name],
-            task_identifier=task_identifier(headers[info.name], None),
+        Log(info=info, header=header, task_identifier=task_identifier)
+        for info, header, task_identifier in zip(
+            log_files, log_headers, task_identifiers
         )
-        for info in log_files
-        if info.name in headers
     ]
-
-
-def _readable_headers(log_files: list[EvalLogInfo]) -> dict[str, EvalLog]:
-    """The headers of ``log_files`` by name, skipping with a warning each one that can't be read.
-
-    For logs in folders below the log dir, which can hold files that are not eval logs.
-    """
-
-    async def read(info: EvalLogInfo) -> tuple[str, EvalLog | None]:
-        try:
-            return info.name, await read_eval_log_async(info, header_only=True)
-        except Exception as ex:
-            logger.warning(
-                f"Skipping {info.name}, which is not a readable eval log: {ex}"
-            )
-            return info.name, None
-
-    read_all = tg_collect([partial(read, info) for info in log_files])
-    return {name: header for name, header in run_coroutine(read_all) if header}
 
 
 # get the latest logs (cleaning if requested). returns tuple of successful/unsuccessful

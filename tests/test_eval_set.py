@@ -50,7 +50,6 @@ from inspect_ai._eval.evalset import (
 from inspect_ai._eval.loader import resolve_tasks
 from inspect_ai._eval.task.resolved import ResolvedTask
 from inspect_ai._eval.task.task import PreviousTask, task_with
-from inspect_ai._util.async_zip import TornReadError
 from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import basename, filesystem, local_path, size_in_mb
@@ -242,30 +241,6 @@ def test_latest_completed_task_eval_logs() -> None:
         assert len(list_eval_logs(clean_dir.as_posix())) == 1
     finally:
         shutil.rmtree(clean_dir, ignore_errors=True)
-
-
-@pytest.mark.parametrize(
-    "junk",
-    [
-        pytest.param("artifacts/uuid-1/junk.eval", id="nested"),
-        pytest.param("junk.eval", id="in-the-log-dir"),
-    ],
-)
-def test_list_all_eval_logs_skips_only_a_nested_unreadable_log(
-    tmp_path: Path, junk: str
-) -> None:
-    # A folder below the log dir can hold anyone's files: a sample's artifacts, say.
-    log = next(Path("tests/test_eval_set").glob("*.json"))
-    shutil.copy2(log, tmp_path / log.name)
-    (tmp_path / junk).parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / junk).write_bytes(b"PK\x03\x04 not an eval log")
-
-    if "/" not in junk:
-        with pytest.raises(TornReadError):
-            list_all_eval_logs(tmp_path.as_posix())
-        return
-    logs = list_all_eval_logs(tmp_path.as_posix())
-    assert [basename(each.info.name) for each in logs] == [log.name]
 
 
 def _sweep_log(path: Path, eval_id: str, mtime: float, status: str, run_id: str) -> Log:
