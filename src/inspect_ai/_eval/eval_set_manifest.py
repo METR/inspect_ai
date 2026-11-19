@@ -303,9 +303,11 @@ def _split_ids(
     limit: int | tuple[int, int] | None,
     sample_shuffle: bool | int | None,
     fail_on_error: bool | float | None,
+    task_names: Iterable[str] | None = None,
 ) -> list[str | int] | None:
     """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
     selected = [id for id in ids if id is not None]
+    named = {name.lower() for name in task_names or []} | {task.task.name.lower()}
     try:
         # a worker's selector also matches any other sample whose id normalises alike
         every = Counter(
@@ -322,10 +324,10 @@ def _split_ids(
     unsplittable = (
         len(selected) < len(ids)
         or aliased
-        # a worker reads `<task>:<id>` as naming the task (resolve_task_sample_ids)
+        # a worker reads `<task>:<id>` as naming any task in the set, and drops the
+        # id when the name is another task's (resolve_task_sample_ids)
         or any(
-            isinstance(id, str)
-            and id.partition(":")[0].lower() == task.task.name.lower()
+            isinstance(id, str) and id.partition(":")[0].lower() in named
             for id in selected
             if ":" in str(id)
         )
@@ -422,7 +424,9 @@ def build_eval_set_capture(
                 sequence=task.sequence,
                 identifier=identifier,
                 samples=len(ids),
-                sample_ids=_split_ids(task, ids, limit, sample_shuffle, fail_on_error),
+                sample_ids=_split_ids(
+                    task, ids, limit, sample_shuffle, fail_on_error, task_names
+                ),
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
                 complete=task_log.complete if task_log else None,

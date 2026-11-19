@@ -787,6 +787,20 @@ def test_eval_set_capture_sample_ids(
     assert tasks["capture_task_ids"].sample_ids == expected
 
 
+def test_capture_splits_no_task_whose_id_names_another_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A worker drops a `<task>:<id>` selector naming another task, running nothing."""
+    tasks = capture_logs(
+        monkeypatch,
+        tmp_path,
+        tmp_path / "logs",
+        [capture_task_ids(ids=["capture_task_two:1", "b"]), capture_task_two()],
+    )
+
+    assert tasks["capture_task_ids"].sample_ids is None
+
+
 def test_eval_set_capture_verdict_ignores_shard_logs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
