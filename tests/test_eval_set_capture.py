@@ -764,6 +764,9 @@ def test_sample_ids_selected_limit() -> None:
         ({}, {"early_stopping": True}, None),
         # each worker would judge the count over its part only
         ({}, {"fail_on_error": 2}, None),
+        # the eval set's value overrides the task's
+        ({"fail_on_error": 2}, {"fail_on_error": True}, None),
+        ({"fail_on_error": False}, {"fail_on_error": 2}, ["a", "b", 3]),
     ],
 )
 def test_eval_set_capture_sample_ids(

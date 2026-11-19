@@ -302,6 +302,7 @@ def _split_ids(
     ids: list[str | int | None],
     limit: int | tuple[int, int] | None,
     sample_shuffle: bool | int | None,
+    fail_on_error: bool | float | None,
 ) -> list[str | int] | None:
     """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
     selected = [id for id in ids if id is not None]
@@ -331,7 +332,11 @@ def _split_ids(
         or (limit is not None and bool(sample_shuffle or task.task.dataset.shuffled))
         or task.task.sample_source is not None
         or task.task.early_stopping is not None
-        or not isinstance(task.task.fail_on_error, bool | None)
+        # the eval set's value overrides the task's, as the run applies it (run.py)
+        or not isinstance(
+            task.task.fail_on_error if fail_on_error is None else fail_on_error,
+            bool | None,
+        )
     )
     return None if unsplittable else selected
 
@@ -349,6 +354,7 @@ def build_eval_set_capture(
     scan: "EvalSetCaptureScan | None" = None,
     task_logs: Mapping[str, TaskLogVerdict],
     sample_shuffle: bool | int | None = None,
+    fail_on_error: bool | float | None = None,
 ) -> EvalSetCapture:
     """Build a capture manifest for a set of resolved tasks.
 
@@ -364,6 +370,7 @@ def build_eval_set_capture(
         scan: Serialized scanner configuration, or `None` when the definition declares no scanners.
         task_logs: Each task's log and completion verdict by task identifier, for tasks that have a log.
         sample_shuffle: Eval-set level sample shuffle.
+        fail_on_error: Eval-set level `fail_on_error`, which overrides each task's.
 
     Returns:
         Capture manifest for the eval set.
@@ -415,7 +422,7 @@ def build_eval_set_capture(
                 sequence=task.sequence,
                 identifier=identifier,
                 samples=len(ids),
-                sample_ids=_split_ids(task, ids, limit, sample_shuffle),
+                sample_ids=_split_ids(task, ids, limit, sample_shuffle, fail_on_error),
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
                 complete=task_log.complete if task_log else None,
