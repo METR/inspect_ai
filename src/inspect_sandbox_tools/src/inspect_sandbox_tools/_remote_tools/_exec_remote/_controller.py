@@ -1,7 +1,13 @@
 import asyncio
+import re
 import time
+from pathlib import Path
 
 from inspect_sandbox_tools._util.common_types import ToolException
+from inspect_sandbox_tools._util.server_dir import (
+    open_private_append,
+    read_private_text,
+)
 from inspect_sandbox_tools._util.user_switch import RunAs
 
 from ._job import Job
@@ -17,6 +23,13 @@ from .tool_types import (
 # for a host whose poll lost one (see Controller.poll).
 _FINAL_REPLY_SECONDS = 300.0
 _FINAL_REPLY_CHARS = 32 * 1024 * 1024
+
+# METR fork: what is said of a job an earlier server started (see
+# Controller.persist_launches).
+_RESTARTED = (
+    "was started before the sandbox tools server restarted, and may still be running"
+)
+_JOB_KEY = re.compile(r"[0-9a-f]{32}")
 
 
 class Controller:
@@ -47,6 +60,50 @@ class Controller:
         # they ended.
         self._running_keys: dict[int, str] = {}
         self._final_replies: dict[str, tuple[Job, float]] = {}
+        # METR fork: where started and refused keys are recorded, and the keys an
+        # earlier server recorded as started (see persist_launches).
+        self._journal: Path | None = None
+        self._restarted: set[str] = set()
+
+    def persist_launches(self, path: Path) -> None:
+        """Record the keys of the jobs this server starts in `path`, and learn an earlier server's.
+
+        The CLI starts a new server when it finds none running, and the host
+        resends a request that got no answer. So when a server dies with a start
+        in flight, the resent start reaches a server that knows nothing of the
+        first and would run the command a second time. With the keys on disk,
+        a server refuses to start a key an earlier one started, says of it that
+        the command may still be running where it would have said "no job", and
+        still refuses a key that was killed before its start arrived.
+
+        A key is recorded before its process is started, and a start whose key
+        cannot be recorded is refused.
+        """
+        try:
+            records = read_private_text(path).splitlines()
+        except FileNotFoundError:
+            records = []
+        for record in records:
+            action, _, key = record.partition(" ")
+            if not _JOB_KEY.fullmatch(key):
+                continue  # a record cut short by the end of its server
+            if action == "started":
+                self._restarted.add(key)
+            elif action == "refused":
+                self._refused_keys.add(key)
+        self._journal = path
+
+    def _record(self, action: str, job_key: str) -> None:
+        if self._journal is None:
+            return
+        try:
+            with open_private_append(self._journal) as journal:
+                # On a line of its own: a record cut short must not join this one.
+                journal.write(f"\n{action} {job_key}\n")
+        except (OSError, RuntimeError) as ex:  # RuntimeError: not a file of ours
+            raise ToolException(
+                f"exec_remote job {job_key} could not be recorded as {action}: {ex}"
+            ) from ex
 
     async def submit(
         self,
@@ -88,6 +145,10 @@ class Controller:
                 raise ToolException(
                     f"exec_remote job {job_key} was killed before it started"
                 )
+            if job_key in self._restarted:
+                raise ToolException(
+                    f"exec_remote job {job_key} {_RESTARTED}; it is not started again"
+                )
             if job_key in self._spawning:
                 raise ToolException(f"exec_remote job {job_key} is already starting")
             if job_key in self._keyed_jobs:
@@ -97,6 +158,8 @@ class Controller:
             self._spawning[job_key] = spawned
         try:
             try:
+                if job_key is not None:
+                    self._record("started", job_key)
                 job = await Job.spawn(
                     command,
                     stdin=input is not None or stdin_open,
@@ -146,8 +209,15 @@ class Controller:
         spawn fails), then kills it, which also ends any stdin write the start
         is waiting on. It returns once the job has terminated.
         """
-        if job_key not in self._keyed_jobs:
+        if job_key in self._restarted:
+            raise ToolException(
+                f"exec_remote job {job_key} {_RESTARTED}; this server cannot kill it"
+            )
+        if job_key not in self._keyed_jobs and job_key not in self._refused_keys:
+            # Refused from here on even if it cannot be recorded, which is raised:
+            # a later server would then not know to refuse the start.
             self._refused_keys.add(job_key)
+            self._record("refused", job_key)
         spawned = self._spawning.get(job_key)
         if spawned is not None:
             job = await asyncio.shield(spawned)
@@ -194,6 +264,10 @@ class Controller:
         kept = self._final_replies.get(job_key) if job_key is not None else None
         # The PID too: a new job may have been given an ended job's.
         if kept is None or kept[0].pid != pid:
+            if job_key in self._restarted:
+                raise ToolException(
+                    f"No job found with pid {pid}: exec_remote job {job_key} {_RESTARTED}"
+                )
             raise ToolException(f"No job found with pid {pid}")
         return kept[0].replay(ack_seq)
 
