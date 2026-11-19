@@ -1121,8 +1121,7 @@ def eval_set(
             )
         _validate_sentinel(sentinel)
 
-        # list all logs currently in the log directory (update manifest if there are some)
-        # not recursive: folders below the log dir (artifacts/) hold agent-written files
+        # only the log dir's own logs: artifacts/ below it holds agent-written files
         all_logs = list_all_eval_logs(log_dir, recursive=False)
         if len(all_logs) > 0:
             write_log_dir_manifest(log_dir, recursive=False)
