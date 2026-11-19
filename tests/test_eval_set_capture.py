@@ -813,6 +813,8 @@ def test_eval_set_capture_verdict_in_a_home_relative_directory(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     [location] = run_eval_set(tmp_path / "logs", [capture_task_one()])
+    # a newer shard of the run, which the task's own log stands for
+    run_eval_set(tmp_path / "logs" / "run.shards" / "0", [capture_task_one()])
 
     tasks = capture_logs(monkeypatch, tmp_path, Path("~/logs"), [capture_task_one()])
 

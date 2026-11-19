@@ -1890,11 +1890,13 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
 def list_all_eval_logs(
     log_dir: str, recursive: bool = True, progress: ReadEvalLogsProgress | None = None
 ) -> list[Log]:
+    # the listing's form of log_dir, as it names the files (`~` expanded)
+    root = filesystem(log_dir).path_as_uri(log_dir)
     log_files = [
         info
         for info in list_eval_logs(log_dir, recursive=recursive)
         # a shard's log belongs to its merged log, never to the task itself
-        if not _is_shard_log(log_dir, info.name)
+        if not is_shard_path(root, info.name)
     ]
     log_headers = read_eval_log_headers(log_files, progress)
     task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
@@ -1904,13 +1906,6 @@ def list_all_eval_logs(
             log_files, log_headers, task_identifiers
         )
     ]
-
-
-def _is_shard_log(log_dir: str, name: str) -> bool:
-    try:
-        return is_shard_path(log_dir, name)
-    except ValueError:  # the listing names it in another form, such as `~` expanded
-        return False
 
 
 # get the latest logs (cleaning if requested). returns tuple of successful/unsuccessful
