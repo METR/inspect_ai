@@ -107,7 +107,7 @@ class EvalSetCaptureTask(BaseModel):
     sample_ids: list[str | int] | None = None
     """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split between workers by them. Added in version 5.
 
-    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part).
+    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part). Each id is an fnmatch pattern to the worker that receives it, so a runner escapes one holding `*`, `?` or `[`.
     """
 
     epochs: int
