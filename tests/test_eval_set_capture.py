@@ -19,6 +19,7 @@ from inspect_ai._eval.eval_set_manifest import (
     EvalSetCapture,
     EvalSetCaptureTask,
     sample_ids_selected,
+    samples_for_limit,
     task_args_hash,
 )
 from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
@@ -70,7 +71,7 @@ def capture_task_two() -> Task:
 def capture_task_ids(
     early_stopping: bool = False,
     fail_on_error: float | None = None,
-    ids: list[str | int] | None = None,
+    ids: list[str | int | None] | None = None,
     source: bool = False,
 ) -> Task:
     samples = [Sample(input="x", target="x", id=id) for id in ids or ["a", "b", 3]]
@@ -707,6 +708,19 @@ def test_eval_set_capture_verdict_crashed_log(
         buffer.cleanup()
 
 
+def test_samples_for_limit() -> None:
+    cases: list[tuple[int, int | tuple[int, int] | None, int]] = [
+        (10, None, 10),
+        (10, 3, 3),
+        (2, 3, 2),
+        (10, (2, 5), 3),
+        (10, (12, 15), 0),
+        (4, (2, 15), 2),
+    ]
+    for count, limit, expected in cases:
+        assert samples_for_limit(count, limit) == expected, (count, limit)
+
+
 def test_sample_ids_selected_limit() -> None:
     cases: list[tuple[int, int | tuple[int, int] | None, list[int]]] = [
         (10, None, list(range(1, 11))),
@@ -730,6 +744,8 @@ def test_sample_ids_selected_limit() -> None:
         ({"sample_id": [3, "a"]}, {}, ["a", 3]),
         # each worker would draw its own subset
         ({"limit": 2, "sample_shuffle": True}, {}, None),
+        # a sample with no id answers to its position
+        ({}, {"ids": ["a", None, 3]}, None),
         # "01" and 1 select each other
         ({}, {"ids": ["01", 1, "b"]}, None),
         ({}, {"ids": ["capture_task_ids:a", "b"]}, None),

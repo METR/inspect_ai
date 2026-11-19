@@ -70,8 +70,7 @@ def sample_id_filter(
     """
     sample_ids = sample_id if isinstance(sample_id, list) else [sample_id]
     patterns = [normalise_sample_id(id) for id in sample_ids]
-    # a pattern with no wildcard matches only itself, so a set lookup does what
-    # fnmatch would without trying every pattern against every sample
+    # a pattern with no wildcard matches only itself: look it up instead of fnmatch-ing it
     literal = {os.path.normcase(pat) for pat in patterns if not _has_wildcard(pat)}
     wildcards = [pat for pat in patterns if _has_wildcard(pat)]
 

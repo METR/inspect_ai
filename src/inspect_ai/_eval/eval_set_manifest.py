@@ -192,6 +192,27 @@ def task_args_hash(task_args: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def samples_for_limit(count: int, limit: int | tuple[int, int] | None) -> int:
+    """Number of dataset samples selected by a `limit`.
+
+    Args:
+        count: Total samples in the dataset.
+        limit: Eval limit (first n samples, or [start, stop] range).
+
+    Returns:
+        Number of samples that would run.
+    """
+    if isinstance(limit, tuple):
+        start, stop = limit
+        if start >= count:
+            count = 0
+        else:
+            count = min(stop, count) - start
+    elif isinstance(limit, int):
+        count = min(limit, count)
+    return count
+
+
 def samples_selected(
     dataset: Dataset,
     limit: int | tuple[int, int] | None,
@@ -237,7 +258,7 @@ def samples_selected(
         Number of samples that would run.
     """
     if sample_id is None:
-        return len(range(len(dataset))[slice(*limit) if isinstance(limit, tuple) else slice(limit)])
+        return samples_for_limit(len(dataset), limit)
     return len(sample_ids_selected(dataset, None, sample_id, task, task_names))
 
 
@@ -292,7 +313,8 @@ def _split_ids(
         or len({normalise_sample_id(id) for id in selected}) < len(selected)
         # a worker reads `<task>:<id>` as naming the task (resolve_task_sample_ids)
         or any(
-            isinstance(id, str) and id.partition(":")[0].lower() == task.task.name.lower()
+            isinstance(id, str)
+            and id.partition(":")[0].lower() == task.task.name.lower()
             for id in selected
             if ":" in str(id)
         )
