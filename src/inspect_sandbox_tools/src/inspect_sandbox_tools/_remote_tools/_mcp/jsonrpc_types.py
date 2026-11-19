@@ -15,8 +15,8 @@ float-integral and bool ids there, so a late error for request 7 sent as
 ``7.0`` still correlates), and non-spec extra fields on envelopes round-trip
 to the host instead of being stripped (``extra="allow"``).
 
-These are not the only JSON-RPC models in the package: ``_cli/main.py`` has
-its own request/notification shapes for the host→injectable control RPC — a
+These are not the only JSON-RPC models in the package: ``_cli/jsonrpc_incoming.py``
+has its own request/notification shapes for the host→injectable control RPC — a
 different, deliberately laxer wire contract.
 """
 
