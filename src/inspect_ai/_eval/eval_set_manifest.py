@@ -208,7 +208,8 @@ def samples_for_limit(count: int, limit: int | tuple[int, int] | None) -> int:
         if start >= count:
             count = 0
         else:
-            count = min(stop, count) - start
+            # a stop below start selects nothing, as slicing the dataset does
+            count = max(0, min(stop, count) - start)
     elif isinstance(limit, int):
         count = min(limit, count)
     return count
