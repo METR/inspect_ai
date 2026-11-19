@@ -312,10 +312,14 @@ def _split_ids(
     try:
         # a worker's selector also matches any other sample whose id normalises alike
         every = Counter(
-            normalise_sample_id(sample.id if sample.id is not None else position)
+            os.path.normcase(
+                normalise_sample_id(sample.id if sample.id is not None else position)
+            )
             for position, sample in enumerate(task.task.dataset, start=1)
         )
-        aliased = any(every[normalise_sample_id(id)] > 1 for id in selected)
+        aliased = any(
+            every[os.path.normcase(normalise_sample_id(id))] > 1 for id in selected
+        )
     except ValueError:  # a digit `int` refuses, such as "²"
         aliased = True
     unsplittable = (

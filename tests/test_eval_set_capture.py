@@ -746,6 +746,8 @@ def test_sample_ids_selected_limit() -> None:
         ({"limit": 2, "sample_shuffle": True}, {}, None),
         # a sample with no id answers to its position
         ({}, {"ids": ["a", None, 3]}, None),
+        # position 3, outside the limit, answers to 3
+        ({"limit": 2}, {"ids": [3, "b", None]}, None),
         # "01" and 1 select each other
         ({}, {"ids": ["01", 1, "b"]}, None),
         # 1 also selects "01", which the limit leaves out
@@ -802,6 +804,17 @@ def test_eval_set_capture_verdict_in_a_shard_directory(
     [location] = run_eval_set(log_dir, [capture_task_one()])
 
     tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
+
+    assert tasks["capture_task_one"].log == location
+
+
+def test_eval_set_capture_verdict_in_a_home_relative_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    [location] = run_eval_set(tmp_path / "logs", [capture_task_one()])
+
+    tasks = capture_logs(monkeypatch, tmp_path, Path("~/logs"), [capture_task_one()])
 
     assert tasks["capture_task_one"].log == location
 
