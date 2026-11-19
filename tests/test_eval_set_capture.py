@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -874,6 +875,26 @@ def test_eval_set_runs_and_resumes_beside_junk_among_artifacts(tmp_path: Path) -
             display="plain",
         )
         assert success, attempt
+
+
+def test_eval_set_embeds_its_viewer_beside_junk_among_artifacts(tmp_path: Path) -> None:
+    # the embedded viewer's listing reads the log dir too
+    log_dir = tmp_path / "logs"
+    junk = log_dir / "artifacts" / "uuid-1" / "junk.eval"
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"PK\x03\x04 not an eval log")
+
+    success, _ = eval_set(
+        tasks=[capture_task_one()],
+        model="mockllm/model",
+        log_dir=str(log_dir),
+        display="plain",
+        embed_viewer=True,
+    )
+
+    assert success
+    listing = json.loads((log_dir / "listing.json").read_text())
+    assert listing.keys() == {log.name for log in log_dir.glob("*.eval")}
 
 
 def test_eval_set_capture_verdict_in_a_shard_directory(

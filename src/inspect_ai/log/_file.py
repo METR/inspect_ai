@@ -1314,6 +1314,7 @@ def write_log_listing(
     output_dir: str | None = None,
     fs_options: dict[str, Any] = {},
     hide_merged_shards: bool = True,
+    recursive: bool = True,
 ) -> None:
     """Write a listing file for a log directory.
 
@@ -1328,6 +1329,7 @@ def write_log_listing(
         to the filesystem provider (e.g. `S3FileSystem`).
       hide_merged_shards (bool): Leave out shard logs that a finished merged
         log already covers, as the view server's listing does.
+      recursive (bool): List log files recursively (defaults to True).
     """
     # resolve log dir to full path
     fs = filesystem(log_dir)
@@ -1336,7 +1338,7 @@ def write_log_listing(
 
     # list eval logs
     if logs is None:
-        logs = list_eval_logs(log_dir)
+        logs = list_eval_logs(log_dir, recursive=recursive)
 
     if hide_merged_shards:
         logs = without_merged_shards(logs)

@@ -2641,7 +2641,8 @@ def test_embed_viewer_writes_on_change() -> None:
     # one periodic update (with pre-fetched logs) + one final update on context exit
     assert mock_write.call_count == 2
     mock_write.assert_any_call("/fake/dir", logs=[log1])
-    mock_write.assert_any_call("/fake/dir")
+    mock_write.assert_any_call("/fake/dir", recursive=False)
+    mock_list.assert_called_with("/fake/dir", recursive=False)
 
 
 def test_embed_viewer_skips_when_unchanged() -> None:
@@ -2658,7 +2659,7 @@ def test_embed_viewer_skips_when_unchanged() -> None:
 
     # no periodic updates (state never changed), but one final update on context exit
     assert mock_write.call_count == 1
-    mock_write.assert_called_once_with("/fake/dir")
+    mock_write.assert_called_once_with("/fake/dir", recursive=False)
 
 
 def test_eval_set_embed_viewer(tmp_path: Path) -> None:

@@ -1315,7 +1315,7 @@ def eval_set(
 
 @contextlib.contextmanager
 def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
-    embed_log_dir(log_dir=log_dir)
+    embed_log_dir(log_dir=log_dir, recursive=False)
 
     stop_event = threading.Event()
     last_state: frozenset[tuple[str, float | None]] = frozenset()
@@ -1324,7 +1324,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         nonlocal last_state
         while not stop_event.wait(interval):
             try:
-                logs = list_eval_logs(log_dir)
+                logs = list_eval_logs(log_dir, recursive=False)
                 current_state = frozenset((log.name, log.mtime) for log in logs)
                 if current_state != last_state:
                     write_log_listing(log_dir, logs=logs)
@@ -1337,7 +1337,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         yield
     finally:
         stop_event.set()
-        write_log_listing(log_dir)
+        write_log_listing(log_dir, recursive=False)
 
 
 def _register_reused_logs(success_logs: list[Log]) -> None:
