@@ -748,6 +748,10 @@ def test_sample_ids_selected_limit() -> None:
         ({}, {"ids": ["a", None, 3]}, None),
         # "01" and 1 select each other
         ({}, {"ids": ["01", 1, "b"]}, None),
+        # 1 also selects "01", which the limit leaves out
+        ({"limit": 2}, {"ids": ["a", 1, "01"]}, None),
+        # a digit `int` refuses
+        ({}, {"ids": ["a", "²"]}, None),
         ({}, {"ids": ["capture_task_ids:a", "b"]}, None),
         ({}, {"source": True}, None),
         ({}, {"early_stopping": True}, None),
@@ -885,8 +889,7 @@ _EXPECTED_CAPTURE_FIELDS: dict[int, set[str]] = {
 }
 _EXPECTED_CAPTURE_FIELDS[4] = _EXPECTED_CAPTURE_FIELDS[3]
 
-# v5 added the ids of each task's selected samples (`sample_ids`), so a runner
-# can split a task between workers by sample id.
+# v5 added `sample_ids`, so a runner can split a task between workers by sample id.
 _EXPECTED_CAPTURE_TASK_FIELDS[5] = _EXPECTED_CAPTURE_TASK_FIELDS[4] | {"sample_ids"}
 _EXPECTED_CAPTURE_FIELDS[5] = _EXPECTED_CAPTURE_FIELDS[4]
 

@@ -72,7 +72,6 @@ from inspect_ai.agent._as_solver import as_solver
 from inspect_ai.approval._policy import ApprovalPolicy, ApprovalPolicyConfig
 from inspect_ai.log import EvalLog, IncompleteAction
 from inspect_ai.log._bundle import bundle_log_dir, embed_log_dir
-from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.log._file import (
     EvalLogInfo,
     ReadEvalLogsProgress,
@@ -84,6 +83,7 @@ from inspect_ai.log._file import (
 from inspect_ai.log._log import EvalConfig
 from inspect_ai.log._recorders.buffer.buffer import cleanup_sample_buffers_for_log
 from inspect_ai.log._recorders.buffer.database import sample_buffer_shutdown_pending
+from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.model import (
     GenerateConfigArgs,
     Model,

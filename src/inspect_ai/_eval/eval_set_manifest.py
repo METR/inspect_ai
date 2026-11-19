@@ -17,6 +17,7 @@ Schema changes require a version bump and corresponding golden-test updates
 
 import hashlib
 import os
+from collections import Counter
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple
 
 from pydantic import BaseModel
@@ -308,9 +309,18 @@ def _split_ids(
 ) -> list[str | int] | None:
     """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
     selected = [id for id in ids if id is not None]
+    try:
+        # a worker's selector also matches any other sample whose id normalises alike
+        every = Counter(
+            normalise_sample_id(sample.id if sample.id is not None else position)
+            for position, sample in enumerate(task.task.dataset, start=1)
+        )
+        aliased = any(every[normalise_sample_id(id)] > 1 for id in selected)
+    except ValueError:  # a digit `int` refuses, such as "²"
+        aliased = True
     unsplittable = (
         len(selected) < len(ids)
-        or len({normalise_sample_id(id) for id in selected}) < len(selected)
+        or aliased
         # a worker reads `<task>:<id>` as naming the task (resolve_task_sample_ids)
         or any(
             isinstance(id, str)
