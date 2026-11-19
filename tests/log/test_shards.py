@@ -1192,7 +1192,8 @@ def shard_mean_keys(
             if str(score.sample_id) not in (excluded_sample_ids or [])
             for key in keys
         ]
-        return sum(values) / len(values)
+        # running metrics can be computed while only excluded samples have finished
+        return sum(values) / len(values) if values else float("nan")
 
     return compute
 
