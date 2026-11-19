@@ -203,16 +203,11 @@ def samples_for_limit(count: int, limit: int | tuple[int, int] | None) -> int:
     Returns:
         Number of samples that would run.
     """
-    if isinstance(limit, tuple):
-        start, stop = limit
-        if start >= count:
-            count = 0
-        else:
-            # a stop below start selects nothing, as slicing the dataset does
-            count = max(0, min(stop, count) - start)
-    elif isinstance(limit, int):
-        count = min(limit, count)
-    return count
+    if limit is None:
+        return count
+    # Count what the executor's own slice selects (task/util.py), negatives included.
+    selected = slice(*limit) if isinstance(limit, tuple) else slice(limit)
+    return len(range(count)[selected])
 
 
 def samples_selected(

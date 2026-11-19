@@ -718,6 +718,9 @@ def test_samples_for_limit() -> None:
         (4, (2, 15), 2),
         # a config may carry a reversed range; the eval runs no samples for it
         (10, (5, 3), 0),
+        # negatives count from the end, as the executor's dataset slice does
+        (10, -1, 9),
+        (10, (2, -1), 7),
     ]
     for count, limit, expected in cases:
         assert samples_for_limit(count, limit) == expected, (count, limit)
