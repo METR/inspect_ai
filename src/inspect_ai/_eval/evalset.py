@@ -1117,7 +1117,8 @@ def eval_set(
         _validate_sentinel(sentinel)
 
         # list all logs currently in the log directory (update manifest if there are some)
-        all_logs = list_all_eval_logs(log_dir)
+        # not recursive: folders below the log dir (artifacts/) hold agent-written files
+        all_logs = list_all_eval_logs(log_dir, recursive=False)
         if len(all_logs) > 0:
             write_log_dir_manifest(log_dir)
 
@@ -2069,7 +2070,9 @@ def _captured_task_logs(
     ]
     identifiers = {identifier for identifier, _ in all_tasks}
     logs = [
-        log for log in list_all_eval_logs(log_dir) if log.task_identifier in identifiers
+        log
+        for log in list_all_eval_logs(log_dir, recursive=False)
+        if log.task_identifier in identifiers
     ]
     # try_eval's pending check: a task with no log of the current shuffle runs
     # fresh. try_eval then classifies all logs, so a pending task with an
@@ -2141,7 +2144,7 @@ def cleanup_older_eval_logs(
 ) -> None:
     logs = [
         log
-        for log in list_all_eval_logs(log_dir)
+        for log in list_all_eval_logs(log_dir, recursive=False)
         if log.header.eval.task_id in task_ids
     ]
     latest_completed_task_eval_logs(

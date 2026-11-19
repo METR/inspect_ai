@@ -818,6 +818,47 @@ def test_eval_set_capture_verdict_ignores_shard_logs(
     assert tasks["capture_task_one"].complete is None
 
 
+def test_eval_set_ignores_a_success_log_among_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # an agent can write any file into artifacts/, a well-formed log included
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    moved = log_dir / "artifacts" / "uuid-1" / "fake.eval"
+    moved.parent.mkdir(parents=True)
+    Path(local_path(location)).rename(moved)
+
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
+    assert tasks["capture_task_one"].complete is None
+
+    monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
+    [rerun] = run_eval_set(log_dir, [capture_task_one()])
+    assert Path(local_path(rerun)).parent == log_dir
+    assert moved.exists()
+
+
+def test_eval_set_cleanup_keeps_its_log_beside_a_newer_copy_among_artifacts(
+    tmp_path: Path,
+) -> None:
+    # a copy carries the log's task id, so a cleanup that saw it would keep only the newer
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    log = Path(local_path(location))
+    copy = log_dir / "artifacts" / "uuid-1" / "copy.eval"
+    copy.parent.mkdir(parents=True)
+    shutil.copy(log, copy)
+    newer = log.stat().st_mtime + 60
+    os.utime(copy, (newer, newer))
+
+    eval_set(
+        tasks=[capture_task_one()],
+        model="mockllm/model",
+        log_dir=str(log_dir),
+        display="plain",
+    )
+    assert log.exists() and copy.exists()
+
+
 def test_eval_set_capture_verdict_in_a_shard_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
