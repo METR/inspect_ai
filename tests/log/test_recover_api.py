@@ -6,6 +6,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from zipfile import ZipFile
 
 import anyio
@@ -17,7 +18,15 @@ from inspect_ai._util.asyncfiles import AsyncFilesystem
 from inspect_ai._util.constants import LOG_SCHEMA_VERSION
 from inspect_ai._util.error import EvalError
 from inspect_ai.event._model import ModelEvent
-from inspect_ai.log._file import read_eval_log_async
+from inspect_ai.log._edit import (
+    LogUpdate,
+    MetadataEdit,
+    ProvenanceData,
+    TagsEdit,
+    edit_eval_log,
+    invalidate_samples,
+)
+from inspect_ai.log._file import read_eval_log_async, write_eval_log_async
 from inspect_ai.log._log import (
     EvalConfig,
     EvalDataset,
@@ -26,6 +35,7 @@ from inspect_ai.log._log import (
     EvalSample,
     EvalSampleSummary,
     EvalSpec,
+    EvalStatus,
 )
 from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
 from inspect_ai.log._recorders.eval import HEADER_JSON, LogStart
@@ -531,17 +541,19 @@ async def test_recover_incomplete_action_error_missing_samples_stays_error() -> 
             assert "terminated by operator during recovery" in resolved.error.message
 
 
+@pytest.mark.parametrize("status", ["error", "cancelled"])
 async def test_recover_incomplete_action_error_metrics_failure_stays_error(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    status: Literal["error", "cancelled"],
 ) -> None:
     """A metrics recompute failure blocks finalization and says so.
 
     Every expected sample is final, but without recomputed results the log
     would fail eval_set's completeness predicate, so it keeps status
-    'error'. Unlike the missing-samples case this leaves nothing to run, so
-    the reason is reported distinctly (stats + warning) rather than looking
-    like missing samples.
+    'error' (or the caller's `status`). Unlike the missing-samples case this
+    leaves nothing to run, so the reason is reported distinctly (stats +
+    warning) rather than looking like missing samples.
     """
     from inspect_ai._eval.task import results as task_results
 
@@ -571,15 +583,17 @@ async def test_recover_incomplete_action_error_metrics_failure_stays_error(
                     _db_dir=db_dir,
                     incomplete_action="error",
                     _stats=stats,
+                    status=status,
                 )
 
-            assert log.status == "error"
+            assert log.status == status
             assert log.results is None
             assert stats.sample_count == 4
             assert stats.not_finalized_reason == "metrics could not be recomputed"
             assert any(
                 "not finalized" in r.message
                 and "metrics could not be recomputed" in r.message
+                and f"keeps status '{status}'" in r.message
                 for r in caplog.records
             )
 
@@ -919,6 +933,285 @@ async def test_recover_eval_log_no_buffer_db() -> None:
                 await recover_eval_log_async(
                     eval_path, output=output_path, _db_dir=db_dir
                 )
+
+
+def _write_header(path: str, log_start: LogStart, status: EvalStatus) -> None:
+    """Add a header.json to a crashed .eval, as a rewrite of the log would."""
+    header = EvalLog(
+        version=log_start.version,
+        eval=log_start.eval,
+        plan=log_start.plan,
+        status=status,
+    )
+    with ZipFile(path, "a") as zf:
+        zf.writestr(HEADER_JSON, _to_json(header))
+
+
+async def test_recover_no_buffer_allowed_uses_flushed_samples(tmp_path: Path) -> None:
+    """allow_no_buffer recovers a crashed log from its flushed samples alone."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1), _make_sample(2)])
+
+    await recover_eval_log_async(
+        eval_path,
+        output=output_path,
+        _db_dir=tmp_path / "bufferdb",
+        allow_no_buffer=True,
+    )
+
+    read_log = await read_eval_log_async(output_path)
+    assert read_log.status == "error"
+    assert read_log.error is not None
+    assert read_log.error.message == "Eval recovered from crash"
+    assert read_log.error.traceback == ""
+    assert read_log.log_updates is None
+    assert read_log.samples is not None
+    assert sorted(s.id for s in read_log.samples) == [1, 2]
+
+
+async def test_recover_no_buffer_allowed_keeps_an_earlier_recovery(
+    tmp_path: Path,
+) -> None:
+    """Without a buffer, recovery does not replace the log an earlier recovery wrote."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    db_dir = (tmp_path / "bufferdb").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    _create_buffer_db(eval_path, completed_ids=[2], in_progress_ids=[], db_dir=db_dir)
+    # the first recovery uses the buffer and then removes it
+    await recover_eval_log_async(eval_path, _db_dir=db_dir, allow_no_buffer=True)
+
+    with pytest.raises(RecoveryNotAvailable, match="not replacing"):
+        await recover_eval_log_async(eval_path, _db_dir=db_dir, allow_no_buffer=True)
+
+    read_log = await read_eval_log_async(output_path)
+    assert read_log.samples is not None
+    assert sorted(s.id for s in read_log.samples) == [1, 2]
+
+
+@pytest.mark.parametrize("output_name", ["test-recovered.eval", "recovered.zip"])
+async def test_recover_no_buffer_allowed_replaces_an_unfinished_output(
+    tmp_path: Path, output_name: str
+) -> None:
+    """The partial log an interrupted recovery left does not block the next attempt."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / output_name).as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1), _make_sample(2)])
+    _write_crashed_eval(output_path, samples=[_make_sample(1)])
+
+    await recover_eval_log_async(
+        eval_path,
+        output=output_path,
+        _db_dir=tmp_path / "bufferdb",
+        allow_no_buffer=True,
+    )
+
+    read_log = await read_eval_log_async(output_path, format="eval")
+    assert read_log.status == "error"
+    assert read_log.samples is not None
+    assert sorted(s.id for s in read_log.samples) == [1, 2]
+
+
+async def test_recover_no_buffer_allowed_refuses_a_live_run(tmp_path: Path) -> None:
+    """A buffer DB owned by a running process means the eval has not ended."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = tmp_path / "test-recovered.eval"
+    db_dir = tmp_path / "bufferdb"
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    live = SampleBufferDatabase(eval_path, create=True, db_dir=db_dir)
+    try:
+        with pytest.raises(RecoveryNotAvailable, match="still running"):
+            await recover_eval_log_async(
+                eval_path,
+                output=output_path.as_posix(),
+                _db_dir=db_dir,
+                allow_no_buffer=True,
+            )
+    finally:
+        live.cleanup()
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize("status", ["success", "error", "cancelled"])
+async def test_recover_no_buffer_allowed_still_refuses_finished_log(
+    tmp_path: Path, status: EvalStatus
+) -> None:
+    """A log whose header is not "started" is not recovered, buffer or not."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    log_start = _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    _write_header(eval_path, log_start, status)
+
+    with pytest.raises(RecoveryNotAvailable, match=f"status '{status}'"):
+        await recover_eval_log_async(
+            eval_path,
+            output=(tmp_path / "out.eval").as_posix(),
+            _db_dir=tmp_path / "bufferdb",
+            allow_no_buffer=True,
+        )
+
+
+async def test_recover_unreadable_log_names_the_log_and_reason(tmp_path: Path) -> None:
+    """A log that can't be parsed is refused with its path and the parse error."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    with ZipFile(eval_path, "w") as zf:
+        zf.writestr("_journal/start.json", "{")
+
+    with pytest.raises(RecoveryNotAvailable) as excinfo:
+        await recover_eval_log_async(eval_path, _db_dir=tmp_path / "bufferdb")
+
+    assert eval_path in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, json.JSONDecodeError)
+    assert str(excinfo.value.__cause__) in str(excinfo.value)
+
+
+async def test_recover_refuses_header_that_is_not_an_object(tmp_path: Path) -> None:
+    """A header.json holding something other than an object is refused, not a crash."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    with ZipFile(eval_path, "a") as zf:
+        zf.writestr(HEADER_JSON, "[]")
+
+    with pytest.raises(RecoveryNotAvailable, match="not a JSON object"):
+        await recover_eval_log_async(eval_path, _db_dir=tmp_path / "bufferdb")
+
+
+async def test_recover_rejects_error_message_with_cancelled(tmp_path: Path) -> None:
+    """A cancelled log has no error, so a message for one is refused up front."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = tmp_path / "test-recovered.eval"
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+
+    with pytest.raises(ValueError, match="error_message"):
+        await recover_eval_log_async(
+            eval_path,
+            output=output_path.as_posix(),
+            _db_dir=tmp_path / "bufferdb",
+            allow_no_buffer=True,
+            status="cancelled",
+            error_message="Run killed",
+        )
+
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    "status,error_message,expected_message",
+    [
+        ("error", None, "Eval recovered from crash"),
+        ("error", "Run killed", "Run killed"),
+        ("cancelled", None, None),
+    ],
+)
+async def test_recover_status_and_error_message(
+    tmp_path: Path,
+    status: Literal["error", "cancelled"],
+    error_message: str | None,
+    expected_message: str | None,
+) -> None:
+    """The recovered log takes the caller's status; cancelled has no default error."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    db_dir = (tmp_path / "bufferdb").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    _create_buffer_db(eval_path, completed_ids=[2], in_progress_ids=[3], db_dir=db_dir)
+
+    await recover_eval_log_async(
+        eval_path,
+        output=output_path,
+        _db_dir=db_dir,
+        status=status,
+        error_message=error_message,
+    )
+
+    read_log = await read_eval_log_async(output_path, header_only=True)
+    assert read_log.status == status
+    if expected_message is None:
+        assert read_log.error is None
+    else:
+        assert read_log.error is not None
+        assert read_log.error.message == expected_message
+        # only the default error describes the recovery
+        assert bool(read_log.error.traceback) == (error_message is None)
+
+
+@pytest.mark.parametrize(
+    "status,error_message", [("cancelled", None), ("error", "Run killed")]
+)
+async def test_recover_finalized_ignores_status_and_error_message(
+    tmp_path: Path, status: Literal["error", "cancelled"], error_message: str | None
+) -> None:
+    """A log finalized by incomplete_action="error" is "success", without error."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    db_dir = (tmp_path / "bufferdb").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1), _make_sample(2)])
+    _create_buffer_db(eval_path, completed_ids=[3], in_progress_ids=[4], db_dir=db_dir)
+
+    await recover_eval_log_async(
+        eval_path,
+        output=output_path,
+        _db_dir=db_dir,
+        incomplete_action="error",
+        status=status,
+        error_message=error_message,
+    )
+
+    read_log = await read_eval_log_async(output_path, header_only=True)
+    assert read_log.status == "success"
+    assert read_log.error is None
+
+
+async def test_recover_completed_at(tmp_path: Path) -> None:
+    """completed_at sets the recovered log's stats.completed_at."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    db_dir = (tmp_path / "bufferdb").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    _create_buffer_db(eval_path, completed_ids=[2], in_progress_ids=[], db_dir=db_dir)
+    completed_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+    await recover_eval_log_async(
+        eval_path, output=output_path, _db_dir=db_dir, completed_at=completed_at
+    )
+
+    read_log = await read_eval_log_async(output_path, header_only=True)
+    assert read_log.stats.completed_at == completed_at.isoformat()
+
+
+@pytest.mark.parametrize("header_only", [True, False])
+async def test_recover_appends_log_update_to_started_header(
+    tmp_path: Path, header_only: bool
+) -> None:
+    """An edited crashed log keeps its edits and invalidation, plus the caller's update."""
+    eval_path = (tmp_path / "test.eval").as_posix()
+    output_path = (tmp_path / "test-recovered.eval").as_posix()
+    db_dir = (tmp_path / "bufferdb").as_posix()
+    _write_crashed_eval(eval_path, samples=[_make_sample(1)])
+    editor = ProvenanceData(author="editor")
+    edited = await read_eval_log_async(eval_path, header_only=header_only)
+    edited = edit_eval_log(edited, [TagsEdit(tags_add=["reviewed"])], editor)
+    if not header_only:  # invalidating a sample rewrites the whole log
+        edited = invalidate_samples(edited, "all", editor)
+    await write_eval_log_async(edited, eval_path, header_only=header_only)
+    assert edited.log_updates is not None
+    _create_buffer_db(eval_path, completed_ids=[2], in_progress_ids=[], db_dir=db_dir)
+    recovered = LogUpdate(
+        edits=[MetadataEdit(metadata_set={"recovered_by": "platform"})],
+        provenance=ProvenanceData(author="platform", reason="run was killed"),
+    )
+
+    await recover_eval_log_async(
+        eval_path, output=output_path, _db_dir=db_dir, log_update=recovered
+    )
+
+    read_log = await read_eval_log_async(output_path)
+    assert read_log.log_updates == [*edited.log_updates, recovered]
+    assert read_log.invalidated == (not header_only)
+    assert read_log.tags == ["reviewed"]
+    assert read_log.metadata == {"recovered_by": "platform"}
+    assert read_log.samples is not None
+    assert sorted(s.id for s in read_log.samples) == [1, 2]
 
 
 async def test_recover_eval_log_cleanup() -> None:
