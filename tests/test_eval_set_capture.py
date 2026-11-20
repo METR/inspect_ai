@@ -732,6 +732,8 @@ def test_samples_for_limit() -> None:
         # a merge deletes the shards, and their checkpoints with them
         ({}, {"checkpoint": True}, None),
         ({"checkpoint": True}, {}, None),
+        # unless the task turns checkpointing off
+        ({"checkpoint": True}, {"checkpoint": False}, ["a", "b", 3]),
         # a sample with no id answers to its position
         ({}, {"ids": ["a", None, 3]}, None),
         # position 3, outside the limit, answers to 3
