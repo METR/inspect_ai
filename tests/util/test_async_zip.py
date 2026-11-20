@@ -7,7 +7,9 @@ import zlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import anyio
 import ijson  # type: ignore
+import psutil
 import pytest
 import zstandard
 from botocore.exceptions import ClientError
@@ -226,6 +228,35 @@ async def test_read_zstd_compressed_member(zstd_zip_file: Path) -> None:
         data = b"".join(chunks)
         parsed = json.loads(data.decode("utf-8"))
         assert parsed["message"] == "hello zstd"
+
+
+# thread method: a signal cannot end a run stuck in the shielded close this guards
+@pytest.mark.timeout(10, method="thread")
+async def test_a_cancelled_member_read_closes_its_file_with_no_worker_thread_free(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "test.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("member", os.urandom(200_000))
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    tokens, borrower = limiter.total_tokens, object()
+    async with AsyncFilesystem() as fs:
+        reader = AsyncZipReader(fs, str(path))
+        async with await reader.open_member("member") as member:
+            chunks = aiter(member)
+            assert await anext(chunks)
+            limiter.total_tokens = 1
+            await limiter.acquire_on_behalf_of(borrower)
+            try:
+                with anyio.CancelScope() as scope:
+                    scope.cancel()
+                    await anext(chunks)
+                assert os.path.realpath(path) not in {
+                    os.path.realpath(f.path) for f in psutil.Process().open_files()
+                }
+            finally:
+                limiter.release_on_behalf_of(borrower)
+                limiter.total_tokens = tokens
 
 
 async def test_read_member_fully_deflated(test_zip_file: Path) -> None:
