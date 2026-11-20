@@ -1140,3 +1140,51 @@ def test_openrouter_resolve_stream_declines_reasoning() -> None:
         assert thinking.resolve_stream(GenerateConfig()) is False
         # reasoning explicitly disabled wins over effort/tokens
         assert openrouter_api(reasoning_enabled=False).resolve_stream(effort) is True
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        # OpenAI reports no charge.
+        pytest.param({}, None, id="none-reported"),
+        pytest.param({"cost": 0.5, "is_byok": False}, 0.5, id="reported"),
+        # A zero is not a charge: cost data, if any, prices the call.
+        pytest.param({"cost": 0}, None, id="zero"),
+        pytest.param(
+            {
+                "cost": 0,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.2},
+            },
+            0.2,
+            id="byok-no-fee",
+        ),
+        # With the account's own provider key, `cost` is only OpenRouter's fee.
+        pytest.param(
+            {
+                "cost": 0.01,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.2},
+            },
+            0.21,
+            id="byok-fee-plus-provider",
+        ),
+        pytest.param({"cost": 0.01, "is_byok": True}, None, id="byok-provider-unknown"),
+        pytest.param({"cost": -1}, None, id="negative"),
+        pytest.param({"cost": float("nan")}, None, id="nan"),
+        pytest.param({"cost": "0.5"}, None, id="not-a-number"),
+        pytest.param({"cost": True}, None, id="bool"),
+    ],
+)
+def test_openai_reported_cost(usage: dict[str, Any], expected: float | None) -> None:
+    from openai.types.completion_usage import CompletionUsage
+
+    from inspect_ai.model._openai import openai_reported_cost
+
+    reported = openai_reported_cost(
+        CompletionUsage.model_validate(
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, **usage}
+        )
+    )
+
+    assert reported == pytest.approx(expected)

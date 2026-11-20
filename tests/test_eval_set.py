@@ -125,10 +125,12 @@ def _spend_model(calls: list[str], reported: float | None = None) -> Model:
     return get_model("mockllm/spend", custom_outputs=output)
 
 
-def _spend_task(name: str = "spend") -> Task:
+def _spend_task(name: str = "spend", samples: int = 6) -> Task:
     return Task(
         name=name,
-        dataset=[Sample(id=i, input="question", target="answer") for i in range(6)],
+        dataset=[
+            Sample(id=i, input="question", target="answer") for i in range(samples)
+        ],
         solver=generate(),
         scorer=exact(),
     )
@@ -229,6 +231,28 @@ def test_spend_cap_cancels_without_scoring_and_resumes(
     assert not (tmp_path / "uncapped" / SPEND_FILE).exists()
 
 
+@pytest.mark.usefixtures("spend_model_priced")
+@pytest.mark.parametrize("retry_immediate", [False, True])
+def test_spend_cap_stops_queued_tasks(tmp_path: Path, retry_immediate: bool) -> None:
+    calls: list[str] = []
+    success, logs = eval_set(
+        [_spend_task(f"spend-{i}", samples=2) for i in range(3)],
+        model=_spend_model(calls),
+        spend_cap=0.025,
+        log_dir=str(tmp_path),
+        max_tasks=1,
+        max_samples=1,
+        retry_immediate=retry_immediate,
+        retry_wait=0.001,
+        display="none",
+    )
+
+    assert not success
+    assert len(calls) == 3
+    assert [log.eval.task for log in logs] == ["spend-0", "spend-1"]
+    assert [log.status for log in logs] == ["success", "error"]
+
+
 def test_spend_cap_counts_the_charge_a_provider_reports(
     tmp_path: Path, spend_model_prices: dict[str, ModelCost]
 ) -> None:
@@ -251,6 +275,44 @@ def test_spend_cap_counts_the_charge_a_provider_reports(
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.03
     usage = read_eval_log(logs[0].location).stats.model_usage["mockllm/spend"]
     assert usage.total_cost == 0.03
+
+
+@pytest.mark.usefixtures("spend_model_priced")
+def test_spend_cap_counts_failed_sample_attempts(tmp_path: Path) -> None:
+    from inspect_ai._eval.spend_cap import SPEND_FILE
+
+    attempts = 0
+
+    @solver
+    def fail_first_attempt() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            nonlocal attempts
+            attempts += 1
+            state = await generate(state)
+            if attempts == 1:
+                raise RuntimeError("retry this sample")
+            return state
+
+        return solve
+
+    calls: list[str] = []
+    task = _spend_task()
+    task.solver = fail_first_attempt()
+    success, logs = eval_set(
+        task,
+        model=_spend_model(calls),
+        spend_cap=0.015,
+        retry_on_error=1,
+        max_samples=1,
+        log_dir=str(tmp_path),
+        display="none",
+    )
+
+    assert not success
+    assert attempts == len(calls) == 2
+    samples = read_eval_log(logs[0].location).samples
+    assert samples and all(not sample.scores for sample in samples)
+    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
 
 
 @pytest.mark.usefixtures("spend_model_priced")
