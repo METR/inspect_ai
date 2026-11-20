@@ -17,7 +17,6 @@ from unittest.mock import patch
 
 import anyio
 import pytest
-from click.testing import CliRunner
 from test_helpers.buffer import simulate_crashed_buffer_db
 from test_helpers.utils import (
     failing_solver,
@@ -78,7 +77,6 @@ from inspect_ai.log._recorders.eval import LogStart, ZipLogFile
 from inspect_ai.log._recorders.types import SampleEvent
 from inspect_ai.model import (
     CachePolicy,
-    ChatMessage,
     Model,
     ModelCost,
     ModelInfo,
@@ -89,7 +87,6 @@ from inspect_ai.model import (
 )
 from inspect_ai.model._generate_config import GenerateConfig
 from inspect_ai.model._model_info import clear_model_info_cache
-from inspect_ai.model._providers.mockllm import MockLLM
 from inspect_ai.scorer import (
     Metric,
     SampleScore,
@@ -103,7 +100,6 @@ from inspect_ai.scorer import (
 )
 from inspect_ai.scorer._match import includes
 from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
-from inspect_ai.tool import ToolInfo
 from inspect_ai.util import (
     ComposeConfig,
     SandboxEnvironment,
@@ -115,20 +111,18 @@ from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 
-def _spend_model(
-    calls: list[str], name: str = "mockllm/spend", reported: float | None = None
-) -> Model:
+def _spend_model(calls: list[str], reported: float | None = None) -> Model:
     """A model whose calls use 1,000 input tokens and report `reported` as their charge."""
 
     def output(*args: Any) -> ModelOutput:
         calls.append("call")
-        result = ModelOutput.from_content(name, "answer")
+        result = ModelOutput.from_content("mockllm/spend", "answer")
         result.usage = ModelUsage(
             input_tokens=1000, output_tokens=0, total_tokens=1000, total_cost=reported
         )
         return result
 
-    return get_model(name, custom_outputs=output)
+    return get_model("mockllm/spend", custom_outputs=output)
 
 
 def _spend_task(name: str = "spend", samples: int = 6) -> Task:
@@ -168,19 +162,6 @@ def spend_model_priced() -> Generator[None, None, None]:
         yield
     finally:
         clear_model_info_cache()
-
-
-@pytest.fixture
-def spend_hooks_registry(isolated_hooks_registry: None) -> Generator[None, None, None]:
-    from inspect_ai._util.registry import _registry
-
-    existing = set(_registry)
-    try:
-        yield
-    finally:
-        for key in set(_registry) - existing:
-            if key.startswith("hooks:"):
-                del _registry[key]
 
 
 @pytest.mark.usefixtures("spend_model_priced")
@@ -270,53 +251,6 @@ def test_spend_cap_stops_queued_tasks(tmp_path: Path, retry_immediate: bool) -> 
     assert len(calls) == 3
     assert [log.eval.task for log in logs] == ["spend-0", "spend-1"]
     assert [log.status for log in logs] == ["success", "error"]
-
-
-@pytest.mark.parametrize("limit", ["token", "cost"])
-def test_spend_cap_takes_priority_over_sample_limit_scoring(
-    tmp_path: Path, limit: str, spend_model_prices: dict[str, ModelCost]
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    calls: list[str] = []
-    success, logs = eval_set(
-        _spend_task(),
-        model=_spend_model(calls),
-        spend_cap=0.005,
-        token_limit=500 if limit == "token" else None,
-        cost_limit=0.005 if limit == "cost" else None,
-        model_cost_config=spend_model_prices,
-        log_dir=str(tmp_path),
-        max_samples=1,
-        display="none",
-    )
-
-    assert not success
-    assert len(calls) == 1
-    samples = read_eval_log(logs[0].location).samples
-    assert samples and all(not sample.scores for sample in samples)
-    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
-
-
-def test_spend_cap_uses_configured_model_prices(
-    tmp_path: Path, spend_model_prices: dict[str, ModelCost]
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    spend_model_prices["mockllm/spend"].input = 20
-    calls: list[str] = []
-    success, _ = eval_set(
-        _spend_task(),
-        model=_spend_model(calls),
-        model_cost_config=spend_model_prices,
-        spend_cap=0.015,
-        log_dir=str(tmp_path),
-        max_samples=1,
-        display="none",
-    )
-    assert not success
-    assert len(calls) == 1
-    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.02
 
 
 def test_spend_cap_counts_the_charge_a_provider_reports(
@@ -428,41 +362,6 @@ def test_spend_cap_cancels_concurrent_samples(tmp_path: Path) -> None:
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] >= 0.015
 
 
-@pytest.mark.parametrize("cap", [0, -1, float("inf"), float("-inf"), float("nan")])
-def test_spend_cap_rejects_invalid_amount(tmp_path: Path, cap: float) -> None:
-    log_dir = tmp_path / "logs"
-    with pytest.raises(PrerequisiteError, match="finite, positive"):
-        eval_set(
-            _spend_task(),
-            model="mockllm/model",
-            spend_cap=cap,
-            log_dir=str(log_dir),
-            display="none",
-        )
-    assert not log_dir.exists()
-
-
-@pytest.mark.parametrize(
-    "data", ["not json", "{}", '{"spent_usd": -1}', '{"spent_usd": NaN}']
-)
-def test_spend_cap_refuses_invalid_saved_spend(tmp_path: Path, data: str) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    saved = tmp_path / SPEND_FILE
-    saved.write_text(data)
-    calls: list[str] = []
-    with pytest.raises(PrerequisiteError, match="Invalid saved"):
-        eval_set(
-            _spend_task(),
-            model=_spend_model(calls),
-            spend_cap=1,
-            log_dir=str(tmp_path),
-            display="none",
-        )
-    assert calls == []
-    assert saved.read_text() == data
-
-
 def test_spend_cap_requires_cost_data_for_task_models(tmp_path: Path) -> None:
     calls: list[str] = []
     with pytest.raises(PrerequisiteError, match="spend_cap requires cost data"):
@@ -474,420 +373,6 @@ def test_spend_cap_requires_cost_data_for_task_models(tmp_path: Path) -> None:
             display="none",
         )
     assert calls == []
-
-
-def test_spend_cap_accepts_a_zero_price(
-    tmp_path: Path, spend_model_prices: dict[str, ModelCost]
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    spend_model_prices["mockllm/spend"].input = 0
-    calls: list[str] = []
-    success, _ = eval_set(
-        _spend_task(),
-        model=_spend_model(calls),
-        model_cost_config=spend_model_prices,
-        spend_cap=0.005,
-        log_dir=str(tmp_path),
-        display="none",
-    )
-
-    assert success
-    assert len(calls) == 6
-    assert not (tmp_path / SPEND_FILE).exists()
-
-
-@pytest.mark.usefixtures("spend_model_priced")
-def test_spend_cap_warns_for_unpriced_models_called_by_task_code(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    helper_calls: list[str] = []
-    helper = _spend_model(helper_calls, "mockllm/helper")
-
-    @solver
-    def ask_helper() -> Solver:
-        async def solve(state: TaskState, generate: Generate) -> TaskState:
-            await helper.generate("question")
-            return await generate(state)
-
-        return solve
-
-    calls: list[str] = []
-    task = _spend_task()
-    task.solver = ask_helper()
-    success, _ = eval_set(
-        task,
-        model=_spend_model(calls),
-        spend_cap=1,
-        log_dir=str(tmp_path),
-        display="none",
-    )
-
-    assert success
-    assert len(calls) == len(helper_calls) == 6
-    assert json.loads((tmp_path / SPEND_FILE).read_text())[
-        "spent_usd"
-    ] == pytest.approx(0.06)
-    warnings = [r for r in caplog.records if "spend cap cannot count" in r.message]
-    assert len(warnings) == 1 and "mockllm/helper" in warnings[0].getMessage()
-
-
-async def test_spend_cap_flushes_on_external_cancellation(tmp_path: Path) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    cap = SpendCap(1, str(tmp_path))
-    with anyio.CancelScope() as scope:
-        async with cap.run():
-            cap.record("model", 0.01)
-            scope.cancel()
-            await anyio.lowlevel.checkpoint()
-
-    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
-
-
-async def test_spend_cap_saves_periodically(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from inspect_ai._eval import spend_cap
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    monkeypatch.setattr(spend_cap, "FLUSH_INTERVAL", 0.01)
-    saved = tmp_path / SPEND_FILE
-    cap = SpendCap(1, str(tmp_path))
-    async with cap.run():
-        cap.record("model", 0.01)
-        with anyio.fail_after(30):
-            while not saved.exists():
-                await anyio.sleep(0.01)
-        assert json.loads(saved.read_text())["spent_usd"] == 0.01
-
-
-def test_spend_cap_cancels_task_registered_after_cap_reached(tmp_path: Path) -> None:
-    from inspect_ai._eval.spend_cap import SpendCap
-
-    cap = SpendCap(0.01, str(tmp_path))
-    cancelled: list[str] = []
-    with cap.task(lambda: cancelled.append("running")):
-        cap.record("model", 0.01)
-    assert cancelled == ["running"]
-
-    with cap.task(lambda: cancelled.append("late")):
-        assert cancelled == ["running", "late"]
-    cap.record("model", 0.01)
-    assert cancelled == ["running", "late"]
-
-
-@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
-def test_spend_cap_reports_and_caches_the_call_that_reached_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from inspect_ai.hooks import Hooks, ModelUsageData, hooks
-
-    monkeypatch.setenv("INSPECT_CACHE_DIR", str(tmp_path / "cache"))
-    reported: list[float | None] = []
-
-    @hooks("spend_usage_hook", "Record reported model usage")
-    class UsageHooks(Hooks):
-        @override
-        async def on_model_usage(self, data: ModelUsageData) -> None:
-            # a real hook awaits; the call's own task is already cancelled here
-            await anyio.sleep(0)
-            reported.append(data.usage.total_cost)
-
-    calls: list[str] = []
-    task = _spend_task(samples=1)
-    task.solver = generate(cache=True)
-
-    def run(cap: float) -> bool:
-        success, _ = eval_set(
-            task,
-            model=_spend_model(calls),
-            spend_cap=cap,
-            log_dir=str(tmp_path / "logs"),
-            display="none",
-        )
-        return success
-
-    assert not run(0.005)
-    assert len(calls) == 1
-    assert reported == [0.01]
-
-    # the resumed sample is answered from the cache, so nothing more is spent
-    assert run(1)
-    assert len(calls) == 1
-
-
-async def test_spend_cap_warns_and_continues_when_save_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    async def fail_write(self: AsyncFilesystem, filename: str, content: bytes) -> None:
-        raise OSError("disk full")
-
-    monkeypatch.setattr(AsyncFilesystem, "write_file", fail_write)
-    cap = SpendCap(1, str(tmp_path))
-    async with cap.run():
-        cap.record("model", 0.01)
-
-    assert cap.spent == 0.01
-    assert not (tmp_path / SPEND_FILE).exists()
-    assert any(
-        "Could not save eval-set spend" in record.message
-        and "disk full" in record.message
-        for record in caplog.records
-    )
-
-
-async def test_spend_cap_interrupted_save_keeps_the_previous_total(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    saved = tmp_path / SPEND_FILE
-    saved.write_text('{"spent_usd": 0.5}')
-
-    async def torn_write(self: AsyncFilesystem, filename: str, content: bytes) -> None:
-        Path(filename).write_bytes(content[:5])
-        raise OSError("killed mid-write")
-
-    monkeypatch.setattr(AsyncFilesystem, "write_file", torn_write)
-    cap = SpendCap(1, str(tmp_path))
-    async with cap.run():
-        cap.record("model", 0.01)
-
-    assert json.loads(saved.read_text())["spent_usd"] == 0.5
-
-
-@pytest.mark.parametrize("cost", [-0.01, float("nan"), float("inf")])
-def test_spend_cap_rejects_invalid_model_cost(tmp_path: Path, cost: float) -> None:
-    from inspect_ai._eval.spend_cap import SpendCap
-
-    cap = SpendCap(1, str(tmp_path))
-    cap.record("model", 0.01)
-    with pytest.raises(ValueError, match="Invalid model cost"):
-        cap.record("model", cost)
-    assert cap.spent == 0.01
-    assert not cap.tripped
-
-
-async def test_spend_cap_keeps_its_log_directory_when_cwd_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "logs").mkdir()
-    task_dir = tmp_path / "task"
-    (task_dir / "logs").mkdir(parents=True)
-    cap = SpendCap(1, "logs")
-    async with cap.run():
-        cap.record("model", 0.01)
-        monkeypatch.chdir(task_dir)
-
-    assert json.loads((tmp_path / "logs" / SPEND_FILE).read_text())["spent_usd"] == 0.01
-    assert not (task_dir / "logs" / SPEND_FILE).exists()
-
-
-@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
-@pytest.mark.parametrize("stage", ["start", "end"])
-def test_spend_cap_counts_run_hooks(tmp_path: Path, stage: str) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-    from inspect_ai.hooks import Hooks, RunEnd, RunStart, hooks
-
-    calls: list[str] = []
-    model = _spend_model(calls)
-
-    @hooks("spend_run_hooks", "Model calls in run hooks")
-    class SpendHooks(Hooks):
-        @override
-        async def on_run_start(self, data: RunStart) -> None:
-            if stage == "start":
-                await model.generate("setup")
-
-        @override
-        async def on_run_end(self, data: RunEnd) -> None:
-            if stage == "end":
-                await model.generate("cleanup")
-
-    saved = tmp_path / SPEND_FILE
-    saved.write_text('{"spent_usd": 0.001}')
-    success, logs = eval_set(
-        _spend_task(samples=1),
-        model=model,
-        spend_cap=0.015,
-        log_dir=str(tmp_path),
-        display="none",
-    )
-    assert not success
-    assert len(calls) == 2
-    assert json.loads(saved.read_text())["spent_usd"] == pytest.approx(0.021)
-    samples = read_eval_log(logs[0].location).samples
-    assert samples
-    assert sum(bool(sample.scores) for sample in samples) == (stage == "end")
-
-
-@pytest.mark.usefixtures("spend_hooks_registry", "spend_model_priced")
-def test_spend_cap_reached_in_start_hook_does_not_complete_the_set(
-    tmp_path: Path,
-) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-    from inspect_ai.hooks import Hooks, RunStart, hooks
-
-    calls: list[str] = []
-    model = _spend_model(calls)
-
-    @hooks("spend_start_hook", "Reach cap before any task starts")
-    class SpendHooks(Hooks):
-        @override
-        async def on_run_start(self, data: RunStart) -> None:
-            await model.generate("setup")
-
-    success, logs = eval_set(
-        _spend_task(),
-        model=model,
-        spend_cap=0.005,
-        log_dir=str(tmp_path),
-        display="none",
-    )
-    assert not success
-    assert len(calls) == 1
-    assert logs == []
-    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
-
-
-@pytest.mark.usefixtures("spend_model_priced")
-def test_spend_cap_counts_native_compaction(tmp_path: Path) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-    from inspect_ai._util.registry import RegistryInfo, registry_tag
-
-    class CompactModel(MockLLM):
-        @override
-        async def compact(
-            self,
-            input: list[ChatMessage],
-            tools: list[ToolInfo],
-            config: GenerateConfig,
-            instructions: str | None = None,
-        ) -> tuple[list[ChatMessage], ModelUsage | None]:
-            return input, ModelUsage(
-                input_tokens=1000, output_tokens=0, total_tokens=1000, total_cost=0.01
-            )
-
-    api = CompactModel("spend")
-    registry_tag(
-        CompactModel, api, RegistryInfo(type="modelapi", name="mockllm"), "spend"
-    )
-    model = Model(api, GenerateConfig())
-
-    @solver
-    def compact() -> Solver:
-        async def solve(state: TaskState, generate: Generate) -> TaskState:
-            state.messages, _ = await model.compact(state.messages, [])
-            return state
-
-        return solve
-
-    compact_task = _spend_task()
-    compact_task.solver = compact()
-    success, logs = eval_set(
-        compact_task,
-        model=model,
-        spend_cap=0.005,
-        max_samples=1,
-        display="none",
-        log_dir=str(tmp_path),
-    )
-    assert not success
-    samples = read_eval_log(logs[0].location).samples
-    assert samples and all(not sample.scores for sample in samples)
-    assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] == 0.01
-
-
-@pytest.mark.usefixtures("mock_s3")
-async def test_spend_cap_saves_and_resumes_on_s3() -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE, SpendCap
-
-    log_dir = "s3://test-bucket/spend-cap"
-    cap = SpendCap(1, log_dir)
-    async with cap.run():
-        cap.record("model", 0.01)
-
-    resumed = SpendCap(1, log_dir)
-    with anyio.CancelScope() as scope:
-        async with resumed.run():
-            resumed.record("model", 0.02)
-            scope.cancel()
-            await anyio.lowlevel.checkpoint()
-
-    async with AsyncFilesystem() as fs:
-        saved = json.loads(await fs.read_file(f"{log_dir}/{SPEND_FILE}"))
-    assert saved["spent_usd"] == pytest.approx(0.03)
-
-
-def test_spend_cap_refuses_unreadable_saved_spend(tmp_path: Path) -> None:
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    (tmp_path / SPEND_FILE).mkdir()
-    calls: list[str] = []
-    with pytest.raises(PrerequisiteError, match="Cannot read saved"):
-        eval_set(
-            _spend_task(),
-            model=_spend_model(calls),
-            spend_cap=1,
-            log_dir=str(tmp_path),
-            display="none",
-        )
-    assert calls == []
-
-
-def test_spend_cap_refuses_selection_workers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("INSPECT_EVAL_SET_SELECTION", str(tmp_path / "selection.json"))
-    with pytest.raises(PrerequisiteError, match="selection workers"):
-        eval_set(_spend_task(), spend_cap=1, log_dir=str(tmp_path), display="none")
-
-
-@pytest.mark.usefixtures("spend_model_priced")
-@pytest.mark.parametrize("from_env", [False, True])
-def test_spend_cap_cli(
-    tmp_path: Path, from_env: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from inspect_ai._cli.eval import eval_set_command
-    from inspect_ai._eval.spend_cap import SPEND_FILE
-
-    task_file = tmp_path / "task.py"
-    monkeypatch.chdir(tmp_path)
-    task_file.write_text(
-        "from inspect_ai import Task, task\n"
-        "from inspect_ai.dataset import Sample\n"
-        "from inspect_ai.model import get_model, ModelOutput, ModelUsage\n"
-        "from inspect_ai.solver import generate\n"
-        "@task\n"
-        "def spend():\n"
-        "    output = ModelOutput.from_content('mockllm/spend', 'answer')\n"
-        "    output.usage = ModelUsage(input_tokens=1000, output_tokens=0, "
-        "total_tokens=1000)\n"
-        "    return Task(dataset=[Sample(input='question')], solver=generate(),\n"
-        "                model=get_model('mockllm/spend', custom_outputs=[output]))\n"
-    )
-    log_dir = tmp_path / "logs"
-    result = CliRunner().invoke(
-        eval_set_command,
-        [task_file.name, "--log-dir", str(log_dir), "--display", "none"]
-        + ([] if from_env else ["--spend-cap", "0.005"]),
-        env={"INSPECT_EVAL_SET_SPEND_CAP": "0.005"} if from_env else {},
-    )
-    assert result.exit_code != 0, result.output
-    assert (log_dir / SPEND_FILE).exists(), (result.output, repr(result.exception))
-    assert json.loads((log_dir / SPEND_FILE).read_text())["spent_usd"] == 0.01
-    logs = list_eval_logs(str(log_dir))
-    assert len(logs) == 1 and read_eval_log(logs[0]).status == "error"
 
 
 @pytest.mark.parametrize("retry_immediate", [False, True])

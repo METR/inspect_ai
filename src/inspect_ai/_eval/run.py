@@ -627,10 +627,15 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                     type: CancelType,
                     cancel_tg: TaskGroup = task_tg,
                     tc: TaskCancel = task_cancel,
+                    *,
+                    reason: str | None = None,
                 ) -> None:
                     nonlocal cancel_type
                     cancel_type = type
                     tc.cancel_type = type
+                    # a later cancel that gives no reason keeps the one stamped
+                    if reason is not None:
+                        tc.reason = reason
                     # samples parked at the pause gate observe the stamped
                     # cancel through their escape predicate — wake them so a
                     # graceful resolution reaches the queue-exit abandon
@@ -646,14 +651,14 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
 
                 task_cancel.cancel_task = cancel_task
 
-                def cancel_for_spend_cap() -> None:
-                    task_cancel.reason = SPEND_CAP_REACHED
-                    cancel_task("abort")
-
                 async def run() -> None:
                     nonlocal result, abandoned
                     try:
-                        with spend_cap_task(cancel_for_spend_cap):
+                        with spend_cap_task(
+                            functools.partial(
+                                cancel_task, "abort", reason=SPEND_CAP_REACHED
+                            )
+                        ):
                             await anyio.lowlevel.checkpoint_if_cancelled()
                             result = await task_run(options, task_cancel=task_cancel)
                     except TaskRetryAbandonedError:
@@ -932,12 +937,7 @@ async def run_task_retry_attempts(
                         )
                     elif result.status == "error":
                         retry = True
-                    retry = (
-                        retry
-                        and item.retries_remaining > 0
-                        # the dispatcher starts nothing more once the cap is reached
-                        and not spend_cap_reached()
-                    )
+                    retry = retry and item.retries_remaining > 0
 
                     # a drain/plain cancel issued while this attempt was
                     # tearing down (or between run_one iterations) stamped
@@ -1086,13 +1086,15 @@ async def run_task_retry_attempts(
                         pending.remove(abandoned)
                         await abandoned.options.logger.discard()
 
+                    # reaching the spend cap cancels the run
+                    cancelled = cancelled or spend_cap_reached()
+
                     # dispatch up to the concurrency cap (model-balanced),
                     # re-reading the live `ctl config --max-tasks` override
                     # each iteration (a set fires the dispatch wakers, so a
                     # raise reaches a waiting dispatcher immediately)
                     while (
                         not cancelled
-                        and not spend_cap_reached()
                         and in_flight < effective_max_tasks(parallel)
                         and pending
                     ):
@@ -1105,7 +1107,7 @@ async def run_task_retry_attempts(
                         in_flight += 1
                         tg.start_soon(run_one, item)
 
-                    if cancelled or spend_cap_reached():
+                    if cancelled:
                         break
 
                     # work still queued or running (incl. pending retries): wait
@@ -1127,16 +1129,12 @@ async def run_task_retry_attempts(
                 # dispatch complete (only the `break` paths reach here) —
                 # stop the reporter so the task group can exit
                 reporter_scope.cancel()
-
-            # the spend cap stops dispatch with tasks still queued: release
-            # their log entries, which would otherwise live for the whole run
-            if spend_cap_reached():
-                with anyio.CancelScope(shield=True):
-                    for item in pending:
-                        await item.options.logger.discard(
-                            keep_destination=True, keep_buffer=True
-                        )
         finally:
+            # attempts still queued never ran: release their log entries,
+            # which would otherwise live for the whole run
+            with anyio.CancelScope(shield=True):
+                for item in pending:
+                    await item.options.logger.discard(keep_destination=True)
             remove_dispatch_waker(wake.set)
             remove_task_dispatcher(dispatcher_stats)
             clear_task_screen()
