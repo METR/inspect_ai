@@ -51,6 +51,11 @@ from inspect_ai._display.core.display import (
     TaskScreen,
     TaskSpec,
 )
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._eval.task.scan import Scanners
 from inspect_ai._sentinel._config import (
@@ -694,13 +699,21 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
 
                 task_cancel.apply = apply_cancel
 
+                def cancel_for_spend_cap() -> None:
+                    task_cancel.reason = SPEND_CAP_REACHED
+                    task_cancel.request("abort")
+
                 async def run() -> None:
                     nonlocal result, abandoned, notifying, run_returned
                     write_failed = False
                     error_after_write = False
                     with task_scope:
                         try:
-                            with creator_model_scope(options.model):
+                            with (
+                                spend_cap_task(cancel_for_spend_cap),
+                                creator_model_scope(options.model),
+                            ):
+                                await anyio.lowlevel.checkpoint_if_cancelled()
                                 result = await task_run(
                                     options, task_cancel=task_cancel
                                 )
@@ -765,7 +778,8 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                             result = unwritten_task_log(
                                 options.logger,
                                 TerminateTaskError(
-                                    "Task cancelled by user "
+                                    task_cancel.reason
+                                    or "Task cancelled by user "
                                     f"({task_cancel.cancel_type})"
                                 ),
                             )
@@ -1038,7 +1052,12 @@ async def run_task_retry_attempts(
                         )
                     elif result.status == "error":
                         retry = True
-                    retry = retry and item.retries_remaining > 0
+                    retry = (
+                        retry
+                        and item.retries_remaining > 0
+                        # the dispatcher starts nothing more once the cap is reached
+                        and not spend_cap_reached()
+                    )
 
                     # a drain/plain cancel issued while this attempt was
                     # tearing down (or between run_one iterations) stamped
@@ -1202,6 +1221,7 @@ async def run_task_retry_attempts(
                     # raise reaches a waiting dispatcher immediately)
                     while (
                         not cancelled
+                        and not spend_cap_reached()
                         and in_flight < effective_max_tasks(parallel)
                         and pending
                     ):
@@ -1214,7 +1234,7 @@ async def run_task_retry_attempts(
                         in_flight += 1
                         tg.start_soon(run_one, item)
 
-                    if cancelled:
+                    if cancelled or spend_cap_reached():
                         break
 
                     # work still queued or running (incl. pending retries): wait
@@ -1236,6 +1256,15 @@ async def run_task_retry_attempts(
                 # dispatch complete (only the `break` paths reach here) —
                 # stop the reporter so the task group can exit
                 reporter_scope.cancel()
+
+            # the spend cap stops dispatch with tasks still queued: release
+            # their log entries, which would otherwise live for the whole run
+            if spend_cap_reached():
+                with anyio.CancelScope(shield=True):
+                    for item in pending:
+                        await item.options.logger.discard(
+                            keep_destination=True, keep_buffer=True
+                        )
         finally:
             remove_dispatch_waker(wake.set)
             remove_task_dispatcher(dispatcher_stats)

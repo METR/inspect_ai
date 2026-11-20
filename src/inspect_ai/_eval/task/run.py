@@ -2402,7 +2402,8 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                     # takes the cancelled path below, preserving its usual
                     # semantics.
                     cancel_ex = TerminateTaskError(
-                        f"Task cancelled by user ({task_cancel.cancel_type})"
+                        task_cancel.reason
+                        or f"Task cancelled by user ({task_cancel.cancel_type})"
                     )
                     error = eval_error(cancel_ex, TerminateTaskError, cancel_ex, None)
                     eval_log = await finish_task_log(

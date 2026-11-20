@@ -446,6 +446,7 @@ NOT_OVERRIDABLE: dict[str, str] = {
     "time_limit": "part of task identity",
     "working_limit": "part of task identity",
     "cost_limit": "part of task identity",
+    "spend_cap": "selection workers cannot enforce a shared spend cap",
     "eval_set_id": "carried by the selection document itself",
     "scanner": "carried by the selection document's own `scanners` field, with merge (not override) semantics",
     "fail_on_error": "decided by the selection's `completion`: forced to False, or the definition's",

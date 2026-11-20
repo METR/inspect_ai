@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import math
 import re
 from collections.abc import AsyncIterable, Collection, Mapping
 from copy import copy
@@ -51,7 +52,7 @@ from openai.types.chat.chat_completion_content_part_param import File, FileFile
 from openai.types.chat.chat_completion_message_function_tool_call import Function
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from openai.types.shared_params.function_definition import FunctionDefinition
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 
 from inspect_ai._util.constants import BASE_64_DATA_REMOVED, NO_CONTENT
 from inspect_ai._util.content import (
@@ -1184,6 +1185,39 @@ def parse_reasoning_content(
     return None
 
 
+def openai_reported_cost(usage: BaseModel) -> float | None:
+    """Dollars the service says it charged for a call, when it says.
+
+    Takes a Chat Completions or Responses usage object. OpenRouter, and a
+    gateway in front of it, reports the charge as `usage.cost` on both.
+    OpenAI itself reports no charge. With the account's own
+    provider key (`is_byok`), `cost` is only OpenRouter's fee and the
+    provider's charge is `cost_details.upstream_inference_cost`: the charge is
+    their sum, and unknown when either is missing.
+
+    Only a charge above zero counts. A zero would replace the cost data's
+    estimate with nothing, and a service that reports no real charge may still
+    send the field.
+    """
+
+    def dollars(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if math.isfinite(value) and value >= 0 else None
+
+    extra = usage.model_extra or {}
+    cost = dollars(extra.get("cost"))
+    if extra.get("is_byok") is True:
+        details = extra.get("cost_details")
+        upstream = (
+            dollars(details.get("upstream_inference_cost"))
+            if isinstance(details, dict)
+            else None
+        )
+        cost = cost + upstream if cost is not None and upstream is not None else None
+    return cost if cost is not None and cost > 0 else None
+
+
 def model_output_from_openai(
     completion: ChatCompletion,
     choices: list[ChatCompletionChoice],
@@ -1227,6 +1261,7 @@ def model_output_from_openai(
                     else None
                 ),
                 total_tokens=completion.usage.total_tokens,
+                total_cost=openai_reported_cost(completion.usage),
             )
             if completion.usage
             else None
