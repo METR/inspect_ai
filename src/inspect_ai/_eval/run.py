@@ -629,7 +629,9 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                     nonlocal cancel_type
                     cancel_type = type
                     tc.cancel_type = type
-                    tc.reason = reason
+                    # a later cancel that gives no reason keeps the one stamped
+                    if reason is not None:
+                        tc.reason = reason
                     # samples parked at the pause gate observe the stamped
                     # cancel through their escape predicate — wake them so a
                     # graceful resolution reaches the queue-exit abandon
@@ -1130,13 +1132,11 @@ async def run_task_retry_attempts(
 
         finally:
             stops.close()
-            # tasks still queued were never started: release their log
-            # entries, which would otherwise live for the whole run
+            # attempts still queued never ran: release their log entries,
+            # which would otherwise live for the whole run
             with anyio.CancelScope(shield=True):
                 for item in pending:
-                    await item.options.logger.discard(
-                        keep_destination=True, keep_buffer=True
-                    )
+                    await item.options.logger.discard(keep_destination=True)
             remove_dispatch_waker(wake.set)
             remove_task_dispatcher(dispatcher_stats)
             clear_task_screen()
