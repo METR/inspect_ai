@@ -90,6 +90,8 @@ class TaskCancel:
     """The scope around the task's error-log write while it runs. An abort or
     retry request made then bounds the write and takes effect when it ends
     (see ``abort_bounded_write``)."""
+    reason: str | None = None
+    """Why the task was cancelled, when not by the user (recorded as the log's error)."""
     _cancel_type: CancelType = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
     _ended_in_error: bool = field(default=False, init=False)

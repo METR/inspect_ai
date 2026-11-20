@@ -1506,6 +1506,12 @@ def _eval_command_impl(
     help="Do not fail if the log-dir contains files that are not part of the eval set.",
 )
 @click.option(
+    "--spend-cap",
+    type=float,
+    envvar="INSPECT_EVAL_SET_SPEND_CAP",
+    help="Cancel unfinished eval-set work without scoring at this total dollar spend. Requires model cost data (--model-cost-config).",
+)
+@click.option(
     "--id",
     "eval_set_id",
     type=str,
@@ -1523,6 +1529,7 @@ def eval_set_command(
     no_retry_cleanup: bool | None,
     incomplete_action: IncompleteAction,
     incomplete_max: float | None,
+    spend_cap: float | None,
     solver: str | None,
     trace: bool | None,
     approval: str | None,
@@ -1757,6 +1764,7 @@ def eval_set_command(
             acp_server=acp_server,
             ctl_server=ctl_server,
             is_eval_set=True,
+            spend_cap=spend_cap,
             retry_attempts=retry_attempts,
             retry_immediate=retry_immediate,
             retry_wait=retry_wait,
@@ -2129,6 +2137,7 @@ def eval_exec(
     embed_viewer: bool = False,
     log_dir_allow_dirty: bool | None = None,
     eval_set_id: str | None = None,
+    spend_cap: float | None = None,
     **kwargs: Unpack[GenerateConfigArgs],
 ) -> bool:
     if run_config and is_eval_set:
@@ -2302,6 +2311,7 @@ def eval_exec(
 
     # evaluate
     if is_eval_set:
+        params["spend_cap"] = spend_cap
         params["retry_attempts"] = retry_attempts
         params["retry_immediate"] = retry_immediate
         params["retry_wait"] = retry_wait

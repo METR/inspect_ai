@@ -31,6 +31,7 @@ from inspect_ai.model._model_output import (
     as_stop_reason,
 )
 from inspect_ai.model._openai import (
+    openai_reported_cost,
     parse_completion_logprobs,
     parse_vllm_prompt_logprobs_raw,
 )
@@ -198,6 +199,7 @@ async def generate_raw_completions(
                 input_tokens=response.usage.prompt_tokens,
                 output_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
+                total_cost=openai_reported_cost(response.usage),
             )
             if response.usage
             else None

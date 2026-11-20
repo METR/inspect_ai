@@ -65,11 +65,24 @@ def resolve_model(model: str | Model | None) -> Model | None:
 
 
 def resolve_model_costs(
-    resolved_tasks: list[ResolvedTask], cost_limit: float | None
+    resolved_tasks: list[ResolvedTask],
+    cost_limit: float | None,
+    spend_cap: bool = False,
 ) -> None:
+    """Require cost data for the models of tasks that limit cost.
+
+    A model whose provider reports each call's charge needs none for the
+    spend cap. `cost_limit` needs cost data regardless.
+
+    Args:
+        resolved_tasks: Tasks about to run.
+        cost_limit: Eval-level sample cost limit (a task's own applies otherwise).
+        spend_cap: Whether an eval-set spend cap is active, which needs cost
+            data for every task.
+    """
     for task in resolved_tasks:
         task_cost_limit = cost_limit if cost_limit is not None else task.task.cost_limit
-        if task_cost_limit is None:
+        if task_cost_limit is None and not spend_cap:
             continue
 
         models: set[Model] = {task.model}
@@ -86,12 +99,17 @@ def resolve_model_costs(
             # instantiated, so resolving a provider here would re-instantiate
             # them (reloading local weights)
             info = _get_model_info_direct(model)
-            if info is None or info.cost is None:
+            if info is not None and info.cost is not None:
+                continue
+            # cost_limit always needs cost data: it has nothing to check a
+            # call against when the provider leaves a charge out
+            if task_cost_limit is not None or not model.api.reports_cost():
                 missing.append(model_name)
 
         if missing:
+            option = "cost_limit" if task_cost_limit is not None else "spend_cap"
             raise PrerequisiteError(
-                f"cost_limit requires cost data for all models. "
+                f"{option} requires cost data for all models. "
                 f"Missing cost data for: {', '.join(missing)}. "
                 f"Use set_model_cost() or --model-cost-config to "
                 f"configure pricing."
