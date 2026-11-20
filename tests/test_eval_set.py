@@ -111,28 +111,24 @@ from inspect_ai.util._limit import TokenLimit
 from inspect_ai.util._sandbox.local import LocalSandboxEnvironment
 
 
-def _spend_model(
-    calls: list[str], name: str = "mockllm/spend", reported: float | None = None
-) -> Model:
+def _spend_model(calls: list[str], reported: float | None = None) -> Model:
     """A model whose calls use 1,000 input tokens and report `reported` as their charge."""
 
     def output(*args: Any) -> ModelOutput:
         calls.append("call")
-        result = ModelOutput.from_content(name, "answer")
+        result = ModelOutput.from_content("mockllm/spend", "answer")
         result.usage = ModelUsage(
             input_tokens=1000, output_tokens=0, total_tokens=1000, total_cost=reported
         )
         return result
 
-    return get_model(name, custom_outputs=output)
+    return get_model("mockllm/spend", custom_outputs=output)
 
 
-def _spend_task(name: str = "spend", samples: int = 6) -> Task:
+def _spend_task(name: str = "spend") -> Task:
     return Task(
         name=name,
-        dataset=[
-            Sample(id=i, input="question", target="answer") for i in range(samples)
-        ],
+        dataset=[Sample(id=i, input="question", target="answer") for i in range(6)],
         solver=generate(),
         scorer=exact(),
     )
@@ -302,6 +298,19 @@ def test_spend_cap_cancels_concurrent_samples(tmp_path: Path) -> None:
         for sample in (read_eval_log(log.location).samples or [])
     )
     assert json.loads((tmp_path / SPEND_FILE).read_text())["spent_usd"] >= 0.015
+
+
+def test_spend_cap_requires_cost_data_for_task_models(tmp_path: Path) -> None:
+    calls: list[str] = []
+    with pytest.raises(PrerequisiteError, match="spend_cap requires cost data"):
+        eval_set(
+            _spend_task(),
+            model=_spend_model(calls),
+            spend_cap=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+    assert calls == []
 
 
 @pytest.mark.parametrize("retry_immediate", [False, True])
