@@ -219,7 +219,7 @@ The `cost_limit` requires model cost data to be configured via `set_model_cost()
 
 #### Model Cost {#model-cost}
 
-Cost tracking requires cost data for each model present in the eval or eval set. There are two ways to set cost data:
+Cost tracking requires cost data for each model present in the eval or eval set. When a provider reports a charge above zero for a call, as OpenRouter does in `usage.cost`, that charge is the call's cost and the cost data is not used for it. There are two ways to set cost data:
 
 **Python API:**
 

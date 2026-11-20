@@ -143,6 +143,7 @@ from .eval_set_selection import (
     read_eval_set_selection,
 )
 from .loader import resolve_task_args, solver_from_spec
+from .spend_cap import SpendCap, spend_cap_scope, validate_spend_cap
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -306,6 +307,7 @@ def eval_set(
     eval_set_id: str | None = None,
     embed_viewer: bool = False,
     sentinel: SentinelSpec | None = None,
+    spend_cap: float | None = None,
     **kwargs: Unpack[GenerateConfigArgs],
 ) -> tuple[bool, list[EvalLog]]:
     r"""Evaluate a set of tasks.
@@ -475,6 +477,12 @@ def eval_set(
         sentinel: Monitors and protocols that watch the agent's steps (requires the `inspect_sentinel` package). Experimental: not yet a stable API; may change without notice.
             A protocol, a list or mapping of monitors and protocols with at least one protocol, a config file path or registered protocol name, or a parsed configuration. Monitors alone are an error: wrap them in `observe_only()` to record without acting.
             Overrides the task's sentinel. Defaults to no sentinel.
+        spend_cap: Limit on total model spend (in dollars) across the eval set,
+            including retries and resumes. Cancels unfinished work without
+            scoring. Calls already in flight can exceed the cap. Requires cost
+            data for every task and role model, via set_model_cost() or
+            `model_cost_config`; other models that task code calls are
+            uncounted when they have none.
         **kwargs: Model generation options.
 
     Returns:
@@ -539,6 +547,7 @@ def eval_set(
     # of them is an attempt this process ran and knows has ended, which is what
     # lets the retry-cleanup sweep remove it (see latest_completed_task_eval_logs)
     run_ids: set[str] = set()
+    spend: SpendCap | None = None
 
     def run_eval(
         eval_set_id: str,
@@ -662,6 +671,13 @@ def eval_set(
     # are never active at once.
     capture_path = eval_set_capture_requested()
     selection_path = eval_set_selection_requested()
+    if spend_cap is not None:
+        validate_spend_cap(spend_cap)
+        if selection_path is not None:
+            raise PrerequisiteError(
+                "spend_cap is not supported with eval-set selection workers; "
+                "a shared cap across processes requires external accounting."
+            )
     if capture_path is not None and selection_path is not None:
         raise PrerequisiteError(
             f"{INSPECT_EVAL_SET_CAPTURE} and {INSPECT_EVAL_SET_SELECTION} "
@@ -708,6 +724,8 @@ def eval_set(
         # that with is the capture's top-level `scan` field, not this bool).
         scanners=scanner is not None,
     )
+    if spend_cap is not None:
+        definition_options["spend_cap"] = spend_cap
 
     # a runner may override how this run is operated, run-wide (read in capture
     # mode too, so the manifest describes the run that actually happens) and
@@ -880,6 +898,9 @@ def eval_set(
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
         raise SystemExit(0)
+
+    if spend_cap is not None:
+        spend = SpendCap(spend_cap, log_dir)
 
     # ensure log_dir
     fs = filesystem(log_dir)
@@ -1228,7 +1249,10 @@ def eval_set(
 
     # create retry policy
     retry = Retrying(
-        retry=retry_if_not_result(all_evals_succeeded),
+        retry=retry_if_not_result(
+            lambda logs: all_evals_succeeded(logs)
+            or (spend is not None and spend.tripped)
+        ),
         retry_error_callback=return_last_value,
         reraise=True,
         stop=stop_after_attempt(num_retry_attempts),
@@ -1253,12 +1277,13 @@ def eval_set(
             # emit start event
             run_coroutine(emit_eval_set_start(eval_set_id, log_dir))
 
-            if retry_immediate:
-                # retry handled by eval
-                results = try_eval()
-            else:
-                # execute w/ retry
-                results = retry(try_eval)
+            with spend_cap_scope(spend):
+                if retry_immediate:
+                    # retry handled by eval
+                    results = try_eval()
+                else:
+                    # execute w/ retry
+                    results = retry(try_eval)
 
             # final sweep to remove failed log files
             if retry_cleanup:
@@ -1272,7 +1297,9 @@ def eval_set(
             )
 
         # report final status
-        success = all_evals_succeeded(results)
+        success = all_evals_succeeded(results) and not (
+            spend is not None and spend.tripped
+        )
         if success:
             msg = status_msg(f"Completed all tasks in '{log_dir}' successfully")
         else:

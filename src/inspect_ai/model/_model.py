@@ -43,6 +43,7 @@ from tenacity import (
 )
 from tenacity.wait import WaitBaseT
 
+from inspect_ai._eval.spend_cap import record_spend, spend_cap_reached
 from inspect_ai._sentinel._context import is_agent_generate
 from inspect_ai._util.constants import (
     DEFAULT_MAX_CONNECTIONS,
@@ -408,6 +409,14 @@ class ModelAPI(abc.ABC):
     def canonical_name(self) -> str:
         """Canonical model name for querying results."""
         return self.model_name
+
+    def reports_cost(self) -> bool:
+        """Whether the service reports what each call was charged.
+
+        A model that does needs no cost data for an eval-set spend cap: the
+        reported charge is the call's cost.
+        """
+        return False
 
     def service_model_name(self) -> str:
         """Model name used by the provider service."""
@@ -1359,6 +1368,7 @@ class Model:
             # Record and check usage
             if usage:
                 record_and_check_model_usage(self, usage, role=self.role)
+                await _deliver_spend_cap_cancellation()
 
             return compacted_messages, usage
 
@@ -1742,17 +1752,26 @@ class Model:
                     self, output.usage, role=self.role, output=output
                 )
 
-                # send telemetry to hooks
-                await emit_model_usage(
-                    model_name=str(self), usage=output.usage, call_duration=output.time
-                )
-                await send_telemetry_legacy(
-                    "model_usage",
-                    json.dumps(dict(model=str(self), usage=output.usage.model_dump())),
-                )
+                # send telemetry to hooks. The call that reaches the spend cap
+                # has already cancelled its own task: shield the hooks so they
+                # still hear about it, and the cache write below still runs.
+                with anyio.CancelScope(shield=spend_cap_reached()):
+                    await emit_model_usage(
+                        model_name=str(self),
+                        usage=output.usage,
+                        call_duration=output.time,
+                    )
+                    await send_telemetry_legacy(
+                        "model_usage",
+                        json.dumps(
+                            dict(model=str(self), usage=output.usage.model_dump())
+                        ),
+                    )
 
             if cache_policy and cache_entry:
                 cache_store(entry=cache_entry, output=output)
+
+            await _deliver_spend_cap_cancellation()
 
             return output, event
 
@@ -3226,11 +3245,14 @@ def record_and_check_model_usage(
     # full "provider/model" identifier, used as the usage-bookkeeping dict key
     model_name = f"{model}"
 
-    # compute cost and set on usage before recording (so ModelUsage.__add__
-    # accumulates it in the per-model usage dicts)
-    total_cost = model_usage_cost(model, usage, output)
-    if total_cost is not None:
-        usage.total_cost = total_cost
+    # set cost on usage before recording (so ModelUsage.__add__ accumulates it
+    # in the per-model usage dicts). A charge the provider reported is what the
+    # call cost; cost data only estimates it, so it applies when none came.
+    total_cost = usage.total_cost
+    if total_cost is None:
+        total_cost = model_usage_cost(model, usage, output)
+        if total_cost is not None:
+            usage.total_cost = total_cost
 
     # record usage
     set_model_usage(model_name, usage, sample_model_usage_context_var.get(None))
@@ -3248,18 +3270,36 @@ def record_and_check_model_usage(
 
     record_model_usage(usage)
 
+    if total_cost is not None:
+        record_model_cost(total_cost)
+        set_active_sample_total_cost(sample_total_cost())
+
+    record_spend(model_name, usage.total_cost)
+
     # compute total tokens and update active sample (before check_token_limit()
     # so the control channel sees the usage that tripped the limit)
     total_tokens = sample_total_tokens()
     set_active_sample_total_tokens(total_tokens)
     set_active_sample_token_limit_usage(token_limit_usage())
+    # the spend cap cancels the task without scoring, so it takes priority
+    # over a sample limit (which would score the sample)
+    if spend_cap_reached():
+        return
     check_token_limit()
 
     # record cost to limit tree and check
     if total_cost is not None:
-        record_model_cost(total_cost)
-        set_active_sample_total_cost(sample_total_cost())
         check_cost_limit()
+
+
+async def _deliver_spend_cap_cancellation() -> None:
+    """Raise the spend cap's task cancellation before the caller continues.
+
+    A cancelled task runs on until its next suspension. Suspending here stops
+    the call's caller from doing more work with a result the cap has cut off.
+    """
+    if spend_cap_reached():
+        await anyio.lowlevel.checkpoint()
 
 
 def model_usage_cost(

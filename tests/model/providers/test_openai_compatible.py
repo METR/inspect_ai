@@ -1140,3 +1140,331 @@ def test_openrouter_resolve_stream_declines_reasoning() -> None:
         assert thinking.resolve_stream(GenerateConfig()) is False
         # reasoning explicitly disabled wins over effort/tokens
         assert openrouter_api(reasoning_enabled=False).resolve_stream(effort) is True
+
+
+# Recorded from OpenRouter through an OpenAI-compatible gateway, with the
+# request's provider pinned to DeepInfra: the same call unstreamed and streamed.
+_OPENROUTER_COMPLETION: dict[str, Any] = {
+    "id": "gen-1795043057-Q5YwUue8MslkCOpYac1p",
+    "object": "chat.completion",
+    "created": 1795043057,
+    "model": "meta-llama/llama-3.3-70b-instruct",
+    "provider": "DeepInfra",
+    "system_fingerprint": None,
+    "service_tier": "default",
+    "choices": [
+        {
+            "index": 0,
+            "logprobs": None,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "ok",
+                "refusal": None,
+                "reasoning": None,
+            },
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 17,
+        "completion_tokens": 2,
+        "total_tokens": 19,
+        "cost": 2.34e-06,
+        "is_byok": False,
+        "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0,
+        },
+        "cost_details": {
+            "upstream_inference_cost": 2.34e-06,
+            "upstream_inference_prompt_cost": 1.7e-06,
+            "upstream_inference_completions_cost": 6.4e-07,
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "image_tokens": 0,
+            "audio_tokens": 0,
+        },
+    },
+}
+_OPENROUTER_CHUNKS: list[dict[str, Any]] = [
+    {
+        "id": "gen-1795043058-d5SmPYBNYUoUVIf5dOCh",
+        "object": "chat.completion.chunk",
+        "created": 1795043058,
+        "model": "meta-llama/llama-3.3-70b-instruct",
+        "provider": "DeepInfra",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": "ok", "role": "assistant"},
+                "finish_reason": None,
+                "native_finish_reason": None,
+            }
+        ],
+    },
+    {
+        "id": "gen-1795043058-d5SmPYBNYUoUVIf5dOCh",
+        "object": "chat.completion.chunk",
+        "created": 1795043058,
+        "model": "meta-llama/llama-3.3-70b-instruct",
+        "provider": "DeepInfra",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": "", "role": "assistant"},
+                "finish_reason": "stop",
+                "native_finish_reason": "stop",
+            }
+        ],
+    },
+    {
+        "id": "gen-1795043058-d5SmPYBNYUoUVIf5dOCh",
+        "object": "chat.completion.chunk",
+        "created": 1795043058,
+        "model": "meta-llama/llama-3.3-70b-instruct",
+        "provider": "DeepInfra",
+        "service_tier": "default",
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": "", "role": "assistant"},
+                "finish_reason": "stop",
+                "native_finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 17,
+            "completion_tokens": 2,
+            "total_tokens": 19,
+            "cost": 2.34e-06,
+            "is_byok": False,
+            "prompt_tokens_details": {
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+                "audio_tokens": 0,
+                "video_tokens": 0,
+            },
+            "cost_details": {
+                "upstream_inference_cost": 2.34e-06,
+                "upstream_inference_prompt_cost": 1.7e-06,
+                "upstream_inference_completions_cost": 6.4e-07,
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 0,
+                "image_tokens": 0,
+                "audio_tokens": 0,
+            },
+        },
+    },
+]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_reported_charge_becomes_the_calls_cost(stream: bool) -> None:
+    import json
+
+    from openai import DefaultAsyncHttpxClient
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        streamed = bool(json.loads(request.content).get("stream"))
+        assert streamed is stream
+        if not streamed:
+            return httpx2.Response(200, json=_OPENROUTER_COMPLETION, request=request)
+        events = [f"data: {json.dumps(chunk)}" for chunk in _OPENROUTER_CHUNKS]
+        return httpx2.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content="\n\n".join([*events, "data: [DONE]", ""]),
+            request=request,
+        )
+
+    model = get_model(
+        "openai-api/mysvc/meta-llama/llama-3.3-70b-instruct",
+        api_key="test-key",
+        base_url="http://test/v1",
+        http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
+        stream=stream,
+        memoize=False,
+    )
+
+    output = await model.generate("Reply with the single word: ok")
+
+    assert output.usage is not None
+    assert output.usage.total_cost == 2.34e-06
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        # OpenAI reports no charge.
+        pytest.param({}, None, id="none-reported"),
+        pytest.param({"cost": 0.5, "is_byok": False}, 0.5, id="reported"),
+        # A zero is not a charge: cost data, if any, prices the call.
+        pytest.param({"cost": 0}, None, id="zero"),
+        pytest.param(
+            {
+                "cost": 0,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.2},
+            },
+            0.2,
+            id="byok-no-fee",
+        ),
+        # With the account's own provider key, `cost` is only OpenRouter's fee.
+        pytest.param(
+            {
+                "cost": 0.01,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.2},
+            },
+            0.21,
+            id="byok-fee-plus-provider",
+        ),
+        pytest.param({"cost": 0.01, "is_byok": True}, None, id="byok-provider-unknown"),
+        pytest.param({"cost": -1}, None, id="negative"),
+        pytest.param({"cost": float("nan")}, None, id="nan"),
+        pytest.param({"cost": "0.5"}, None, id="not-a-number"),
+        pytest.param({"cost": True}, None, id="bool"),
+    ],
+)
+def test_openai_reported_cost(usage: dict[str, Any], expected: float | None) -> None:
+    from openai.types.completion_usage import CompletionUsage
+
+    from inspect_ai.model._openai import openai_reported_cost
+
+    reported = openai_reported_cost(
+        CompletionUsage.model_validate(
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, **usage}
+        )
+    )
+
+    assert reported == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("service", "starts"),
+    [
+        # OpenRouter reports each call's charge, so it needs no cost data.
+        pytest.param("openrouter", True, id="openrouter"),
+        pytest.param("mysvc", False, id="other-service"),
+    ],
+)
+def test_spend_cap_counts_reported_charges_without_cost_data(
+    tmp_path: Any, service: str, starts: bool
+) -> None:
+    import json
+
+    from openai import DefaultAsyncHttpxClient
+
+    from inspect_ai import Task, eval_set
+    from inspect_ai._util.error import PrerequisiteError
+    from inspect_ai.dataset import Sample
+    from inspect_ai.solver import generate
+
+    calls: list[str] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        calls.append("call")
+        return httpx2.Response(200, json=_OPENROUTER_COMPLETION, request=request)
+
+    def run() -> bool:
+        success, _ = eval_set(
+            Task(
+                dataset=[Sample(id=i, input="question") for i in range(6)],
+                solver=generate(),
+            ),
+            model=get_model(
+                f"openai-api/{service}/meta-llama/llama-3.3-70b-instruct",
+                api_key="test-key",
+                base_url="http://test/v1",
+                http_client=DefaultAsyncHttpxClient(
+                    transport=httpx2.MockTransport(handler)
+                ),
+                memoize=False,
+            ),
+            # each recorded call was charged $0.00000234
+            spend_cap=0.000005,
+            max_samples=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+        return success
+
+    if not starts:
+        with pytest.raises(PrerequisiteError, match="spend_cap requires cost data"):
+            run()
+        assert calls == []
+        return
+
+    assert not run()
+    assert len(calls) == 3
+    saved = json.loads((tmp_path / ".eval-set-spend.json").read_text())
+    assert saved["spent_usd"] == pytest.approx(3 * 2.34e-06)
+
+
+def test_cost_limit_needs_cost_data_even_when_charges_are_reported(
+    tmp_path: Any,
+) -> None:
+    """Without cost data `cost_limit` could not check a call that reports no charge."""
+    from openai import DefaultAsyncHttpxClient
+
+    from inspect_ai import Task, eval_set
+    from inspect_ai._util.error import PrerequisiteError
+    from inspect_ai.dataset import Sample
+    from inspect_ai.solver import generate
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=_OPENROUTER_COMPLETION, request=request)
+
+    with pytest.raises(PrerequisiteError, match="cost_limit requires cost data"):
+        eval_set(
+            Task(dataset=[Sample(input="question")], solver=generate()),
+            model=get_model(
+                "openai-api/openrouter/meta-llama/llama-3.3-70b-instruct",
+                api_key="test-key",
+                base_url="http://test/v1",
+                http_client=DefaultAsyncHttpxClient(
+                    transport=httpx2.MockTransport(handler)
+                ),
+                memoize=False,
+            ),
+            cost_limit=1,
+            log_dir=str(tmp_path),
+            display="none",
+        )
+
+
+async def test_reported_charge_on_the_text_completions_route() -> None:
+    from openai import DefaultAsyncHttpxClient
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "id": "cmpl-1",
+                "object": "text_completion",
+                "created": 0,
+                "model": "meta-llama/llama-3.3-70b-instruct",
+                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                # the usage OpenRouter sent with the chat completion above
+                "usage": _OPENROUTER_COMPLETION["usage"],
+            },
+            request=request,
+        )
+
+    model = get_model(
+        "openai-api-completions/openrouter/meta-llama/llama-3.3-70b-instruct",
+        api_key="test-key",
+        base_url="http://test/v1",
+        http_client=DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)),
+        memoize=False,
+    )
+
+    output = await model.generate("Reply with the single word: ok")
+
+    assert output.usage is not None
+    assert output.usage.total_cost == 2.34e-06

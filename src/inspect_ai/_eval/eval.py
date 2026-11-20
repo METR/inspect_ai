@@ -113,6 +113,7 @@ from inspect_ai.util._notify import build_apprise, init_apprise
 from .context import init_eval_context
 from .loader import resolve_task_file_sandbox, resolve_task_source, resolve_tasks
 from .run import TaskInjection, eval_run
+from .spend_cap import spend_cap_active, spend_cap_reached, spend_cap_run
 from .task import Epochs, PreviousTask, Task, TaskSource
 from .task.enqueue import (
     TaskEnqueuer,
@@ -717,6 +718,7 @@ async def eval_async(
     return result
 
 
+@spend_cap_run()
 async def _eval_async_inner(
     tg: TaskGroup,
     tasks: Tasks,
@@ -864,7 +866,7 @@ async def _eval_async_inner(
                 "Error: No inspect tasks were found at the specified paths."
             )
 
-        resolve_model_costs(resolved_tasks, cost_limit)
+        resolve_model_costs(resolved_tasks, cost_limit, spend_cap_active())
 
         # make every resolved task's model addressable by the model pause
         # directives up-front, ahead of the dispatcher's own registration
@@ -1153,7 +1155,7 @@ async def _eval_async_inner(
                 async def run_batches(initial: list[ResolvedTask]) -> EvalLogs:
                     results: list[EvalLog] = []
                     pending: list[ResolvedTask] | None = initial
-                    while pending is not None:
+                    while pending is not None and not spend_cap_reached():
                         batch_logs: list[EvalLog] = []
                         if parallel == 1:
                             # one batch in sequence-major order: the dispatcher
@@ -1177,7 +1179,9 @@ async def _eval_async_inner(
                         results.extend(batch_logs)
 
                         # a cancelled batch ends the run
-                        if any(r.status == "cancelled" for r in batch_logs):
+                        if spend_cap_reached() or any(
+                            r.status == "cancelled" for r in batch_logs
+                        ):
                             break
 
                         # (a TaskSource observes results via sample_complete /
@@ -1195,7 +1199,7 @@ async def _eval_async_inner(
                             )
                     return EvalLogs(results)
 
-                if task_source is not None and parallel > 1:
+                if task_source is not None and parallel > 1 and not spend_cap_reached():
                     # live (TaskSource-driven) run: one eval_run fed additional
                     # tasks while in progress. Injected tasks — from the source's
                     # next_tasks(), its sample/task_complete return values, or
@@ -1336,7 +1340,7 @@ def _resolve_enqueued_tasks(
     ]
     if not resolved:
         raise ValueError("No tasks to enqueue (resolution produced none).")
-    resolve_model_costs(resolved, cost_limit)
+    resolve_model_costs(resolved, cost_limit, spend_cap_active())
     return resolved
 
 
