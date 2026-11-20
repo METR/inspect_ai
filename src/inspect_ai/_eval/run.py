@@ -627,10 +627,13 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                     type: CancelType,
                     cancel_tg: TaskGroup = task_tg,
                     tc: TaskCancel = task_cancel,
+                    *,
+                    reason: str | None = None,
                 ) -> None:
                     nonlocal cancel_type
                     cancel_type = type
                     tc.cancel_type = type
+                    tc.reason = reason
                     # samples parked at the pause gate observe the stamped
                     # cancel through their escape predicate — wake them so a
                     # graceful resolution reaches the queue-exit abandon
@@ -646,14 +649,14 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
 
                 task_cancel.cancel_task = cancel_task
 
-                def cancel_for_spend_cap() -> None:
-                    task_cancel.reason = SPEND_CAP_REACHED
-                    cancel_task("abort")
-
                 async def run() -> None:
                     nonlocal result, abandoned
                     try:
-                        with spend_cap_task(cancel_for_spend_cap):
+                        with spend_cap_task(
+                            functools.partial(
+                                cancel_task, "abort", reason=SPEND_CAP_REACHED
+                            )
+                        ):
                             await anyio.lowlevel.checkpoint_if_cancelled()
                             result = await task_run(options, task_cancel=task_cancel)
                     except TaskRetryAbandonedError:

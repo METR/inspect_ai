@@ -60,7 +60,7 @@ class TaskCancel:
     cancel_task: Callable[[CancelType], None]
     cancel_type: CancelType = None
     reason: str | None = None
-    """Why the task was cancelled, when not by the user (recorded as the log's error)."""
+    """Why the task was cancelled, when not by the user. Stamped with `cancel_type` and recorded as the log's error."""
 
 
 @dataclass
