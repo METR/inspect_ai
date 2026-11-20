@@ -1483,7 +1483,8 @@ def eval_retry(
             `"retry"` (default) re-runs them; `"error"` resolves them as
             operator terminations — if that leaves every expected sample
             final, the recovered log finalizes as `status="success"` and is
-            returned without retrying. A finalized log lives at
+            returned without retrying (unless it has invalidated samples, which
+            re-run). A finalized log lives at
             `<name>-recovered.eval` alongside the crashed log rather than in
             `log_dir`, so read its location from `EvalLog.location`.
         incomplete_max: Safety threshold for `incomplete_action="error"`
@@ -1689,7 +1690,8 @@ async def eval_retry_async(
             `"retry"` (default) re-runs them; `"error"` resolves them as
             operator terminations — if that leaves every expected sample
             final, the recovered log finalizes as `status="success"` and is
-            returned without retrying. A finalized log lives at
+            returned without retrying (unless it has invalidated samples, which
+            re-run). A finalized log lives at
             `<name>-recovered.eval` alongside the crashed log rather than in
             `log_dir`, so read its location from `EvalLog.location`.
         incomplete_max: Safety threshold for `incomplete_action="error"`
@@ -1755,10 +1757,11 @@ async def eval_retry_async(
                         eval_log.location, cleanup=False, trust_log=True
                     )
                 retry_eval_logs[i] = recovered
-                if recovered.status == "success":
+                if recovered.status == "success" and not recovered.invalidated:
                     # recovery resolved every in-progress sample and finalized
                     # the log — there is nothing left to retry (and the
-                    # recovered file is the final log, so don't clean it up)
+                    # recovered file is the final log, so don't clean it up).
+                    # An invalidated sample still has to re-run.
                     finalized_indexes.add(i)
                 elif recovered.location:
                     recovered_files[i] = recovered.location
