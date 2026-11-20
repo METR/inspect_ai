@@ -88,6 +88,7 @@ from inspect_ai.log._file import (
 from inspect_ai.log._log import EvalConfig
 from inspect_ai.log._recorders.buffer.buffer import cleanup_sample_buffers_for_log
 from inspect_ai.log._recorders.buffer.database import sample_buffer_shutdown_pending
+from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.model import (
     GenerateConfigArgs,
     Model,
@@ -909,6 +910,8 @@ def eval_set(
                 sample_id=sample_id,
                 sample_shuffle=sample_shuffle,
             ),
+            sample_shuffle=sample_shuffle,
+            fail_on_error=fail_on_error,
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
@@ -1947,7 +1950,14 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
 def list_all_eval_logs(
     log_dir: str, recursive: bool = True, progress: ReadEvalLogsProgress | None = None
 ) -> list[Log]:
-    log_files = list_eval_logs(log_dir, recursive=recursive)
+    # the listing's form of log_dir, as it names the files (`~` expanded, `s3a` normalised)
+    root = filesystem(log_dir).dir_as_uri(log_dir)
+    log_files = [
+        info
+        for info in list_eval_logs(log_dir, recursive=recursive)
+        # a shard's log belongs to its merged log, never to the task itself
+        if not is_shard_path(root, info.name)
+    ]
     log_headers = read_eval_log_headers(log_files, progress)
     task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
     return [
