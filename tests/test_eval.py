@@ -888,6 +888,17 @@ def test_unserializable_score_metadata_does_not_abort_eval(
     assert reduced.metadata is None
 
 
+def test_a_sample_whose_init_cannot_be_logged_keeps_its_scores(tmp_path: Path) -> None:
+    deep: dict[str, Any] = {}
+    for _ in range(250):  # fails the log write, not the sample's init event
+        deep = {"a": deep}
+    target = "Default output from mockllm/model"
+    task = Task(dataset=[Sample("x", target=target, metadata=deep)], scorer=match())
+    [sample] = eval(task, model="mockllm/model", log_dir=str(tmp_path))[0].samples or []
+    scores = sample.scores or {}
+    assert (sample.events, scores["match"].value) == ([], "C")
+
+
 @pytest.mark.parametrize("sample_id", ["²", "①"])
 async def test_json_retry_preserves_unicode_sample_id(
     sample_id: str, tmp_path: Path

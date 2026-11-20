@@ -606,8 +606,8 @@ def _results(
             raise ShardSetError(
                 f"Sample {str(sample.id)!r} has no sample_init event, which records "
                 "the dataset metadata a fresh run gives its scorers' metrics (a "
-                "sample whose record could not be serialized is logged without "
-                "its events). Re-run the shard holding the sample."
+                "sample whose input or metadata could not be serialized is logged "
+                "without it). Re-run the shard holding the sample."
             )
         scores.append(
             {

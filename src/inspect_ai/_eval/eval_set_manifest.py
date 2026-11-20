@@ -34,6 +34,11 @@ from inspect_ai.dataset import Dataset
 from inspect_ai.dataset._util import normalise_sample_id
 from inspect_ai.model._model import ModelName
 from inspect_ai.model._model_config import model_args_for_log
+from inspect_ai.util._checkpoint.config import (
+    CheckpointConfig,
+    checkpoint_vetoed,
+    normalize_checkpoint,
+)
 
 if TYPE_CHECKING:
     from inspect_ai._eval.evalset import EvalSetArgsInTaskIdentifier
@@ -107,7 +112,7 @@ class EvalSetCaptureTask(BaseModel):
     sample_ids: list[str | int] | None = None
     """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split between workers by them. Added in version 5.
 
-    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part). Each id is an fnmatch pattern to the worker that receives it, so a runner escapes one holding `*`, `?` or `[`.
+    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, its `fail_on_error` is a count or fraction (each worker would judge only its part), or it checkpoints (a merge deletes the parts, and their checkpoints with them). Each id is an fnmatch pattern to the worker that receives it, so a runner escapes one holding `*`, `?` or `[`.
     """
 
     epochs: int
@@ -304,6 +309,7 @@ def _split_ids(
     sample_shuffle: bool | int | None,
     fail_on_error: bool | float | None,
     task_names: Iterable[str] | None = None,
+    checkpoint: CheckpointConfig | None = None,
 ) -> list[str | int] | None:
     """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
     selected = [id for id in ids if id is not None]
@@ -333,6 +339,10 @@ def _split_ids(
         or (limit is not None and bool(sample_shuffle or task.task.dataset.shuffled))
         or task.task.sample_source is not None
         or task.task.early_stopping is not None
+        or (
+            not checkpoint_vetoed(task.task.checkpoint, checkpoint)
+            and (task.task.checkpoint is not None or checkpoint is not None)
+        )
         # the eval set's value overrides the task's, as the run applies it (run.py)
         or not isinstance(
             task.task.fail_on_error if fail_on_error is None else fail_on_error,
@@ -356,6 +366,7 @@ def build_eval_set_capture(
     task_logs: Mapping[str, TaskLogVerdict],
     sample_shuffle: bool | int | None = None,
     fail_on_error: bool | float | None = None,
+    checkpoint: CheckpointConfig | bool | None = None,
 ) -> EvalSetCapture:
     """Build a capture manifest for a set of resolved tasks.
 
@@ -372,6 +383,7 @@ def build_eval_set_capture(
         task_logs: Each task's log and completion verdict by task identifier, for tasks that have a log.
         sample_shuffle: Eval-set level sample shuffle.
         fail_on_error: Eval-set level `fail_on_error`, which overrides each task's.
+        checkpoint: Eval-set level checkpointing, which a task can veto.
 
     Returns:
         Capture manifest for the eval set.
@@ -424,7 +436,13 @@ def build_eval_set_capture(
                 identifier=identifier,
                 samples=len(ids),
                 sample_ids=_split_ids(
-                    task, ids, limit, sample_shuffle, fail_on_error, task_names
+                    task,
+                    ids,
+                    limit,
+                    sample_shuffle,
+                    fail_on_error,
+                    task_names,
+                    normalize_checkpoint(checkpoint),
                 ),
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,
