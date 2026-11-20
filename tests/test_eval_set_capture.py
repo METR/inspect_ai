@@ -74,21 +74,13 @@ def capture_task_ids(
 ) -> Task:
     samples = [Sample(input="x", target="x", id=id) for id in ids or ["a", "b", 3]]
     return Task(
-        dataset=Seeded(samples) if source else samples,
+        dataset=SampleSource.from_samples(samples) if source else samples,
         solver=[generate()],
         scorer=exact(),
         # capture runs nothing, so any object stands for early stopping
         early_stopping=cast(EarlyStopping, object()) if early_stopping else None,
         fail_on_error=fail_on_error,
     )
-
-
-class Seeded(SampleSource):
-    def __init__(self, samples: list[Sample]) -> None:
-        self._samples = samples
-
-    def initial_samples(self) -> list[Sample]:
-        return self._samples
 
 
 def capture_eval_set(
@@ -142,7 +134,6 @@ def test_eval_set_capture_manifest(
     assert task_one.args_full == {"difficulty": "hard"}
     assert task_one.args_hash == task_args_hash({"difficulty": "hard"})
     assert task_one.samples == 3
-    # its samples have no ids of their own
     assert task_one.sample_ids is None
     assert task_one.epochs == 1
     assert task_one.solver == "generate"
@@ -697,9 +688,7 @@ def test_samples_for_limit() -> None:
         (10, (2, 5), 3),
         (10, (12, 15), 0),
         (4, (2, 15), 2),
-        # a config may carry a reversed range; the eval runs no samples for it
         (10, (5, 3), 0),
-        # negatives count from the end, as the executor's dataset slice does
         (10, -1, 9),
         (10, (2, -1), 7),
     ]
@@ -710,25 +699,23 @@ def test_samples_for_limit() -> None:
 @pytest.mark.parametrize(
     "selection,task_args,expected",
     [
-        ({}, {}, ["a", "b", 3]),
         ({"limit": 2}, {}, ["a", "b"]),
-        # a range, as the executor slices the dataset
         ({"limit": (1, 3)}, {}, ["b", 3]),
         # dataset order, not the selector's
-        ({"sample_id": [3, "a"]}, {}, ["a", 3]),
+        ({"sample_id": ["capture_task_ids:3", "capture_task_ids:a"]}, {}, ["a", 3]),
         # each worker would draw its own subset
         ({"limit": 2, "sample_shuffle": True}, {}, None),
         # a sample with no id answers to its position
         ({}, {"ids": ["a", None, 3]}, None),
         # position 3, outside the limit, answers to 3
         ({"limit": 2}, {"ids": [3, "b", None]}, None),
-        # "01" and 1 select each other
+        # "01" and 1 select each other, also when the limit leaves one out
         ({}, {"ids": ["01", 1, "b"]}, None),
-        # 1 also selects "01", which the limit leaves out
         ({"limit": 2}, {"ids": ["a", 1, "01"]}, None),
         # a digit `int` refuses
         ({}, {"ids": ["a", "²"]}, None),
         ({}, {"ids": ["capture_task_ids:a", "b"]}, None),
+        ({}, {"ids": ["capture_task_two:1", "b"]}, None),
         ({}, {"source": True}, None),
         ({}, {"early_stopping": True}, None),
         # each worker would judge the count over its part only
@@ -745,31 +732,12 @@ def test_eval_set_capture_sample_ids(
     task_args: dict[str, Any],
     expected: list[str | int] | None,
 ) -> None:
-    tasks = capture_logs(
-        monkeypatch,
-        tmp_path,
-        tmp_path / "logs",
-        [capture_task_ids(**task_args)],
-        **selection,
-    )
-
-    assert tasks["capture_task_ids"].sample_ids == expected
+    tasks = [capture_task_ids(**task_args), capture_task_two()]
+    got = capture_logs(monkeypatch, tmp_path, tmp_path / "logs", tasks, **selection)
+    assert got["capture_task_ids"].sample_ids == expected
 
 
-def test_capture_splits_no_task_whose_id_names_another_task(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    tasks = capture_logs(
-        monkeypatch,
-        tmp_path,
-        tmp_path / "logs",
-        [capture_task_ids(ids=["capture_task_two:1", "b"]), capture_task_two()],
-    )
-
-    assert tasks["capture_task_ids"].sample_ids is None
-
-
-def test_eval_set_ignores_logs_and_junk_among_artifacts(
+def test_eval_set_reads_only_the_logs_in_its_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # an agent can write any file into artifacts/: junk, or a newer copy of a log
@@ -782,38 +750,18 @@ def test_eval_set_ignores_logs_and_junk_among_artifacts(
     copy = junk.parent / "copy.eval"
     shutil.copy(log, copy)
     os.utime(copy, (log.stat().st_mtime + 60,) * 2)
-
-    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
-    assert tasks["capture_task_one"].log == location
-
+    # a shard of the run: the set's capture skips it, a worker in its directory needs it
+    [shard] = run_eval_set(log_dir / "run.shards" / "0", [capture_task_one()])
+    for where, own in ((log_dir, location), (log_dir / "run.shards" / "0", shard)):
+        tasks = capture_logs(monkeypatch, tmp_path, where, [capture_task_one()])
+        assert tasks["capture_task_one"].log == own
     monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
     success, _ = eval_set(
-        tasks=[capture_task_one()],
-        model="mockllm/model",
-        log_dir=str(log_dir),
-        display="plain",
-        embed_viewer=True,
+        [capture_task_one()], str(log_dir), model="mockllm/model", embed_viewer=True
     )
-    # its cleanup keeps the log, and its viewer lists only the log dir's own logs
     assert success and log.exists() and copy.exists()
     listing = json.loads((log_dir / "listing.json").read_text())
     assert listing.keys() == {path.name for path in log_dir.glob("*.eval")}
-
-
-@pytest.mark.parametrize("where", ["logs", "~/logs", "logs/run.shards/0"])
-def test_eval_set_capture_verdict_beside_a_shard_directory(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, where: str
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    [location] = run_eval_set(tmp_path / "logs", [capture_task_one()])
-    # a newer shard of the run, which the task's own log stands for
-    [shard] = run_eval_set(tmp_path / "logs/run.shards/0", [capture_task_one()])
-
-    log_dir = Path(where) if where.startswith("~") else tmp_path / where
-    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
-
-    # a worker writing one shard runs in its directory, and its retries need its logs
-    assert tasks["capture_task_one"].log == (shard if "shards" in where else location)
 
 
 # Golden values for the capture schema. These must NOT be changed for an

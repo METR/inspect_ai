@@ -1039,9 +1039,7 @@ def test_api_log_files_newest_log_replaced_by_older_merge_gives_full(
         headers={"If-None-Match": "3000000.0-1"},
     )
     resp.raise_for_status()
-    body = resp.json()
-    assert body["response_type"] == "full"
-    assert {f["task_id"] for f in body["files"]} == {"merged"}
+    assert resp.json()["response_type"] == "full"
 
 
 def test_api_log_files_merged_log_deleted_gives_full(

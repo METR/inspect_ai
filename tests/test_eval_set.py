@@ -840,14 +840,9 @@ def test_eval_set_unknown_task_raises_prerequisite_error() -> None:
 def test_eval_set_refuses_a_log_file_pattern_with_a_slash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # eval_set resumes only from the logs directly in its log dir
     monkeypatch.setenv("INSPECT_EVAL_LOG_FILE_PATTERN", "{task}/{id}")
     with pytest.raises(PrerequisiteError, match="INSPECT_EVAL_LOG_FILE_PATTERN"):
-        eval_set(
-            tasks=Task(dataset=[Sample(input="hello")]),
-            log_dir=str(tmp_path / "logs"),
-            model="mockllm/model",
-        )
+        eval_set(Task(), str(tmp_path / "logs"), model="mockllm/model")
     assert not (tmp_path / "logs").exists()
 
 
@@ -3851,10 +3846,7 @@ def test_eval_set_grown_dataset_without_stable_ids_still_reruns() -> None:
 
 
 def test_list_all_eval_logs_accepts_an_s3a_log_dir(mock_s3: None) -> None:
-    """An `s3a://` dir lists: the listing names its files `s3://`, and both are one dir."""
     source = next(Path("tests/log/test_list_logs").glob("*.eval"))
-    write_eval_log(
-        read_eval_log(source.as_posix()), "s3://test-bucket/s3a-listing/run.eval"
-    )
-
-    assert len(list_all_eval_logs("s3a://test-bucket/s3a-listing")) == 1
+    write_eval_log(read_eval_log(source.as_posix()), "s3://test-bucket/a/run.eval")
+    # the listing names its files `s3://`, and both name one dir
+    assert len(list_all_eval_logs("s3a://test-bucket/a")) == 1

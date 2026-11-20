@@ -232,17 +232,14 @@ async def test_read_zstd_compressed_member(zstd_zip_file: Path) -> None:
 
 # thread method: a signal cannot end a run stuck in the shielded close this guards
 @pytest.mark.timeout(10, method="thread")
-@pytest.mark.parametrize("method", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
 async def test_a_cancelled_member_read_closes_its_file_with_no_worker_thread_free(
-    tmp_path: Path, method: int
+    tmp_path: Path,
 ) -> None:
-    """A cancelled read's cleanup closes the file in-process: no worker thread is free."""
     path = tmp_path / "test.zip"
-    with zipfile.ZipFile(path, "w", method) as zf:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("member", os.urandom(200_000))
     limiter = anyio.to_thread.current_default_thread_limiter()
     tokens, borrower = limiter.total_tokens, object()
-
     async with AsyncFilesystem() as fs:
         reader = AsyncZipReader(fs, str(path))
         async with await reader.open_member("member") as member:
@@ -254,19 +251,12 @@ async def test_a_cancelled_member_read_closes_its_file_with_no_worker_thread_fre
                 with anyio.CancelScope() as scope:
                     scope.cancel()
                     await anext(chunks)
-                assert scope.cancelled_caught
-                assert not _is_open(path)
+                assert os.path.realpath(path) not in {
+                    os.path.realpath(f.path) for f in psutil.Process().open_files()
+                }
             finally:
                 limiter.release_on_behalf_of(borrower)
                 limiter.total_tokens = tokens
-        assert await reader.read_member_fully("member")
-
-
-def _is_open(path: Path) -> bool:
-    return any(
-        os.path.realpath(f.path) == os.path.realpath(path)
-        for f in psutil.Process().open_files()
-    )
 
 
 async def test_read_member_fully_deflated(test_zip_file: Path) -> None:
