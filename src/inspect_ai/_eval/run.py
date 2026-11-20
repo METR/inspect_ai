@@ -20,11 +20,7 @@ import anyio
 from anyio.abc import TaskGroup
 from typing_extensions import Unpack
 
-from inspect_ai._eval.spend_cap import (
-    SPEND_CAP_REACHED,
-    spend_cap_reached,
-    spend_cap_task,
-)
+from inspect_ai._eval.spend_cap import SPEND_CAP_REACHED, spend_cap_task
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._util._async import Wake, unwrap_exception_group
 from inspect_ai._util.environ import environ_vars
@@ -831,9 +827,6 @@ async def run_task_retry_attempts(
             launch=parallel, in_flight=in_flight, pending=len(pending)
         )
 
-    def stopping() -> bool:
-        return cancelled or spend_cap_reached()
-
     async with _run_task_screen(task_specs(tasks)) as screen:
         init_task_screen(screen)
         try:
@@ -940,7 +933,7 @@ async def run_task_retry_attempts(
                         )
                     elif result.status == "error":
                         retry = True
-                    retry = retry and item.retries_remaining > 0 and not stopping()
+                    retry = retry and item.retries_remaining > 0
 
                     # a drain/plain cancel issued while this attempt was
                     # tearing down (or between run_one iterations) stamped
@@ -1094,7 +1087,7 @@ async def run_task_retry_attempts(
                     # each iteration (a set fires the dispatch wakers, so a
                     # raise reaches a waiting dispatcher immediately)
                     while (
-                        not stopping()
+                        not cancelled
                         and in_flight < effective_max_tasks(parallel)
                         and pending
                     ):
@@ -1107,7 +1100,7 @@ async def run_task_retry_attempts(
                         in_flight += 1
                         tg.start_soon(run_one, item)
 
-                    if stopping():
+                    if cancelled:
                         break
 
                     # work still queued or running (incl. pending retries): wait
@@ -1129,7 +1122,6 @@ async def run_task_retry_attempts(
                 # dispatch complete (only the `break` paths reach here) —
                 # stop the reporter so the task group can exit
                 reporter_scope.cancel()
-
         finally:
             # attempts still queued never ran: release their log entries,
             # which would otherwise live for the whole run
