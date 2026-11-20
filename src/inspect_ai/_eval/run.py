@@ -20,7 +20,11 @@ import anyio
 from anyio.abc import TaskGroup
 from typing_extensions import Unpack
 
-from inspect_ai._eval.spend_cap import SPEND_CAP_REACHED, spend_cap_task
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._util._async import Wake, unwrap_exception_group
 from inspect_ai._util.environ import environ_vars
@@ -1081,6 +1085,9 @@ async def run_task_retry_attempts(
                     ]:
                         pending.remove(abandoned)
                         await abandoned.options.logger.discard()
+
+                    # reaching the spend cap cancels the run
+                    cancelled = cancelled or spend_cap_reached()
 
                     # dispatch up to the concurrency cap (model-balanced),
                     # re-reading the live `ctl config --max-tasks` override
