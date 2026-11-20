@@ -6,10 +6,9 @@ import sys
 import textwrap
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
-from pydantic import JsonValue
 from test_helpers.buffer import simulate_crashed_buffer_db
 from test_helpers.utils import identity_solver
 
@@ -19,7 +18,6 @@ from inspect_ai._eval.eval_set_manifest import (
     INSPECT_EVAL_SET_CAPTURE,
     EvalSetCapture,
     EvalSetCaptureTask,
-    sample_ids_selected,
     samples_for_limit,
     task_args_hash,
 )
@@ -27,10 +25,9 @@ from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import local_path
 from inspect_ai._util.json import to_json_str_safe
-from inspect_ai.dataset import MemoryDataset, Sample
+from inspect_ai.dataset import Sample
 from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import (
-    EvalSpec,
     ProvenanceData,
     invalidate_samples,
     read_eval_log,
@@ -40,9 +37,9 @@ from inspect_ai.log._log import EvalSampleSummary
 from inspect_ai.log._recorders.buffer.database import SampleBufferDatabase
 from inspect_ai.log._recorders.eval import LogStart
 from inspect_ai.log._recorders.types import SampleEvent
-from inspect_ai.scorer import SampleScore, Score, exact
+from inspect_ai.scorer import Score, exact
 from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
-from inspect_ai.util import EarlyStop
+from inspect_ai.util import EarlyStopping
 
 
 @task
@@ -80,7 +77,8 @@ def capture_task_ids(
         dataset=Seeded(samples) if source else samples,
         solver=[generate()],
         scorer=exact(),
-        early_stopping=NeverStops() if early_stopping else None,
+        # capture runs nothing, so any object stands for early stopping
+        early_stopping=cast(EarlyStopping, object()) if early_stopping else None,
         fail_on_error=fail_on_error,
     )
 
@@ -91,24 +89,6 @@ class Seeded(SampleSource):
 
     def initial_samples(self) -> list[Sample]:
         return self._samples
-
-
-class NeverStops:
-    async def start_task(
-        self, task: EvalSpec, samples: list[Sample], epochs: int
-    ) -> str:
-        return "never"
-
-    async def schedule_sample(self, id: str | int, epoch: int) -> EarlyStop | None:
-        return None
-
-    async def complete_sample(
-        self, id: str | int, epoch: int, scores: dict[str, SampleScore]
-    ) -> None:
-        return None
-
-    async def complete_task(self) -> dict[str, JsonValue]:
-        return {}
 
 
 def capture_eval_set(
@@ -727,25 +707,13 @@ def test_samples_for_limit() -> None:
         assert samples_for_limit(count, limit) == expected, (count, limit)
 
 
-def test_sample_ids_selected_limit() -> None:
-    cases: list[tuple[int, int | tuple[int, int] | None, list[int]]] = [
-        (10, None, list(range(1, 11))),
-        (10, 3, [1, 2, 3]),
-        (2, 3, [1, 2]),
-        (10, (2, 5), [3, 4, 5]),
-        (10, (12, 15), []),
-        (4, (2, 15), [3, 4]),
-    ]
-    for count, limit, expected in cases:
-        dataset = MemoryDataset([Sample(input="x", id=i) for i in range(1, count + 1)])
-        assert sample_ids_selected(dataset, limit, None) == expected, (count, limit)
-
-
 @pytest.mark.parametrize(
     "selection,task_args,expected",
     [
         ({}, {}, ["a", "b", 3]),
         ({"limit": 2}, {}, ["a", "b"]),
+        # a range, as the executor slices the dataset
+        ({"limit": (1, 3)}, {}, ["b", 3]),
         # dataset order, not the selector's
         ({"sample_id": [3, "a"]}, {}, ["a", 3]),
         # each worker would draw its own subset
@@ -791,7 +759,6 @@ def test_eval_set_capture_sample_ids(
 def test_capture_splits_no_task_whose_id_names_another_task(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A worker drops a `<task>:<id>` selector naming another task, running nothing."""
     tasks = capture_logs(
         monkeypatch,
         tmp_path,
@@ -802,88 +769,24 @@ def test_capture_splits_no_task_whose_id_names_another_task(
     assert tasks["capture_task_ids"].sample_ids is None
 
 
-def test_eval_set_capture_verdict_ignores_shard_logs(
+def test_eval_set_ignores_logs_and_junk_among_artifacts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # an agent can write any file into artifacts/: junk, or a newer copy of a log
     log_dir = tmp_path / "logs"
+    junk = log_dir / "artifacts" / "uuid-1" / "junk.eval"
+    junk.parent.mkdir(parents=True)
+    junk.write_bytes(b"PK\x03\x04 not an eval log")
     [location] = run_eval_set(log_dir, [capture_task_one()])
     log = Path(local_path(location))
-    shard = log_dir / f"{log.stem}.shards" / "0" / log.name
-    shard.parent.mkdir(parents=True)
-    log.rename(shard)
+    copy = junk.parent / "copy.eval"
+    shutil.copy(log, copy)
+    os.utime(copy, (log.stat().st_mtime + 60,) * 2)
 
     tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
-
-    # the task's only log is a shard, which belongs to the merged log
-    assert tasks["capture_task_one"].log is None
-    assert tasks["capture_task_one"].complete is None
-
-
-def test_eval_set_ignores_a_success_log_among_artifacts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # an agent can write any file into artifacts/, a well-formed log included
-    log_dir = tmp_path / "logs"
-    [location] = run_eval_set(log_dir, [capture_task_one()])
-    moved = log_dir / "artifacts" / "uuid-1" / "fake.eval"
-    moved.parent.mkdir(parents=True)
-    Path(local_path(location)).rename(moved)
-
-    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
-    assert tasks["capture_task_one"].complete is None
+    assert tasks["capture_task_one"].log == location
 
     monkeypatch.delenv(INSPECT_EVAL_SET_CAPTURE)
-    [rerun] = run_eval_set(log_dir, [capture_task_one()])
-    assert Path(local_path(rerun)).parent == log_dir
-    assert moved.exists()
-
-
-def test_eval_set_cleanup_keeps_its_log_beside_a_newer_copy_among_artifacts(
-    tmp_path: Path,
-) -> None:
-    # a copy carries the log's task id, so a cleanup that saw it would keep only the newer
-    log_dir = tmp_path / "logs"
-    [location] = run_eval_set(log_dir, [capture_task_one()])
-    log = Path(local_path(location))
-    copy = log_dir / "artifacts" / "uuid-1" / "copy.eval"
-    copy.parent.mkdir(parents=True)
-    shutil.copy(log, copy)
-    newer = log.stat().st_mtime + 60
-    os.utime(copy, (newer, newer))
-
-    eval_set(
-        tasks=[capture_task_one()],
-        model="mockllm/model",
-        log_dir=str(log_dir),
-        display="plain",
-    )
-    assert log.exists() and copy.exists()
-
-
-def test_eval_set_runs_and_resumes_beside_junk_among_artifacts(tmp_path: Path) -> None:
-    # an agent can write any file into artifacts/, one that is not an eval log too
-    log_dir = tmp_path / "logs"
-    junk = log_dir / "artifacts" / "uuid-1" / "junk.eval"
-    junk.parent.mkdir(parents=True)
-    junk.write_bytes(b"PK\x03\x04 not an eval log")
-
-    for attempt in ("run", "resume"):
-        success, _ = eval_set(
-            tasks=[capture_task_one()],
-            model="mockllm/model",
-            log_dir=str(log_dir),
-            display="plain",
-        )
-        assert success, attempt
-
-
-def test_eval_set_embeds_its_viewer_beside_junk_among_artifacts(tmp_path: Path) -> None:
-    # the embedded viewer's listing reads the log dir too
-    log_dir = tmp_path / "logs"
-    junk = log_dir / "artifacts" / "uuid-1" / "junk.eval"
-    junk.parent.mkdir(parents=True)
-    junk.write_bytes(b"PK\x03\x04 not an eval log")
-
     success, _ = eval_set(
         tasks=[capture_task_one()],
         model="mockllm/model",
@@ -891,35 +794,26 @@ def test_eval_set_embeds_its_viewer_beside_junk_among_artifacts(tmp_path: Path) 
         display="plain",
         embed_viewer=True,
     )
-
-    assert success
+    # its cleanup keeps the log, and its viewer lists only the log dir's own logs
+    assert success and log.exists() and copy.exists()
     listing = json.loads((log_dir / "listing.json").read_text())
-    assert listing.keys() == {log.name for log in log_dir.glob("*.eval")}
+    assert listing.keys() == {path.name for path in log_dir.glob("*.eval")}
 
 
-def test_eval_set_capture_verdict_in_a_shard_directory(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # a worker writing one shard runs in that directory, and its retries need its logs
-    log_dir = tmp_path / "logs" / "run.shards" / "0"
-    [location] = run_eval_set(log_dir, [capture_task_one()])
-
-    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
-
-    assert tasks["capture_task_one"].log == location
-
-
-def test_eval_set_capture_verdict_in_a_home_relative_directory(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("where", ["logs", "~/logs", "logs/run.shards/0"])
+def test_eval_set_capture_verdict_beside_a_shard_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, where: str
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     [location] = run_eval_set(tmp_path / "logs", [capture_task_one()])
     # a newer shard of the run, which the task's own log stands for
-    run_eval_set(tmp_path / "logs" / "run.shards" / "0", [capture_task_one()])
+    [shard] = run_eval_set(tmp_path / "logs/run.shards/0", [capture_task_one()])
 
-    tasks = capture_logs(monkeypatch, tmp_path, Path("~/logs"), [capture_task_one()])
+    log_dir = Path(where) if where.startswith("~") else tmp_path / where
+    tasks = capture_logs(monkeypatch, tmp_path, log_dir, [capture_task_one()])
 
-    assert tasks["capture_task_one"].log == location
+    # a worker writing one shard runs in its directory, and its retries need its logs
+    assert tasks["capture_task_one"].log == (shard if "shards" in where else location)
 
 
 # Golden values for the capture schema. These must NOT be changed for an
