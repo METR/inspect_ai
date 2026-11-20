@@ -17,6 +17,7 @@ Schema changes require a version bump and corresponding golden-test updates
 
 import hashlib
 import os
+from collections import Counter
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple
 
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ from inspect_ai._eval.task.run import plan_agent_name, resolve_plan
 from inspect_ai._eval.task.task import resolve_epochs, resolve_task_epochs
 from inspect_ai._eval.task.util import resolve_task_sample_ids, sample_id_filter
 from inspect_ai.dataset import Dataset
+from inspect_ai.dataset._util import normalise_sample_id
 from inspect_ai.model._model import ModelName
 from inspect_ai.model._model_config import model_args_for_log
 
@@ -44,7 +46,8 @@ EVAL_SET_CAPTURE_VERSION = 3
 # METR fork: the fork's own additions are numbered above upstream's range (see
 # `eval_set_fork_version`), so the line above stays as upstream has it.
 _FORK_LOG_VERDICT_VERSION = fork_protocol_version(EVAL_SET_CAPTURE_VERSION, 1)
-EVAL_SET_CAPTURE_VERSION = _FORK_LOG_VERDICT_VERSION
+_FORK_SAMPLE_IDS_VERSION = fork_protocol_version(EVAL_SET_CAPTURE_VERSION, 2)
+EVAL_SET_CAPTURE_VERSION = _FORK_SAMPLE_IDS_VERSION
 
 
 def eval_set_capture_requested() -> str | None:
@@ -107,6 +110,12 @@ class EvalSetCaptureTask(BaseModel):
 
     samples: int
     """Number of dataset samples that would run (after any `limit`)."""
+
+    sample_ids: list[str | int] | None = None
+    """Ids of the samples that would run, in dataset order, or `None` when the task cannot be split between workers by them. Added by the METR fork (`_FORK_SAMPLE_IDS_VERSION`).
+
+    A runner that splits a task selects each worker's part by these ids, and a merge of the parts must see one run. So a task has none when a selected sample has no id (it answers to its position, which a dataset shuffled at load changes), two ids select each other once normalised or one reads as `<task>:<id>`, a shuffle draws its `limit`, it adds samples while it runs, it stops samples early, or its `fail_on_error` is a count or fraction (each worker would judge only its part). Each id is an fnmatch pattern to the worker that receives it, so a runner escapes one holding `*`, `?` or `[`.
+    """
 
     epochs: int
     """Effective number of epochs."""
@@ -201,15 +210,11 @@ def samples_for_limit(count: int, limit: int | tuple[int, int] | None) -> int:
     Returns:
         Number of samples that would run.
     """
-    if isinstance(limit, tuple):
-        start, stop = limit
-        if start >= count:
-            count = 0
-        else:
-            count = min(stop, count) - start
-    elif isinstance(limit, int):
-        count = min(limit, count)
-    return count
+    if limit is None:
+        return count
+    # Count what the executor's own slice selects (task/util.py), negatives included.
+    selected = slice(*limit) if isinstance(limit, tuple) else slice(limit)
+    return len(range(count)[selected])
 
 
 def samples_selected(
@@ -256,20 +261,92 @@ def samples_selected(
     Returns:
         Number of samples that would run.
     """
+    if sample_id is None:
+        return samples_for_limit(len(dataset), limit)
+    return len(sample_ids_selected(dataset, None, sample_id, task, task_names))
+
+
+def sample_ids_selected(
+    dataset: Dataset,
+    limit: int | tuple[int, int] | None,
+    sample_id: str | int | list[str] | list[int] | list[str | int] | None,
+    task: str | None = None,
+    task_names: Iterable[str] | None = None,
+) -> list[str | int | None]:
+    """Ids of the dataset samples `samples_selected` counts, in dataset order.
+
+    Args:
+        dataset: The task's dataset.
+        limit: Eval limit (first n samples, or [start, stop] range).
+        sample_id: Sample id pattern(s) selected, if any.
+        task: The task's registry name, for resolving `task:id` selectors (see `samples_selected`).
+        task_names: Names of every task in the run (see `samples_selected`).
+
+    Returns:
+        Each selected sample's id, or `None` for a sample with no id of its own.
+    """
     if sample_id is not None:
         if task is not None:
             resolved = resolve_task_sample_ids(task, sample_id, task_names)
             if resolved is None or resolved == []:
                 # every selector named some other task
-                return 0
+                return []
             sample_id = resolved
         matcher = sample_id_filter(sample_id)
-        return sum(
-            1
+        return [
+            sample.id
             for position, sample in enumerate(dataset, start=1)
             if matcher.matches(sample.id if sample.id is not None else position)
+        ]
+    ids = [sample.id for sample in dataset]
+    if isinstance(limit, tuple):
+        return ids[limit[0] : limit[1]]
+    return ids if limit is None else ids[:limit]
+
+
+def _split_ids(
+    task: ResolvedTask,
+    ids: list[str | int | None],
+    limit: int | tuple[int, int] | None,
+    sample_shuffle: bool | int | None,
+    fail_on_error: bool | float | None,
+    task_names: Iterable[str] | None = None,
+) -> list[str | int] | None:
+    """`ids` if a runner may split `task` between workers by them (see `EvalSetCaptureTask.sample_ids`)."""
+    selected = [id for id in ids if id is not None]
+    named = {name.lower() for name in task_names or []} | {task.task.name.lower()}
+    try:
+        # a worker's selector also matches any other sample whose id normalises alike
+        every = Counter(
+            os.path.normcase(
+                normalise_sample_id(sample.id if sample.id is not None else position)
+            )
+            for position, sample in enumerate(task.task.dataset, start=1)
         )
-    return samples_for_limit(len(dataset), limit)
+        aliased = any(
+            every[os.path.normcase(normalise_sample_id(id))] > 1 for id in selected
+        )
+    except ValueError:  # a digit `int` refuses, such as "²"
+        aliased = True
+    unsplittable = (
+        len(selected) < len(ids)
+        or aliased
+        # a worker reads `<task>:<id>` as a selector when `<task>` is in the set
+        or any(
+            isinstance(id, str) and id.partition(":")[0].lower() in named
+            for id in selected
+            if ":" in str(id)
+        )
+        or (limit is not None and bool(sample_shuffle or task.task.dataset.shuffled))
+        or task.task.sample_source is not None
+        or task.task.early_stopping is not None
+        # the eval set's value overrides the task's, as the run applies it (run.py)
+        or not isinstance(
+            task.task.fail_on_error if fail_on_error is None else fail_on_error,
+            bool | None,
+        )
+    )
+    return None if unsplittable else selected
 
 
 def build_eval_set_capture(
@@ -284,6 +361,8 @@ def build_eval_set_capture(
     overrides: "EvalSetOverrides | None" = None,
     scan: "EvalSetCaptureScan | None" = None,
     task_logs: Mapping[str, TaskLogVerdict],
+    sample_shuffle: bool | int | None = None,
+    fail_on_error: bool | float | None = None,
 ) -> EvalSetCapture:
     """Build a capture manifest for a set of resolved tasks.
 
@@ -298,6 +377,8 @@ def build_eval_set_capture(
         overrides: Operational overrides in force, or `None`.
         scan: Serialized scanner configuration, or `None` when the definition declares no scanners.
         task_logs: Each task's log and completion verdict by task identifier, for tasks that have a log.
+        sample_shuffle: Eval-set level sample shuffle.
+        fail_on_error: Eval-set level `fail_on_error`, which overrides each task's.
 
     Returns:
         Capture manifest for the eval set.
@@ -320,6 +401,9 @@ def build_eval_set_capture(
         args_full = getattr(task.task, TASK_ALL_PARAMS_ATTR, None)
         identifier = task_identifier(task, eval_set_args)
         task_log = task_logs.get(identifier)
+        ids = sample_ids_selected(
+            task.task.dataset, limit, sample_id, task.task.name, task_names
+        )
 
         capture_tasks.append(
             EvalSetCaptureTask(
@@ -345,8 +429,9 @@ def build_eval_set_capture(
                 ),
                 sequence=task.sequence,
                 identifier=identifier,
-                samples=samples_selected(
-                    task.task.dataset, limit, sample_id, task.task.name, task_names
+                samples=len(ids),
+                sample_ids=_split_ids(
+                    task, ids, limit, sample_shuffle, fail_on_error, task_names
                 ),
                 epochs=epoch_count,
                 log=task_log.location if task_log else None,

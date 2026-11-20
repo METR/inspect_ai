@@ -2034,6 +2034,8 @@ def test_unserializable_score_metadata_does_not_abort_eval(
     assert sample.scores["deep_metadata"].value == 1
     assert sample.scores["deep_metadata"].answer == "x"
     assert sample.scores["deep_metadata"].metadata is None
+    # a shard merge needs it to merge the sample's scores
+    assert [event.event for event in sample.events] == ["sample_init"]
     assert sample.error is not None
     assert "score metadata" in sample.error.message
     assert log.reductions is not None

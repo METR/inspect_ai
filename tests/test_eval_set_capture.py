@@ -5,15 +5,16 @@ import sys
 import textwrap
 import zipfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pytest
 from test_helpers.buffer import simulate_crashed_buffer_db
 from test_helpers.utils import identity_solver
 
-from inspect_ai import Task, TaskSource, eval, eval_set, task
+from inspect_ai import SampleSource, Task, TaskSource, eval, eval_set, task
 from inspect_ai._eval.eval_set_manifest import (
     _FORK_LOG_VERDICT_VERSION,
+    _FORK_SAMPLE_IDS_VERSION,
     EVAL_SET_CAPTURE_VERSION,
     INSPECT_EVAL_SET_CAPTURE,
     EvalSetCapture,
@@ -39,6 +40,7 @@ from inspect_ai.log._recorders.eval import LogStart
 from inspect_ai.log._recorders.types import SampleEvent
 from inspect_ai.scorer import Score, exact
 from inspect_ai.solver import Generate, Solver, TaskState, generate, solver
+from inspect_ai.util import EarlyStopping
 
 
 @task
@@ -61,6 +63,24 @@ def capture_task_two() -> Task:
         solver=[generate()],
         scorer=exact(),
         epochs=3,
+    )
+
+
+@task
+def capture_task_ids(
+    early_stopping: bool = False,
+    fail_on_error: float | None = None,
+    ids: list[str | int | None] | None = None,
+    source: bool = False,
+) -> Task:
+    samples = [Sample(input="x", target="x", id=id) for id in ids or ["a", "b", 3]]
+    return Task(
+        dataset=SampleSource.from_samples(samples) if source else samples,
+        solver=[generate()],
+        scorer=exact(),
+        # capture runs nothing, so any object stands for early stopping
+        early_stopping=cast(EarlyStopping, object()) if early_stopping else None,
+        fail_on_error=fail_on_error,
     )
 
 
@@ -115,6 +135,7 @@ def test_eval_set_capture_manifest(
     assert task_one.args_full == {"difficulty": "hard"}
     assert task_one.args_hash == task_args_hash({"difficulty": "hard"})
     assert task_one.samples == 3
+    assert task_one.sample_ids is None
     assert task_one.epochs == 1
     assert task_one.solver == "generate"
 
@@ -686,9 +707,65 @@ def test_samples_for_limit() -> None:
         (10, (2, 5), 3),
         (10, (12, 15), 0),
         (4, (2, 15), 2),
+        (10, (5, 3), 0),
+        (10, -1, 9),
+        (10, (2, -1), 7),
     ]
     for count, limit, expected in cases:
         assert samples_for_limit(count, limit) == expected, (count, limit)
+
+
+@pytest.mark.parametrize(
+    "selection,task_args,expected",
+    [
+        ({"limit": 2}, {}, ["a", "b"]),
+        ({"limit": (1, 3)}, {}, ["b", 3]),
+        # dataset order, not the selector's
+        ({"sample_id": ["capture_task_ids:3", "capture_task_ids:a"]}, {}, ["a", 3]),
+        # each worker would draw its own subset
+        ({"limit": 2, "sample_shuffle": True}, {}, None),
+        # a sample with no id answers to its position
+        ({}, {"ids": ["a", None, 3]}, None),
+        # position 3, outside the limit, answers to 3
+        ({"limit": 2}, {"ids": [3, "b", None]}, None),
+        # "01" and 1 select each other, also when the limit leaves one out
+        ({}, {"ids": ["01", 1, "b"]}, None),
+        ({"limit": 2}, {"ids": ["a", 1, "01"]}, None),
+        # a digit `int` refuses
+        ({}, {"ids": ["a", "²"]}, None),
+        ({}, {"ids": ["capture_task_ids:a", "b"]}, None),
+        ({}, {"ids": ["capture_task_two:1", "b"]}, None),
+        ({}, {"source": True}, None),
+        ({}, {"early_stopping": True}, None),
+        # each worker would judge the count over its part only
+        ({}, {"fail_on_error": 2}, None),
+        # the eval set's value overrides the task's
+        ({"fail_on_error": 2}, {"fail_on_error": True}, None),
+        ({"fail_on_error": False}, {"fail_on_error": 2}, ["a", "b", 3]),
+    ],
+)
+def test_eval_set_capture_sample_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    selection: dict[str, Any],
+    task_args: dict[str, Any],
+    expected: list[str | int] | None,
+) -> None:
+    tasks = [capture_task_ids(**task_args), capture_task_two()]
+    got = capture_logs(monkeypatch, tmp_path, tmp_path / "logs", tasks, **selection)
+    assert got["capture_task_ids"].sample_ids == expected
+
+
+def test_eval_set_capture_skips_shard_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # a shard of the run: the set's capture skips it, a worker in its directory needs it
+    log_dir = tmp_path / "logs"
+    [location] = run_eval_set(log_dir, [capture_task_one()])
+    [shard] = run_eval_set(log_dir / "run.shards" / "0", [capture_task_one()])
+    for where, own in ((log_dir, location), (log_dir / "run.shards" / "0", shard)):
+        tasks = capture_logs(monkeypatch, tmp_path, where, [capture_task_one()])
+        assert tasks["capture_task_one"].log == own
 
 
 # Golden values for the capture schema. These must NOT be changed for an
@@ -778,6 +855,15 @@ _EXPECTED_CAPTURE_FIELDS: dict[int, set[str]] = {
     },
 }
 _EXPECTED_CAPTURE_FIELDS[_FORK_LOG_VERDICT_VERSION] = _EXPECTED_CAPTURE_FIELDS[3]
+
+# The fork's second addition added `sample_ids`, so a runner can split a task
+# between workers by sample id.
+_EXPECTED_CAPTURE_TASK_FIELDS[_FORK_SAMPLE_IDS_VERSION] = _EXPECTED_CAPTURE_TASK_FIELDS[
+    _FORK_LOG_VERDICT_VERSION
+] | {"sample_ids"}
+_EXPECTED_CAPTURE_FIELDS[_FORK_SAMPLE_IDS_VERSION] = _EXPECTED_CAPTURE_FIELDS[
+    _FORK_LOG_VERDICT_VERSION
+]
 
 
 def test_eval_set_capture_schema_stability() -> None:
