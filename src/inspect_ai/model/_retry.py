@@ -1,3 +1,4 @@
+import copy
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 import anyio
@@ -58,6 +59,7 @@ def model_retry_config(
     report_retry_wait: bool = True,
     qualified_model_name: str | None = None,
     attempts: ModelAttempts | None = None,
+    is_auth_failure: Callable[[Exception], bool] | None = None,
 ) -> ModelRetryConfig:
     # `model_name` is the bare provider model name and is display-oriented
     # (trace retry lines, the ctl retry_wait activity view keep showing it);
@@ -129,11 +131,29 @@ def model_retry_config(
             await res
 
     # resolve wait
-    wait = (
-        wait
-        if wait is not None
-        else wait_exponential_jitter(**backoff_multiplier(3), max=(30 * 60), jitter=3)
-    )
+    if wait is None:
+        backoff = wait_exponential_jitter(
+            **backoff_multiplier(3), max=(30 * 60), jitter=3
+        )
+        auth_failures = 0
+
+        def default_wait(rs: RetryCallState) -> float:
+            # A refreshed key is sent only after these waits, so it has to outlive them.
+            nonlocal auth_failures
+            ex = rs.outcome.exception() if rs.outcome else None
+            if not (
+                isinstance(ex, Exception) and is_auth_failure and is_auth_failure(ex)
+            ):
+                auth_failures = 0
+                return backoff(rs)
+            # With max_retries a call keeps its pace, so its retries outlast an outage.
+            if generate_config_override("max_retries", max_retries) is None:
+                auth_failures += 1
+                rs = copy.copy(rs)
+                rs.attempt_number = auth_failures
+            return min(backoff(rs), 10 * 60)
+
+        wait = default_wait
 
     # tenacity's retry_if_exception expects a bool predicate; coerce
     # RetryDecision returns to bool here so providers can pass their classifier

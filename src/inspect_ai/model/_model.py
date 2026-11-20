@@ -1434,6 +1434,7 @@ class Model:
                 ),
                 sample_waits=True,
                 wait=self.api.retry_wait(),
+                is_auth_failure=self.api.is_auth_failure,
                 qualified_model_name=self.api.qualified_model_name,
                 attempts=attempts,
             )
@@ -1589,6 +1590,7 @@ class Model:
                     ),
                     sample_waits=True,
                     wait=self.api.retry_wait(),
+                    is_auth_failure=self.api.is_auth_failure,
                     qualified_model_name=self.api.qualified_model_name,
                     attempts=attempts,
                 )
@@ -1783,6 +1785,7 @@ class Model:
                 ),
                 sample_waits=True,
                 wait=self.api.retry_wait(),
+                is_auth_failure=self.api.is_auth_failure,
                 qualified_model_name=self.api.qualified_model_name,
                 attempts=attempts,
             )
