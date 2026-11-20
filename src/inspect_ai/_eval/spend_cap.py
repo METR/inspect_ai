@@ -36,9 +36,8 @@ class SpendCap:
     """Track new charges independently of reused sample results.
 
     The eval-set owns this object across its retry runs. Each run owns one
-    async writer. Its dispatcher and each of its running tasks register a
-    callback that stops them when the cap is reached. All updates happen on
-    the eval's event loop, so counter updates need no lock.
+    async writer and registers its task cancellation handles. All updates
+    happen on the eval's event loop, so counter updates need no lock.
     """
 
     def __init__(self, limit: float, log_dir: str) -> None:
@@ -48,7 +47,7 @@ class SpendCap:
         self._path = f"{absolute_file_path(log_dir).rstrip('/')}/{SPEND_FILE}"
         self._loaded = False
         self._saved = 0.0
-        self._on_reached: set[Callable[[], None]] = set()
+        self._tasks: set[Callable[[], None]] = set()
         self._unpriced: set[str] = set()
         self._warned = False
 
@@ -77,8 +76,8 @@ class SpendCap:
                 self.spent,
                 self.limit,
             )
-            for stop in tuple(self._on_reached):
-                stop()
+            for cancel in tuple(self._tasks):
+                cancel()
         elif not self._warned and self.spent >= self.limit * 0.8:
             self._warned = True
             logger.warning(
@@ -88,15 +87,14 @@ class SpendCap:
             )
 
     @contextmanager
-    def on_reached(self, stop: Callable[[], None]) -> Iterator[None]:
-        """Call `stop` when the cap is reached, or now if it already was."""
-        self._on_reached.add(stop)
+    def task(self, cancel: Callable[[], None]) -> Iterator[None]:
+        self._tasks.add(cancel)
         try:
             if self.tripped:
-                stop()
+                cancel()
             yield
         finally:
-            self._on_reached.discard(stop)
+            self._tasks.discard(cancel)
 
     async def _load(self, fs: AsyncFilesystem) -> None:
         if self._loaded:
@@ -194,12 +192,12 @@ def spend_cap_reached() -> bool:
 
 
 @contextmanager
-def on_spend_cap_reached(stop: Callable[[], None]) -> Iterator[None]:
+def spend_cap_task(cancel: Callable[[], None]) -> Iterator[None]:
     cap = _spend_cap.get()
     if cap is None:
         yield
     else:
-        with cap.on_reached(stop):
+        with cap.task(cancel):
             yield
 
 

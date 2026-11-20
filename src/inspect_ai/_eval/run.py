@@ -20,7 +20,11 @@ import anyio
 from anyio.abc import TaskGroup
 from typing_extensions import Unpack
 
-from inspect_ai._eval.spend_cap import SPEND_CAP_REACHED, on_spend_cap_reached
+from inspect_ai._eval.spend_cap import (
+    SPEND_CAP_REACHED,
+    spend_cap_reached,
+    spend_cap_task,
+)
 from inspect_ai._eval.task.constants import TASK_ALL_PARAMS_ATTR
 from inspect_ai._util._async import Wake, unwrap_exception_group
 from inspect_ai._util.environ import environ_vars
@@ -650,7 +654,7 @@ async def _run_task(options: TaskRunOptions, can_retry: bool = False) -> TaskRun
                 async def run() -> None:
                     nonlocal result, abandoned
                     try:
-                        with on_spend_cap_reached(
+                        with spend_cap_task(
                             functools.partial(
                                 cancel_task, "abort", reason=SPEND_CAP_REACHED
                             )
@@ -827,16 +831,12 @@ async def run_task_retry_attempts(
             launch=parallel, in_flight=in_flight, pending=len(pending)
         )
 
-    def stop_dispatch() -> None:
-        nonlocal cancelled
-        cancelled = True
-        wake.set()
+    def stopping() -> bool:
+        return cancelled or spend_cap_reached()
 
     async with _run_task_screen(task_specs(tasks)) as screen:
         init_task_screen(screen)
-        stops = ExitStack()
         try:
-            stops.enter_context(on_spend_cap_reached(stop_dispatch))
             # registered inside the try so the removes in the finally below
             # always run (a failure in task_screen setup would otherwise
             # leak them into the module-level registries)
@@ -940,7 +940,7 @@ async def run_task_retry_attempts(
                         )
                     elif result.status == "error":
                         retry = True
-                    retry = retry and item.retries_remaining > 0 and not cancelled
+                    retry = retry and item.retries_remaining > 0 and not stopping()
 
                     # a drain/plain cancel issued while this attempt was
                     # tearing down (or between run_one iterations) stamped
@@ -1094,7 +1094,7 @@ async def run_task_retry_attempts(
                     # each iteration (a set fires the dispatch wakers, so a
                     # raise reaches a waiting dispatcher immediately)
                     while (
-                        not cancelled
+                        not stopping()
                         and in_flight < effective_max_tasks(parallel)
                         and pending
                     ):
@@ -1107,7 +1107,7 @@ async def run_task_retry_attempts(
                         in_flight += 1
                         tg.start_soon(run_one, item)
 
-                    if cancelled:
+                    if stopping():
                         break
 
                     # work still queued or running (incl. pending retries): wait
@@ -1131,7 +1131,6 @@ async def run_task_retry_attempts(
                 reporter_scope.cancel()
 
         finally:
-            stops.close()
             # attempts still queued never ran: release their log entries,
             # which would otherwise live for the whole run
             with anyio.CancelScope(shield=True):
