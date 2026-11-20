@@ -1131,15 +1131,14 @@ async def run_task_retry_attempts(
                 # stop the reporter so the task group can exit
                 reporter_scope.cancel()
 
-            # the spend cap stops dispatch with tasks still queued: release
-            # their log entries, which would otherwise live for the whole run
-            if spend_cap_reached():
-                with anyio.CancelScope(shield=True):
-                    for item in pending:
-                        await item.options.logger.discard(
-                            keep_destination=True, keep_buffer=True
-                        )
         finally:
+            # tasks still queued were never started: release their log
+            # entries, which would otherwise live for the whole run
+            with anyio.CancelScope(shield=True):
+                for item in pending:
+                    await item.options.logger.discard(
+                        keep_destination=True, keep_buffer=True
+                    )
             remove_dispatch_waker(wake.set)
             remove_task_dispatcher(dispatcher_stats)
             clear_task_screen()
