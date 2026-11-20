@@ -3833,3 +3833,10 @@ def test_eval_set_grown_dataset_without_stable_ids_still_reruns() -> None:
         final = read_eval_log(logs[0].location)
         assert final.status == "success"
         assert final.eval.dataset.samples == 4
+
+
+def test_list_all_eval_logs_accepts_an_s3a_log_dir(mock_s3: None) -> None:
+    source = next(Path("tests/log/test_list_logs").glob("*.eval"))
+    write_eval_log(read_eval_log(source.as_posix()), "s3://test-bucket/a/run.eval")
+    # the listing names its files `s3://`, and both name one dir
+    assert len(list_all_eval_logs("s3a://test-bucket/a")) == 1

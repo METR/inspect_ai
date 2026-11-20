@@ -187,6 +187,15 @@ def test_slice_dataset_empty_sample_id_selects_nothing() -> None:
     assert len(slice_dataset(dataset, None, [], dynamic=True)) == 0
 
 
+def test_slice_dataset_matches_escaped_ids_as_themselves(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    dataset = MemoryDataset([Sample(id=i, input="a") for i in ["*", "s?", "[s]", "s"]])
+    selected = slice_dataset(dataset, None, ["[*]", "s[?]", "[[]s]"])
+    assert [sample.id for sample in selected] == ["*", "s?", "[s]"]
+    assert "not found" not in caplog.text
+
+
 def test_sample_id_with_colon_runs_exactly_that_sample() -> None:
     task = Task(
         name="exploit_gym",
