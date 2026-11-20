@@ -91,7 +91,7 @@ class TaskCancel:
     retry request made then bounds the write and takes effect when it ends
     (see ``abort_bounded_write``)."""
     reason: str | None = None
-    """Why the task was cancelled, when not by the user (recorded as the log's error)."""
+    """Why the task was cancelled, when not by the user. Stamped with the cancel and recorded as the log's error."""
     _cancel_type: CancelType = field(default=None, init=False)
     _closed: bool = field(default=False, init=False)
     _ended_in_error: bool = field(default=False, init=False)
@@ -112,10 +112,16 @@ class TaskCancel:
             or _ESCALATION_LADDER[requested] > _ESCALATION_LADDER[self._cancel_type]
         )
 
-    def request(self, requested: CancelType) -> None:
-        """Stamp and apply ``requested`` if it escalates; otherwise do nothing."""
+    def request(self, requested: CancelType, *, reason: str | None = None) -> None:
+        """Stamp and apply ``requested`` if it escalates; otherwise do nothing.
+
+        ``reason`` is stamped with it. A request that gives none keeps the
+        reason already stamped.
+        """
         if self.escalates(requested):
             self._cancel_type = requested
+            if reason is not None:
+                self.reason = reason
             self.apply(requested)
 
     def close(self, ended_in_error: bool) -> None:
