@@ -1,4 +1,5 @@
 import os
+import re
 import reprlib
 from copy import deepcopy
 from fnmatch import fnmatch
@@ -54,6 +55,20 @@ class SampleIdMatcher(NamedTuple):
     patterns: list[str]
 
 
+def _has_wildcard(pattern: str) -> bool:
+    return any(char in pattern for char in "*?[")
+
+
+_ESCAPED = re.compile(r"\[([*?\[])\]")
+
+
+def _literal(pattern: str) -> str | None:
+    """The one id `pattern` matches, when its only wildcards are escaped (`[*]`)."""
+    if _has_wildcard(_ESCAPED.sub("", pattern)):
+        return None
+    return _ESCAPED.sub(r"\1", pattern)
+
+
 def sample_id_filter(
     sample_id: str | int | list[str] | list[int] | list[str | int],
 ) -> SampleIdMatcher:
@@ -66,9 +81,16 @@ def sample_id_filter(
     """
     sample_ids = sample_id if isinstance(sample_id, list) else [sample_id]
     patterns = [normalise_sample_id(id) for id in sample_ids]
+    # a pattern matching one id is looked up, not fnmatch-ed against every sample
+    literals = {pat: _literal(pat) for pat in patterns}
+    literal = {os.path.normcase(lit) for lit in literals.values() if lit is not None}
+    wildcards = [pat for pat, lit in literals.items() if lit is None]
 
     def matches(id: str | int | None) -> bool:
-        return any(fnmatch(normalise_sample_id(id), pat) for pat in patterns)
+        normalised = normalise_sample_id(id)
+        return os.path.normcase(normalised) in literal or any(
+            fnmatch(normalised, pat) for pat in wildcards
+        )
 
     return SampleIdMatcher(matches, patterns)
 
@@ -171,9 +193,9 @@ def slice_dataset(
 
         # validate all the sample ids and warn if they aren't in the dataset
         if not dynamic:
-            all_sample_ids = [normalise_sample_id(sample.id) for sample in dataset]
+            all_sample_ids = {normalise_sample_id(sample.id) for sample in dataset}
             for id in matcher.patterns:
-                if id not in all_sample_ids:
+                if (_literal(id) or id) not in all_sample_ids:
                     warn_once(
                         logger,
                         f"sample id '{id}' not found in dataset '{dataset.name}'.",
