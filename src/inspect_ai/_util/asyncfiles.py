@@ -213,7 +213,8 @@ class _AnyIOFileByteReceiveStream(ByteReceiveStream):
     async def aclose(self) -> None:
         """Close the file if it was opened."""
         if self._file is not None:
-            await self._file.aclose()
+            # in-process: a cancelled read's cleanup cannot wait for a worker thread
+            self._file.wrapped.close()
             self._file = None
 
 
