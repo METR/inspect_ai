@@ -884,6 +884,7 @@ def eval_set(
             ),
             sample_shuffle=sample_shuffle,
             fail_on_error=fail_on_error,
+            checkpoint=checkpoint,
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))

@@ -25,7 +25,7 @@ from inspect_ai._eval.evalset import TASK_IDENTIFIER_VERSION
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.file import local_path
 from inspect_ai._util.json import to_json_str_safe
-from inspect_ai.dataset import Sample
+from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.event import SampleInitEvent
 from inspect_ai.log import (
     ProvenanceData,
@@ -71,15 +71,19 @@ def capture_task_ids(
     fail_on_error: float | None = None,
     ids: list[str | int | None] | None = None,
     source: bool = False,
+    shuffled: bool = False,
+    checkpoint: bool | None = None,
 ) -> Task:
     samples = [Sample(input="x", target="x", id=id) for id in ids or ["a", "b", 3]]
+    dataset = MemoryDataset(samples, shuffled=shuffled)
     return Task(
-        dataset=SampleSource.from_samples(samples) if source else samples,
+        dataset=SampleSource.from_samples(samples) if source else dataset,
         solver=[generate()],
         scorer=exact(),
         # capture runs nothing, so any object stands for early stopping
         early_stopping=cast(EarlyStopping, object()) if early_stopping else None,
         fail_on_error=fail_on_error,
+        checkpoint=checkpoint,
     )
 
 
@@ -705,6 +709,10 @@ def test_samples_for_limit() -> None:
         ({"sample_id": ["capture_task_ids:3", "capture_task_ids:a"]}, {}, ["a", 3]),
         # each worker would draw its own subset
         ({"limit": 2, "sample_shuffle": True}, {}, None),
+        ({"limit": 2}, {"shuffled": True}, None),
+        # a merge deletes the shards, and their checkpoints with them
+        ({}, {"checkpoint": True}, None),
+        ({"checkpoint": True}, {}, None),
         # a sample with no id answers to its position
         ({}, {"ids": ["a", None, 3]}, None),
         # position 3, outside the limit, answers to 3

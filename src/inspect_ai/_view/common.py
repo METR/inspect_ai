@@ -251,8 +251,13 @@ async def get_log_files(
     if not show_shards:
         listing = await hide_merged_shards(logs, can_read)
         logs = listing.logs
+        # a merge at the client's mtime is new to it unless it alone has that mtime
+        tied = sum(log.mtime == mtime for log in logs) > 1
         refresh = listing.visible_shards or (
-            listing.hiding_mtime is not None and listing.hiding_mtime > mtime
+            listing.hiding_mtime is not None
+            and (
+                listing.hiding_mtime > mtime or (listing.hiding_mtime == mtime and tied)
+            )
         )
 
     # the token is the client's newest mtime, so a newest log older than it was removed
