@@ -948,9 +948,6 @@ class AnthropicAPI(ModelAPI):
                 if system_param is not None:
                     request["system"] = system_param
                 request["tools"] = tools_param
-                # extended thinking rejects forced tool choice (400), so
-                # tool_choice is omitted entirely with it; adaptive thinking
-                # accepts it (the model skips thinking on a forced turn)
                 tool_choice_degraded = False
                 if len(tools_param) > 0:
                     resolved_choice = self.resolved_tool_choice(tool_choice)
@@ -970,7 +967,15 @@ class AnthropicAPI(ModelAPI):
                         )
                         resolved_choice = "auto"
                     tool_choice_degraded = resolved_choice != tool_choice
-                    if not self.is_using_extended_thinking(config):
+                    # extended thinking rejects forced tool choices (400), so
+                    # they are omitted there and the API defaults to auto;
+                    # "none" is accepted and must be sent, or the model can call
+                    # the tools it was given. Adaptive thinking accepts every
+                    # choice (the model skips thinking on a forced turn)
+                    if (
+                        not self.is_using_extended_thinking(config)
+                        or resolved_choice == "none"
+                    ):
                         request["tool_choice"] = message_tool_choice(
                             resolved_choice, config
                         )
@@ -979,6 +984,10 @@ class AnthropicAPI(ModelAPI):
                             and resolved_choice.name == "web_search"
                         ):
                             _allow_direct_web_search(tools_param)
+                elif tool_choice == "none" and len(mcp_servers_param) > 0:
+                    # remote MCP servers are the only tools: without "none" the
+                    # model can still call them
+                    request["tool_choice"] = message_tool_choice("none", config)
 
                 # additional options
                 req, extra_body, headers, betas = self.completion_config(config)
@@ -2172,6 +2181,13 @@ class AnthropicAPI(ModelAPI):
 
     @override
     def tools_required(self) -> bool:
+        """Keep tools under `tool_choice="none"` for replayed thinking and MCP calls.
+
+        Claude models that bind thinking blocks to the model and prefix also
+        bind them to the request's tools, and the API rejects earlier remote
+        MCP calls in the history unless their servers are sent. Older models
+        may also reject tool calls in the history without tool definitions.
+        """
         return True
 
     @override
