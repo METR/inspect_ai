@@ -626,7 +626,16 @@ class ModelAPI(abc.ABC):
         return False
 
     def tools_required(self) -> bool:
-        """Any tool use in a message stream means that tools must be passed."""
+        """Keep tool definitions on requests with `tool_choice="none"`.
+
+        `generate()` drops the tools from a request with `tool_choice="none"`
+        unless this returns True. Return True when a request must carry the
+        tools a conversation used even though none may be called, e.g. because
+        the provider may validate tool history or replayed reasoning against
+        the request's tools. The provider must therefore set an option in its
+        API requests when `tool_choice="none"` that prevents the model from
+        making tool calls.
+        """
         return False
 
     def supports_remote_mcp(self) -> bool:
@@ -2781,8 +2790,8 @@ def tools_for_tool_choice(
     tools left, the tools are purged (unless the provider's `tools_required()`
     says otherwise) and the choice becomes `"none"`: some models (e.g. OpenAI
     and Mistral) get confused by tool definitions alongside `"none"` and 'semi'
-    use them by placing the arguments in JSON in their output, while Anthropic
-    errors if there are tools anywhere in the message stream and none defined.
+    use them by placing the arguments in JSON in their output. Providers whose
+    `tools_required()` is True keep the tools; see it for when that applies.
     """
     if isinstance(tool_choice, ToolFunction):
         tools = [tool for tool in tools if tool.name == tool_choice.name]

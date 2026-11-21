@@ -2493,10 +2493,12 @@ async def test_anthropic_forced_tool_choice_with_thinking_records_metadata(
 async def test_anthropic_tool_choice_none_with_thinking(
     config_kwargs: dict[str, Any], expected_thinking: str | None
 ) -> None:
-    """tool_choice="none" keeps the tools; only extended thinking omits it.
+    """tool_choice="none" keeps the tools and is sent with any thinking mode.
 
-    Anthropic requires tool definitions to validate tool history, so
-    `Model.generate` passes "none" through to the provider with the tools.
+    Anthropic keeps tool definitions under "none" (see
+    `AnthropicAPI.tools_required()`), so `Model.generate` passes "none"
+    through to the provider with the tools.
+    Extended thinking rejects forced tool choices but accepts "none".
     """
     from inspect_ai.model._model_output import ModelOutput
     from inspect_ai.tool._tool_params import ToolParam, ToolParams
@@ -2533,10 +2535,152 @@ async def test_anthropic_tool_choice_none_with_thinking(
 
     assert captured.get("thinking", {}).get("type") == expected_thinking
     assert [tool["name"] for tool in captured["tools"]] == ["addition"]
-    if expected_thinking == "enabled":
-        assert "tool_choice" not in captured
-    else:
-        assert captured["tool_choice"] == {"type": "none"}
+    assert captured["tool_choice"] == {"type": "none"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tools,tool_choice,sent_tool_choice",
+    [
+        (["mcp"], "none", {"type": "none"}),
+        (["mcp"], "auto", None),
+        (["mcp", "addition"], "none", {"type": "none"}),
+    ],
+)
+async def test_anthropic_tool_choice_none_with_remote_mcp_servers(
+    tools: list[str],
+    tool_choice: Literal["none", "auto"],
+    sent_tool_choice: dict[str, str] | None,
+) -> None:
+    """tool_choice "none" is sent when remote MCP servers are the only tools.
+
+    The servers stay in the request: earlier MCP calls in the history are
+    rejected without them, and their tools are part of the tool set Claude
+    binds thinking blocks to.
+    """
+    from inspect_ai.model._model_output import ModelOutput
+
+    model = get_model(
+        "anthropic/claude-opus-5-5",
+        api_key="test-key",
+        config=GenerateConfig(max_tokens=4096),
+    )
+    tool_infos = {
+        "mcp": ToolInfo(
+            name="mcp_server_docs",
+            description="Docs server.",
+            options={
+                "type": "http",
+                "name": "docs",
+                "url": "https://example.com/mcp",
+                "tools": "all",
+            },
+        ),
+        "addition": ToolInfo(name="addition", description="Add two numbers."),
+    }
+    captured: dict[str, object] = {}
+
+    async def fake_perform(
+        request: dict[str, object], *args: object, **kwargs: object
+    ) -> tuple[dict[str, object], ModelOutput]:
+        captured.update(request)
+        return {}, ModelOutput.from_content(model=model.name, content="ok")
+
+    with patch.object(model.api, "_perform_request_and_continuations", fake_perform):
+        await model.generate(
+            input="What is 1 + 1?",
+            tools=[tool_infos[name] for name in tools],
+            tool_choice=tool_choice,
+        )
+
+    extra_body = cast(dict[str, object], captured.get("extra_body", {}))
+    assert "mcp_servers" in extra_body
+    assert captured.get("tool_choice") == sent_tool_choice
+
+
+@pytest.mark.anyio
+async def test_anthropic_summary_request_keeps_agent_prefix() -> None:
+    """A summary request presents the system, tools and turns of the agent's request.
+
+    Claude binds each replayed thinking block to the system prompt, tools and
+    earlier turns of the request that produced it, so a summary request that
+    differs in any of them loses the agent's reasoning.
+    """
+    from inspect_ai.model._compaction.summary import CompactionSummary
+    from inspect_ai.model._model_output import ModelOutput
+    from inspect_ai.tool._tool_params import ToolParam, ToolParams
+
+    model = get_model(
+        "anthropic/claude-opus-5-5",
+        api_key="test-key",
+        config=GenerateConfig(max_tokens=4096),
+    )
+    tools = [
+        ToolInfo(
+            name="addition",
+            description="Add two numbers.",
+            parameters=ToolParams(
+                properties={"x": ToolParam(type="integer")}, required=["x"]
+            ),
+        )
+    ]
+    messages: list[ChatMessage] = [
+        ChatMessageSystem(content="Use the addition tool."),
+        ChatMessageUser(content="What is 1 + 1?", source="input"),
+        ChatMessageAssistant(
+            content=[
+                ContentReasoning(reasoning="sig-1", summary=""),
+                ContentText(text="Adding."),
+            ],
+            tool_calls=[
+                ToolCall(id="toolu_1", function="addition", arguments={"x": 1})
+            ],
+        ),
+        ChatMessageTool(content="2", tool_call_id="toolu_1", function="addition"),
+    ]
+    requests: list[dict[str, object]] = []
+
+    async def fake_perform(
+        request: dict[str, object], *args: object, **kwargs: object
+    ) -> tuple[dict[str, object], ModelOutput]:
+        requests.append(dict(request))
+        return {}, ModelOutput.from_content(model=model.name, content="ok")
+
+    with (
+        patch.object(model.api, "_perform_request_and_continuations", fake_perform),
+        patch.object(model, "count_tokens", AsyncMock(return_value=100)),
+        patch.object(model, "count_tool_tokens", AsyncMock(return_value=10)),
+    ):
+        await model.generate(input=messages, tools=tools)
+        await CompactionSummary().compact(model, messages, tools)
+
+    agent, summary = requests
+    assert summary["system"] == agent["system"]
+    assert summary["tools"] == agent["tools"]
+    assert summary["tool_choice"] == {"type": "none"}
+    # the summary prompt joins the trailing tool-result turn, which comes after
+    # every thinking block, so the turns before it must match. Cache markers
+    # move between requests and are not part of the binding
+    agent_turns = _without_cache_control(agent["messages"])
+    summary_turns = _without_cache_control(summary["messages"])
+    assert isinstance(agent_turns, list) and isinstance(summary_turns, list)
+    assert summary_turns[: len(agent_turns) - 1] == agent_turns[:-1]
+    assert {"type": "thinking", "thinking": "", "signature": "sig-1"} in cast(
+        list[dict[str, object]], summary_turns[1]["content"]
+    )
+
+
+def _without_cache_control(value: object) -> object:
+    """A copy of a request value with every `cache_control` marker removed."""
+    if isinstance(value, dict):
+        return {
+            key: _without_cache_control(item)
+            for key, item in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [_without_cache_control(item) for item in value]
+    return value
 
 
 def _message_with_transformations(transformations: list[dict[str, Any]]) -> Any:
