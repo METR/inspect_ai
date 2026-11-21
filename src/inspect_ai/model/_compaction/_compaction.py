@@ -93,6 +93,9 @@ def compaction(
         strategy: Compaction strategy (e.g. editing, trimming, summary, etc.)
         prefix: Chat messages to always preserve in compacted conversations.
         tools: Tool definitions (included in token count as they consume context).
+            `CompactionSummary` also sends them with its summary request to
+            providers that keep tools under `tool_choice="none"`, so pass the
+            tools the conversation used.
         model: Target model for compacted input (defaults to active model).
         checkpointer: Session checkpointer. The handler's internal state is
             captured at each checkpoint fire and restored on resume so the

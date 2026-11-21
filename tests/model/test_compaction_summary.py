@@ -3,11 +3,14 @@
 import re
 
 import pytest
+from test_helpers.utils import skip_if_no_anthropic
 
+from inspect_ai._util.content import ContentReasoning
 from inspect_ai.model import (
     ChatMessage,
     ChatMessageAssistant,
     ChatMessageSystem,
+    ChatMessageTool,
     ChatMessageUser,
     GenerateConfig,
     Model,
@@ -17,7 +20,7 @@ from inspect_ai.model._compaction import summary as summary_module
 from inspect_ai.model._compaction.memory import MEMORY_TOOL
 from inspect_ai.model._compaction.summary import CompactionSummary
 from inspect_ai.model._model import get_model
-from inspect_ai.tool import ToolCall, ToolChoice, ToolInfo
+from inspect_ai.tool import ToolCall, ToolChoice, ToolInfo, ToolParam, ToolParams
 
 
 def summarizer_model(
@@ -629,3 +632,187 @@ async def test_summary_repeated_compaction_replaces_prior_summary() -> None:
     assert len(captured[1]) == 4
     assert captured[1][2] is first
     assert compacted[-1] == second
+
+
+@pytest.mark.parametrize("tools_required", [True, False])
+async def test_summary_sends_tools_only_where_provider_keeps_them(
+    monkeypatch: pytest.MonkeyPatch, tools_required: bool
+) -> None:
+    """The summary request carries the agent's tools with tool_choice="none".
+
+    A provider that keeps tools under "none" (Anthropic) gets them, so the
+    request presents the tools that replayed reasoning is bound to. Every
+    other provider gets exactly what a summary request without tools sent
+    before: no tools and "none".
+    """
+    received: list[tuple[list[ToolInfo], ToolChoice]] = []
+
+    def summarize(
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        received.append((list(tools), tool_choice))
+        return ModelOutput.from_content("mockllm/model", "GOOD SUMMARY")
+
+    model = get_model("mockllm/model", custom_outputs=summarize)
+    monkeypatch.setattr(model.api, "tools_required", lambda: tools_required)
+    tools = [ToolInfo(name="bash", description="Run a bash command.")]
+
+    _, summary = await CompactionSummary().compact(model, list(CONVERSATION), tools)
+    assert summary is not None
+    # what the provider got from a summary request made without the tools
+    await model.generate(list(CONVERSATION))
+
+    summary_request, request_without_tools = received
+    if tools_required:
+        assert summary_request == (tools, "none")
+    else:
+        assert summary_request == request_without_tools == ([], "none")
+
+
+@skip_if_no_anthropic
+@pytest.mark.slow
+async def test_summary_keeps_replayed_thinking_anthropic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The summary request replays the agent's thinking without the API dropping it.
+
+    Claude Opus 5.5 binds each thinking block to the tools and messages before
+    it. A summary request that differs from the agent's turn in either loses
+    every replayed block, which the API reports as `thinking_dropped`.
+    """
+    model = get_model(
+        "anthropic/claude-opus-5-5",
+        config=GenerateConfig(max_tokens=4096, reasoning_effort="high"),
+    )
+    tools = [
+        ToolInfo(
+            name="addition",
+            description="Add two integers.",
+            parameters=ToolParams(
+                properties={
+                    "x": ToolParam(type="integer"),
+                    "y": ToolParam(type="integer"),
+                },
+                required=["x", "y"],
+            ),
+        )
+    ]
+    messages: list[ChatMessage] = [
+        ChatMessageSystem(content="Do all arithmetic with the addition tool."),
+        ChatMessageUser(
+            content="Work out 1789 + 2846 + 377. Plan the order of the additions first.",
+            source="input",
+        ),
+    ]
+    output = await model.generate(messages, tools=tools)
+    assert output.message.tool_calls, "the agent turn made no tool call"
+    assert any(isinstance(c, ContentReasoning) for c in output.message.content), (
+        "the agent turn produced no thinking block to replay"
+    )
+    messages.append(output.message)
+    messages.extend(
+        ChatMessageTool(content="4635", tool_call_id=call.id, function=call.function)
+        for call in output.message.tool_calls
+    )
+
+    summary_outputs: list[ModelOutput] = []
+    generate = model.generate
+
+    async def recording_generate(
+        input: list[ChatMessage], tools: list[ToolInfo], tool_choice: ToolChoice
+    ) -> ModelOutput:
+        result = await generate(input=input, tools=tools, tool_choice=tool_choice)
+        summary_outputs.append(result)
+        return result
+
+    monkeypatch.setattr(model, "generate", recording_generate)
+    _, summary = await CompactionSummary().compact(model, messages, tools)
+
+    assert summary is not None
+    extra_body = (summary_outputs[-1].metadata or {}).get("extra_body", {})
+    # the thinking-binding beta reports this field on every response
+    assert "input_transformations" in extra_body
+    dropped = [
+        t
+        for t in extra_body["input_transformations"]
+        if t.get("type") == "thinking_dropped"
+    ]
+    assert dropped == []
+
+
+REMOTE_MCP_SERVER = ToolInfo(
+    name="mcp_server_docs",
+    description="Docs server.",
+    options={"url": "https://example.com/mcp"},
+)
+
+
+async def test_summary_by_another_model_gets_no_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A summarizer that is not the agent's model is sent no tools.
+
+    Replayed reasoning is bound to the model that wrote it, so the agent's
+    tools gain nothing there, and they can fail the summarizer's own checks
+    (here, a remote MCP server on a provider without remote MCP).
+    """
+    received: list[list[ToolInfo]] = []
+
+    def summarize(
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        received.append(list(tools))
+        return ModelOutput.from_content("mockllm/summarizer", "GOOD SUMMARY")
+
+    summarizer = get_model("mockllm/summarizer", custom_outputs=summarize)
+    monkeypatch.setattr(summarizer.api, "tools_required", lambda: True)
+    tools = [
+        ToolInfo(name="bash", description="Run a bash command."),
+        REMOTE_MCP_SERVER,
+    ]
+
+    _, summary = await CompactionSummary(model=summarizer).compact(
+        get_model("mockllm/agent"), list(CONVERSATION), tools
+    )
+
+    assert summary is not None
+    assert received == [[]]
+
+
+async def test_summary_keeps_remote_mcp_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's own model gets all of its tools, remote MCP servers included.
+
+    A remote MCP server's tools are part of the tool set Claude binds
+    thinking blocks to, so leaving the server out would change the prefix.
+    """
+    received: list[list[ToolInfo]] = []
+
+    def summarize(
+        input: list[ChatMessage],
+        tools: list[ToolInfo],
+        tool_choice: ToolChoice,
+        config: GenerateConfig,
+    ) -> ModelOutput:
+        received.append(list(tools))
+        return ModelOutput.from_content("mockllm/model", "GOOD SUMMARY")
+
+    model = get_model("mockllm/model", custom_outputs=summarize)
+    monkeypatch.setattr(model.api, "tools_required", lambda: True)
+    monkeypatch.setattr(model.api, "supports_remote_mcp", lambda: True)
+    tools = [
+        ToolInfo(name="bash", description="Run a bash command."),
+        REMOTE_MCP_SERVER,
+    ]
+
+    _, summary = await CompactionSummary().compact(model, list(CONVERSATION), tools)
+
+    assert summary is not None
+    assert received == [tools]
