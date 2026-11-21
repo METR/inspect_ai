@@ -490,6 +490,7 @@ def write_log_dir_manifest(
     filename: str = "logs.json",
     output_dir: str | None = None,
     fs_options: dict[str, Any] = {},
+    recursive: bool = True,
 ) -> None:
     """Write a manifest for a log directory.
 
@@ -502,6 +503,7 @@ def write_log_dir_manifest(
       output_dir (str | None): Output directory for manifest (defaults to log_dir)
       fs_options (dict[str,Any]): Optional. Additional arguments to pass through
         to the filesystem provider (e.g. `S3FileSystem`).
+      recursive (bool): List log files recursively (defaults to True).
     """
     # resolve log dir to full path
     fs = filesystem(log_dir)
@@ -509,7 +511,7 @@ def write_log_dir_manifest(
     log_dir = fs.dir_location(log_dir)
 
     # list eval logs
-    logs = list_eval_logs(log_dir)
+    logs = list_eval_logs(log_dir, recursive=recursive)
 
     # resolve to manifest (make filenames relative to the log dir)
     names = [manifest_eval_log_name(log, log_dir_uri, fs.sep) for log in logs]
@@ -1312,6 +1314,7 @@ def write_log_listing(
     output_dir: str | None = None,
     fs_options: dict[str, Any] = {},
     hide_merged_shards: bool = True,
+    recursive: bool = True,
 ) -> None:
     """Write a listing file for a log directory.
 
@@ -1326,6 +1329,7 @@ def write_log_listing(
         to the filesystem provider (e.g. `S3FileSystem`).
       hide_merged_shards (bool): Leave out shard logs that a finished merged
         log already covers, as the view server's listing does.
+      recursive (bool): List log files recursively (defaults to True).
     """
     # resolve log dir to full path
     fs = filesystem(log_dir)
@@ -1334,7 +1338,7 @@ def write_log_listing(
 
     # list eval logs
     if logs is None:
-        logs = list_eval_logs(log_dir)
+        logs = list_eval_logs(log_dir, recursive=recursive)
 
     if hide_merged_shards:
         logs = without_merged_shards(logs)

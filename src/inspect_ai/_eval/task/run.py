@@ -3626,8 +3626,8 @@ def sample_serialization_fallback(eval_sample: EvalSample, ex: Exception) -> Eva
     `metadata` — the one score field of unbounded shape — is removed first, so
     the values, answers and explanations survive; the scores are dropped
     altogether only if the record still cannot be written. The remaining
-    content that may have defeated serialization (messages, output, events,
-    store, metadata) is removed. The removal is always recorded in the
+    content that may have defeated serialization (messages, output, events but
+    a sample_init that still serializes, store, metadata) is removed. The removal is always recorded in the
     sample's error — appended to the existing error's message when the sample
     already has one — so a reader of the log can tell why the record is empty.
 
@@ -3636,13 +3636,15 @@ def sample_serialization_fallback(eval_sample: EvalSample, ex: Exception) -> Eva
     again as reductions at log finish, where the removed content would fail
     serialization a second time.
     """
+    # a shard merge reads a scored sample's dataset metadata from its sample_init event
+    init = [event for event in eval_sample.events if isinstance(event, SampleInitEvent)]
     stripped = eval_sample.model_copy(
         update=dict(
             metadata={},
             messages=[],
             output=ModelOutput(model=eval_sample.output.model),
             store={},
-            events=[],
+            events=init,
             events_data=None,
             attachments={},
             error_retries=[
@@ -3653,7 +3655,10 @@ def sample_serialization_fallback(eval_sample: EvalSample, ex: Exception) -> Eva
             else None,
         )
     )
-    removed = ["messages", "output", "events", "store", "metadata"]
+    if init and not is_log_serializable(stripped.model_copy(update=dict(scores=None))):
+        stripped = stripped.model_copy(update=dict(events=[]))
+    events = "events but sample_init" if stripped.events else "events"
+    removed = ["messages", "output", events, "store", "metadata"]
     if stripped.scores is not None and not is_log_serializable(stripped):
         stripped = stripped.model_copy(
             update=dict(

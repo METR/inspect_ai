@@ -878,12 +878,25 @@ def test_unserializable_score_metadata_does_not_abort_eval(
     assert sample.scores["deep_metadata"].value == 1
     assert sample.scores["deep_metadata"].answer == "x"
     assert sample.scores["deep_metadata"].metadata is None
+    # a shard merge needs it to merge the sample's scores
+    assert [event.event for event in sample.events] == ["sample_init"]
     assert sample.error is not None
     assert "score metadata" in sample.error.message
     assert log.reductions is not None
     (reduced,) = log.reductions[0].samples
     assert reduced.value == 1
     assert reduced.metadata is None
+
+
+def test_a_sample_whose_init_cannot_be_logged_keeps_its_scores(tmp_path: Path) -> None:
+    deep: dict[str, Any] = {}
+    for _ in range(250):  # fails the log write, not the sample's init event
+        deep = {"a": deep}
+    target = "Default output from mockllm/model"
+    task = Task(dataset=[Sample("x", target=target, metadata=deep)], scorer=match())
+    [sample] = eval(task, model="mockllm/model", log_dir=str(tmp_path))[0].samples or []
+    scores = sample.scores or {}
+    assert (sample.events, scores["match"].value) == ([], "C")
 
 
 @pytest.mark.parametrize("sample_id", ["²", "①"])

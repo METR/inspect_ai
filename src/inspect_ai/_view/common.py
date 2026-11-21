@@ -251,11 +251,18 @@ async def get_log_files(
     if not show_shards:
         listing = await hide_merged_shards(logs, can_read)
         logs = listing.logs
+        # a merge at the client's mtime is new to it unless it alone has that mtime
+        tied = sum(log.mtime == mtime for log in logs) > 1
         refresh = listing.visible_shards or (
-            listing.hiding_mtime is not None and listing.hiding_mtime > mtime
+            listing.hiding_mtime is not None
+            and (
+                listing.hiding_mtime > mtime or (listing.hiding_mtime == mtime and tied)
+            )
         )
 
-    if len(logs) != file_count or refresh:
+    # the token is the client's newest mtime, so a newest log older than it was removed
+    newest = max((log.mtime or 0.0 for log in logs), default=0.0)
+    if len(logs) != file_count or refresh or newest < mtime:
         # Has the number of files changed? could be a delete
         # so send a complete list
         return log_files_response(

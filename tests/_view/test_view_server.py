@@ -1028,6 +1028,20 @@ def test_api_log_files_merge_with_same_count_gives_full(
     assert {f["task_id"] for f in body["files"]} == {"merged"}
 
 
+def test_api_log_files_newest_log_replaced_by_older_merge_gives_full(
+    view_client: ViewTestClient,
+) -> None:
+    # the client's only log (3000) is gone and a merged log at 2000 took its place
+    _write_sharded_run(view_client.log_dir, [1000], merged_mtime=2000)
+    resp = view_client.request(
+        "GET",
+        f"/log-files?log_dir={urllib.parse.quote_plus(str(view_client.log_dir))}",
+        headers={"If-None-Match": "3000000.0-1"},
+    )
+    resp.raise_for_status()
+    assert resp.json()["response_type"] == "full"
+
+
 def test_api_log_files_merged_log_deleted_gives_full(
     view_client: ViewTestClient,
 ) -> None:
@@ -1242,18 +1256,24 @@ def test_api_logs_shows_shards_of_unreadable_by_policy_merged_log(
     assert not any(r.endswith(merged_name) for r in reads)
 
 
+@pytest.mark.parametrize("tied", [False, True])
 def test_api_log_files_hidden_shards_stay_incremental(
-    view_client: ViewTestClient,
+    view_client: ViewTestClient, tied: bool
 ) -> None:
     # a finished run whose shards are all hidden does not force full listings
     _write_sharded_run(view_client.log_dir, [1000, 1001], merged_mtime=2000)
+    if tied:
+        other = write_eval_log_named(
+            view_client.log_dir, "2025-01-01T00-01-00+00-00_t2_id2.eval", "t2", "id2"
+        )
+        os.utime(other, (2000, 2000))
     resp = view_client.request(
         "GET",
         f"/log-files?log_dir={urllib.parse.quote_plus(str(view_client.log_dir))}",
-        headers={"If-None-Match": "2000000.0-1"},
+        headers={"If-None-Match": f"2000000.0-{1 + tied}"},
     )
     resp.raise_for_status()
-    assert resp.json()["response_type"] == "incremental"
+    assert resp.json()["response_type"] == ("full" if tied else "incremental")
 
 
 def test_bundle_copies_only_visible_shards(tmp_path: Path) -> None:

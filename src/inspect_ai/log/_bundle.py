@@ -422,6 +422,7 @@ def _copy_viewer_to_log_dir(from_dir: str, to_dir: str, output_fs: Any) -> None:
 def embed_log_dir(
     log_dir: str | None = None,
     fs_options: dict[str, Any] = {},
+    recursive: bool = True,
 ) -> None:
     r"""Embed a log viewer into a log_dir.
 
@@ -434,6 +435,7 @@ def embed_log_dir(
         log_dir: (str | None): The log_dir to embed the viewer in.
         fs_options (dict[str, Any]): Optional. Additional arguments to pass through
             to the filesystem provider (e.g. `S3FileSystem`).
+        recursive (bool): List log files recursively (defaults to True).
     """
     from inspect_ai._display import display
 
@@ -453,7 +455,7 @@ def embed_log_dir(
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as working_dir:
         _prepare_viewer(working_dir, log_dir=".", abs_log_dir=log_dir)
-        write_log_listing(log_dir, output_dir=working_dir)
+        write_log_listing(log_dir, output_dir=working_dir, recursive=recursive)
         _copy_viewer_to_log_dir(working_dir, log_dir, log_fs)
 
     if log_fs.is_local():

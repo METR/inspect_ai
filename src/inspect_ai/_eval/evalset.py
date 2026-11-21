@@ -83,6 +83,7 @@ from inspect_ai.log._file import (
 from inspect_ai.log._log import EvalConfig
 from inspect_ai.log._recorders.buffer.buffer import cleanup_sample_buffers_for_log
 from inspect_ai.log._recorders.buffer.database import sample_buffer_shutdown_pending
+from inspect_ai.log._shards._walk import is_shard_path
 from inspect_ai.model import (
     GenerateConfigArgs,
     Model,
@@ -519,6 +520,11 @@ def eval_set(
     # sees, and the value is passed down explicitly so the inner call can't
     # recover it later.
     init_dotenv()
+    if "/" in os.environ.get("INSPECT_EVAL_LOG_FILE_PATTERN", ""):
+        raise PrerequisiteError(
+            "INSPECT_EVAL_LOG_FILE_PATTERN must name a file, not a path: eval_set "
+            "reads only the logs directly in its log dir, so it cannot contain '/'."
+        )
     ctl = resolve_ctl_server(ctl_server)
     # clear a stale keep-alive intent left by a prior run in this process;
     # needed here as well as in eval_async because the all-reused short-circuit
@@ -894,6 +900,9 @@ def eval_set(
                 sample_id=sample_id,
                 sample_shuffle=sample_shuffle,
             ),
+            sample_shuffle=sample_shuffle,
+            fail_on_error=fail_on_error,
+            checkpoint=checkpoint,
         )
         with file(capture_path, mode="wb") as f:
             f.write(to_json_safe(capture))
@@ -1134,10 +1143,10 @@ def eval_set(
             )
         _validate_sentinel(sentinel)
 
-        # list all logs currently in the log directory (update manifest if there are some)
-        all_logs = list_all_eval_logs(log_dir)
+        # only the log dir's own logs: artifacts/ below it holds agent-written files
+        all_logs = list_all_eval_logs(log_dir, recursive=False)
         if len(all_logs) > 0:
-            write_log_dir_manifest(log_dir)
+            write_log_dir_manifest(log_dir, recursive=False)
 
         eval_set_args = EvalSetArgsInTaskIdentifier(
             config=config,
@@ -1313,7 +1322,7 @@ def eval_set(
             print_scan_status(log_dir, scanner)
 
         # update manifest
-        write_log_dir_manifest(log_dir)
+        write_log_dir_manifest(log_dir, recursive=False)
 
         # emit end event
         run_coroutine(emit_eval_set_end(eval_set_id, log_dir))
@@ -1334,7 +1343,7 @@ def eval_set(
 
 @contextlib.contextmanager
 def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
-    embed_log_dir(log_dir=log_dir)
+    embed_log_dir(log_dir=log_dir, recursive=False)
 
     stop_event = threading.Event()
     last_state: frozenset[tuple[str, float | None]] = frozenset()
@@ -1343,7 +1352,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         nonlocal last_state
         while not stop_event.wait(interval):
             try:
-                logs = list_eval_logs(log_dir)
+                logs = list_eval_logs(log_dir, recursive=False)
                 current_state = frozenset((log.name, log.mtime) for log in logs)
                 if current_state != last_state:
                     write_log_listing(log_dir, logs=logs)
@@ -1356,7 +1365,7 @@ def _embed_viewer(log_dir: str, interval: float = 30) -> Iterator[None]:
         yield
     finally:
         stop_event.set()
-        write_log_listing(log_dir)
+        write_log_listing(log_dir, recursive=False)
 
 
 def _register_reused_logs(success_logs: list[Log]) -> None:
@@ -1915,7 +1924,14 @@ def return_last_value(retry_state: RetryCallState) -> list[EvalLog]:
 def list_all_eval_logs(
     log_dir: str, recursive: bool = True, progress: ReadEvalLogsProgress | None = None
 ) -> list[Log]:
-    log_files = list_eval_logs(log_dir, recursive=recursive)
+    # the listing's form of log_dir, as it names the files (`~` expanded, `s3a` normalised)
+    root = filesystem(log_dir).dir_as_uri(log_dir)
+    log_files = [
+        info
+        for info in list_eval_logs(log_dir, recursive=recursive)
+        # a shard's log belongs to its merged log, never to the task itself
+        if not is_shard_path(root, info.name)
+    ]
     log_headers = read_eval_log_headers(log_files, progress)
     task_identifiers = [task_identifier(log_header, None) for log_header in log_headers]
     return [
@@ -2086,7 +2102,9 @@ def _captured_task_logs(
     ]
     identifiers = {identifier for identifier, _ in all_tasks}
     logs = [
-        log for log in list_all_eval_logs(log_dir) if log.task_identifier in identifiers
+        log
+        for log in list_all_eval_logs(log_dir, recursive=False)
+        if log.task_identifier in identifiers
     ]
     # try_eval's pending check: a task with no log of the current shuffle runs
     # fresh. try_eval then classifies all logs, so a pending task with an
@@ -2158,7 +2176,7 @@ def cleanup_older_eval_logs(
 ) -> None:
     logs = [
         log
-        for log in list_all_eval_logs(log_dir)
+        for log in list_all_eval_logs(log_dir, recursive=False)
         if log.header.eval.task_id in task_ids
     ]
     latest_completed_task_eval_logs(

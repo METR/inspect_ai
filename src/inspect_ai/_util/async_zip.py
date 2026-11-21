@@ -7,7 +7,7 @@ stored locally or remotely (e.g., S3) using async range requests.
 import importlib
 import struct
 import zlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -371,7 +371,7 @@ class _ZipMemberBytes:
         self._verify = None if raw else verify
         self._active_streams: set[CompressedToUncompressedStream] = set()
 
-    async def __aiter__(self) -> AsyncIterator[bytes]:
+    async def __aiter__(self) -> AsyncGenerator[bytes, None]:
         byte_stream = await self._filesystem.read_file_bytes(
             self._filename, self._offset, self._end
         )
@@ -385,7 +385,9 @@ class _ZipMemberBytes:
                         crc = zlib.crc32(chunk, crc)
                     yield chunk
             finally:
-                await byte_stream.aclose()
+                # a cancelled read must still close the source
+                with anyio.CancelScope(shield=True):
+                    await byte_stream.aclose()
         else:
             # Decompress using the appropriate method
             stream = CompressedToUncompressedStream(byte_stream, self._method)
@@ -397,7 +399,8 @@ class _ZipMemberBytes:
                     yield chunk
             finally:
                 self._active_streams.discard(stream)
-                await stream.aclose()
+                with anyio.CancelScope(shield=True):
+                    await stream.aclose()
         # reached only when the stream was consumed to its end: a stream
         # closed early is never treated as verified
         if self._verify is not None:

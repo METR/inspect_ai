@@ -1111,6 +1111,15 @@ def test_eval_set_unknown_task_raises_prerequisite_error() -> None:
             )
 
 
+def test_eval_set_refuses_a_log_file_pattern_with_a_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("INSPECT_EVAL_LOG_FILE_PATTERN", "{task}/{id}")
+    with pytest.raises(PrerequisiteError, match="INSPECT_EVAL_LOG_FILE_PATTERN"):
+        eval_set(Task(), str(tmp_path / "logs"), model="mockllm/model")
+    assert not (tmp_path / "logs").exists()
+
+
 # Task file content used by the cwd-fallback tests below. Defined here so
 # `resolve_tasks` can load it from a temp dir representing the cwd.
 _CWD_TASK_FILE_SOURCE = """
@@ -2901,7 +2910,8 @@ def test_embed_viewer_writes_on_change() -> None:
     # one periodic update (with pre-fetched logs) + one final update on context exit
     assert mock_write.call_count == 2
     mock_write.assert_any_call("/fake/dir", logs=[log1])
-    mock_write.assert_any_call("/fake/dir")
+    mock_write.assert_any_call("/fake/dir", recursive=False)
+    mock_list.assert_called_with("/fake/dir", recursive=False)
 
 
 def test_embed_viewer_skips_when_unchanged() -> None:
@@ -2918,7 +2928,7 @@ def test_embed_viewer_skips_when_unchanged() -> None:
 
     # no periodic updates (state never changed), but one final update on context exit
     assert mock_write.call_count == 1
-    mock_write.assert_called_once_with("/fake/dir")
+    mock_write.assert_called_once_with("/fake/dir", recursive=False)
 
 
 def test_eval_set_embed_viewer(tmp_path: Path) -> None:
@@ -4107,3 +4117,9 @@ def test_eval_set_grown_dataset_without_stable_ids_still_reruns() -> None:
         final = read_eval_log(logs[0].location)
         assert final.status == "success"
         assert final.eval.dataset.samples == 4
+
+
+def test_list_all_eval_logs_accepts_an_s3a_log_dir(mock_s3: None) -> None:
+    source = next(Path("tests/log/test_list_logs").glob("*.eval"))
+    write_eval_log(read_eval_log(source.as_posix()), "s3://test-bucket/a/run.eval")
+    assert len(list_all_eval_logs("s3a://test-bucket/a")) == 1
