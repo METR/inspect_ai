@@ -1301,6 +1301,7 @@ class Model:
             NotImplementedError: For providers without native compaction support.
         """
         _validate_model_input_media(input)
+        input = self._conform_messages_to_api(input)
         config = self._resolve_config(None)
 
         # provide max_tokens from the model api if required (same as generate)
@@ -1403,6 +1404,19 @@ class Model:
             ),
         )
 
+        input = self._conform_messages_to_api(input)
+        _validate_model_input_media(input)
+        return _PreparedInput(input, tdefs, base_tools, tool_choice)
+
+    def _conform_messages_to_api(self, input: list[ChatMessage]) -> list[ChatMessage]:
+        """Reshape messages into the form the provider API accepts.
+
+        Shared by `generate()` and `compact()` so that a compaction request
+        presents the same message structure as an ordinary turn. This matters
+        for providers that bind reasoning to the conversation prefix (e.g.
+        Anthropic's thinking block binding), and will discard or reject
+        reasoning blocks that were generated from a different prompt prefix.
+        """
         extract_types: list[type] = []
         if not self.api.tool_result_images():
             extract_types.append(ContentImage)
@@ -1411,9 +1425,7 @@ class Model:
         if extract_types:
             input = tool_result_media_as_user_message(input, tuple(extract_types))
 
-        input = collapse_consecutive_messages_for_api(input, self.api)
-        _validate_model_input_media(input)
-        return _PreparedInput(input, tdefs, base_tools, tool_choice)
+        return collapse_consecutive_messages_for_api(input, self.api)
 
     async def _generate(
         self,
