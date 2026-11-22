@@ -416,6 +416,7 @@ async def scan_finalize(
     log_dir: str,
     scanner: "Scanners | None" = None,
     scans: str | None = None,
+    recursive: bool = True,
 ) -> None:
     """Compact buffer parquets and snapshot the recorded transcripts.
 
@@ -470,7 +471,7 @@ async def scan_finalize(
         if scanner is not None
         else sorted(pre_sync_status.spec.scanners)
     )
-    await _cleanup_orphan_scan_rows(scan_dir, log_dir, scanner_names)
+    await _cleanup_orphan_scan_rows(scan_dir, log_dir, scanner_names, recursive)
 
     snapshot = _snapshot_from_compacted(UPath(scan_dir), log_dir=log_dir)
     if snapshot is not None:
@@ -583,7 +584,7 @@ def scanned_transcripts_for_resume(
 
 
 async def _cleanup_orphan_scan_rows(
-    scan_dir: str, log_dir: str, scanner_names: Sequence[str]
+    scan_dir: str, log_dir: str, scanner_names: Sequence[str], recursive: bool
 ) -> None:
     """Drop scan rows whose transcript_id has no corresponding sample.
 
@@ -609,7 +610,7 @@ async def _cleanup_orphan_scan_rows(
     )
 
     live_tids: set[str] = set()
-    for log_info in list_eval_logs(log_dir, recursive=False):
+    for log_info in list_eval_logs(log_dir, recursive=recursive):
         for summary in await read_eval_log_sample_summaries_async(log_info.name):
             if summary.uuid is not None:
                 live_tids.add(summary.uuid)
@@ -761,6 +762,7 @@ def scan_context(
     *,
     scan_id: str,
     log_dir: str,
+    recursive: bool = True,
 ) -> Iterator[None]:
     """Initialize scan state on enter, compact on exit. No-op when scanner is None."""
     if scanner is None:
@@ -771,7 +773,10 @@ def scan_context(
     try:
         yield
     finally:
-        run_coroutine(scan_finalize(scan_id=scan_id, log_dir=log_dir, scanner=scanner))
+        finalize = scan_finalize(
+            scan_id=scan_id, log_dir=log_dir, scanner=scanner, recursive=recursive
+        )
+        run_coroutine(finalize)
 
 
 def print_scan_status(log_dir: str, scanner: "Scanners | None" = None) -> None:

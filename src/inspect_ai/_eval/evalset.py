@@ -1255,7 +1255,10 @@ def eval_set(
     try:
         with (
             _embed_viewer(log_dir) if embed_viewer else contextlib.nullcontext(),
-            scan_context(scanner, scan_id=eval_set_id, log_dir=log_dir),
+            # A standalone eval's logs may sit below log_dir; an eval set's never do.
+            scan_context(
+                scanner, scan_id=eval_set_id, log_dir=log_dir, recursive=False
+            ),
         ):
             # emit start event
             run_coroutine(emit_eval_set_start(eval_set_id, log_dir))

@@ -677,8 +677,10 @@ def test_eval_set_reads_only_its_log_dir(
 ) -> None:
     logs = tmp_path / "logs"
     junk = logs / "retry" / "junk.eval"
-    junk.parent.mkdir(parents=True)
-    junk.write_bytes(b"PK\x03\x04 not an eval log")
+    shard = logs / "artifacts/u/x.shards/0/f.eval"  # upstream's shard check refuses one
+    for path in (junk, shard):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"PK\x03\x04 not an eval log")
     run_eval_set(logs, [capture_task_one()], embed_viewer=True)
     [log] = run_eval_set(logs, [capture_task_one()], embed_viewer=True)
     Path(local_path(log)).rename(junk.with_name("moved.eval"))  # a readable one too
