@@ -921,6 +921,18 @@ def test_retry_immediate_cleans_up_orphan_scans_at_finalize() -> None:
         assert df.iloc[0]["transcript_error"]
 
 
+def test_eval_keeps_the_scan_rows_of_nested_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from inspect_ai import ScannerConfig, eval
+
+    monkeypatch.setenv("INSPECT_EVAL_LOG_FILE_PATTERN", "group/{task}_{id}")
+    scanner = ScannerConfig(scanners=[echo_scanner()], scans=str(tmp_path / "scans"))
+    eval(_task(3), log_dir=str(tmp_path), scanner=scanner, model="mockllm/model")
+    [rows] = (tmp_path / "scans").rglob("echo_scanner.parquet")
+    assert _read_parquet(UPath(str(rows))).metadata.num_rows == 3
+
+
 def test_print_scan_status_clean_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
