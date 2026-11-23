@@ -119,14 +119,37 @@ def gemini_supports_minimal_thinking(family: str) -> bool:
     return low <= version < high
 
 
+_XHIGH_THINKING_MODEL = re.compile(r"gemini-4-(?:hydrogen|neon)(?![a-z])")
+_TIER_TOKENS = ("-flash", "-lite", "-pro")
+
+
+def gemini_supports_xhigh_thinking(family: str) -> bool:
+    """Whether the model accepts thinking_level=XHIGH.
+
+    True only for Gemini 4 Hydrogen and Gemini 4 Neon, the models documented
+    to accept it, including suffixed names for them (dated snapshots,
+    `-with-data-retention`). Earlier models and Gemini 4 Carbon and Argon
+    reject it with a 400, and unverified names, including any Flash, Lite or
+    Pro variant of the two, get `high` rather than risk one.
+    https://ai.google.dev/gemini-api/docs/thinking
+    """
+    name = _model_segment(family)
+    return _XHIGH_THINKING_MODEL.search(name) is not None and not any(
+        token in name for token in _TIER_TOKENS
+    )
+
+
 def gemini_thinking_level(
     effort: str | None, family: str
-) -> Literal["minimal", "low", "medium", "high"] | None:
+) -> Literal["minimal", "low", "medium", "high", "xhigh"] | None:
     """The Gemini 3+ thinking level for a `reasoning_effort`.
 
-    `xhigh`/`max` become `high`, and `minimal` becomes `low` for models that
-    reject it. None for no effort or `none`.
+    `xhigh`/`max` become `xhigh` for models that accept it and `high`
+    otherwise, and `minimal` becomes `low` for models that reject it. None
+    for no effort or `none`.
     """
+    if effort in ("xhigh", "max") and gemini_supports_xhigh_thinking(family):
+        return "xhigh"
     level = clamp_reasoning_effort_to_minimal_low_medium_high(effort)
     if level == "minimal" and not gemini_supports_minimal_thinking(family):
         return "low"
