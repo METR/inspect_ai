@@ -8,9 +8,12 @@ native tools), and input_tokens_name() aliases unknown names to the current
 frontier so the context window (compaction) resolves correctly.
 """
 
+import warnings
+from typing import Literal
+
 import pytest
 
-from inspect_ai.model import get_model
+from inspect_ai.model import GenerateConfig, get_model
 from inspect_ai.model._model_info import get_model_input_tokens
 from inspect_ai.model._providers._google_reasoning import (
     gemini_3_plus,
@@ -227,6 +230,22 @@ def test_codename_context_window_resolves() -> None:
         ("gemini-4-argon", "xhigh", "high"),
         ("gemini-4-argon", "max", "high"),
         ("gemini-4-argon", "none", None),
+        ("gemini-4-carbon", "xhigh", "high"),
+        ("gemini-4-carbon", "max", "high"),
+        ("gemini-4-hydrogen", "high", "high"),
+        ("gemini-4-hydrogen", "xhigh", "xhigh"),
+        ("gemini-4-hydrogen", "max", "xhigh"),
+        ("gemini-4-neon", "xhigh", "xhigh"),
+        ("gemini-4-neon", "max", "xhigh"),
+        ("gemini-4-neon", "minimal", "low"),
+        ("gemini-4-neon-with-data-retention", "xhigh", "xhigh"),
+        ("gemini-4-neon@001", "xhigh", "xhigh"),
+        ("gemini-4-hydrogen-preview-11-2026", "xhigh", "xhigh"),
+        ("gemini-4-neon-lite", "xhigh", "high"),
+        ("gemini-4-neon-flash", "xhigh", "high"),
+        ("gemini-4-hydrogen-pro", "xhigh", "high"),
+        ("gemini-4-hydrogenated", "xhigh", "high"),
+        ("gemini-4-neon-project/gemini-4-carbon", "xhigh", "high"),
         ("nimbus-preview", "minimal", "low"),
         ("gemini-3-pro", "low", "low"),
         ("gemini-3-pro", "medium", "medium"),
@@ -241,6 +260,39 @@ def test_gemini_thinking_level(
     family: str, effort: str | None, expected: str | None
 ) -> None:
     assert gemini_thinking_level(effort, family) == expected
+
+
+_VERTEX_NEON = (
+    "vertex/projects/test-project/locations/us-central1/publishers/google/models/"
+    "gemini-4-neon"
+)
+
+
+@pytest.mark.parametrize(
+    "model_name,effort,expected",
+    [
+        ("gemini-4-neon", "xhigh", "XHIGH"),
+        ("gemini-4-neon", "max", "XHIGH"),
+        ("gemini-4-neon", "high", "HIGH"),
+        ("gemini-4-hydrogen", "xhigh", "XHIGH"),
+        ("gemini-4-neon-with-data-retention", "xhigh", "XHIGH"),
+        (_VERTEX_NEON, "xhigh", "XHIGH"),
+        ("gemini-4-carbon", "xhigh", "HIGH"),
+        ("gemini-4-argon", "max", "HIGH"),
+    ],
+)
+def test_effort_sent_as_thinking_level(
+    model_name: str, effort: Literal["high", "xhigh", "max"], expected: str
+) -> None:
+    # An SDK without the XHIGH member warns when one is built; that must not
+    # reach a caller running with warnings as errors.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config = _api(model_name).chat_thinking_config(
+            GenerateConfig(reasoning_effort=effort)
+        )
+    assert config is not None and config.thinking_level is not None
+    assert config.thinking_level.value == expected
 
 
 @pytest.mark.parametrize(
