@@ -2839,6 +2839,9 @@ def _budget(tokens: int) -> dict[str, Any]:
         ("gemini-3.6-flash", "minimal", "minimal", None),
         ("gemini-3.7-flash", "minimal", "low", None),
         ("gemini-3.7-flash", "none", "none", None),
+        # LiteLLM rejects xhigh, also for the models that accept it natively
+        ("gemini-4-neon", "xhigh", "high", None),
+        ("gemini-4-hydrogen", "max", "high", None),
         # thinking-only models keep thinking
         ("gemini-3-pro-preview", "none", None, None),
         ("gemini-2.5-pro", "none", None, None),

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import ssl
+import warnings
 from copy import copy
 from io import BytesIO
 from logging import getLogger
@@ -1177,7 +1178,7 @@ class GoogleGenAIAPI(ModelAPI):
                     )
                 return ThinkingConfig(
                     include_thoughts=True,
-                    thinking_level=ThinkingLevel(tier.upper()) if tier else None,
+                    thinking_level=_thinking_level(tier) if tier else None,
                 )
 
             # enable thinking_budget if specified
@@ -2298,6 +2299,22 @@ def prompt_feedback_to_content(
             [rating.model_dump_json(indent=2) for rating in feedback.safety_ratings]
         )
     return "\n".join(content)
+
+
+def _thinking_level(tier: str) -> ThinkingLevel:
+    """The SDK's `ThinkingLevel` for a tier name.
+
+    google-genai before 3.3.0 has no `XHIGH` member. It sends the value
+    unchanged but warns each time it is built, which is an error under
+    warnings-as-errors, so the warning is silenced for a tier the installed
+    SDK does not define.
+    """
+    name = tier.upper()
+    if name in ThinkingLevel.__members__:
+        return ThinkingLevel(name)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return ThinkingLevel(name)
 
 
 async def _report_stream_part_delta(part: Part) -> None:

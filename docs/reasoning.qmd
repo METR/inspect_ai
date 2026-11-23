@@ -80,7 +80,10 @@ Gemini 3 Flash 3.0–3.6 and Flash-Lite 3.1–3.5 expose four thinking levels (`
 | `minimal`                | `MINIMAL`                                 | `LOW`                                      |
 | `low`                    | `LOW`                                     | `LOW`                                      |
 | `medium`                 | `MEDIUM`                                  | `MEDIUM`                                   |
-| `high` / `xhigh` / `max` | `HIGH`                                    | `HIGH`                                     |
+| `high`                   | `HIGH`                                    | `HIGH`                                     |
+| `xhigh` / `max`          | `HIGH`                                    | `HIGH` (Gemini 4 Hydrogen and Neon: `XHIGH`) |
+
+Gemini 4 Hydrogen and Gemini 4 Neon accept a fifth level, `XHIGH`, which Inspect sends for `xhigh` and `max`. Other models reject it, so they get `HIGH`.
 
 Pro models cannot disable thinking, so for them `none` leaves thinking on and logs a warning. Inspect also treats Pro names it has not verified (such as a future Gemini 4 Pro) this way.
 
