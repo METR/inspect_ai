@@ -150,6 +150,8 @@ def merge_eval_log_shards(
             or skippable.
         zlib.error: A sample member's deflate stream is incomplete, or
             bytes follow the end of the stream.
+        RuntimeError: A read of a sample member ended cancelled with nothing
+            cancelling the merge. Nothing is written.
         FileNotFoundError: Neither the merged log nor any shard exists.
         TypeError: `task` is not a `Task`.
         ValueError: Invalid arguments: both `sample_ids` and

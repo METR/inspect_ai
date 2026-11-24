@@ -1257,9 +1257,10 @@ changed.
 The merged log is an ordinary log for `recompute_metrics()`, `score()`
 and `edit_score()`: they behave on it as on any other log.
 
-Memory: the current sample plus every sample's scores, as the parent's
-"Scale" accepts. The baseline parses each sample whole, so peak memory
-follows the largest sample; "Scale items" bounds it.
+Memory: the current sample, the members read ahead of it and every
+sample's scores, as the parent's "Scale" accepts. The baseline parses each
+sample whole, so peak memory follows the largest sample; "Scale items"
+bounds it.
 
 #### Consistent reads
 
@@ -2275,7 +2276,8 @@ Per PR (numbers from "Implementation plan"):
    yet, without calling the merge (a spy).
 7. **Streaming recomputation.** `tests/log/test_shards.py`: peak memory
    (`tracemalloc`) of a merge over shards with large transcripts and small
-   scores does not grow with transcript size; with large score metadata,
+   scores does not grow with transcript size when members are streamed,
+   nor with the number of members read ahead; with large score metadata,
    growth matches the retained metric inputs and custom metrics receive
    them unchanged; declared metrics still take the dataset metadata from
    the `sample_init` event, a scored sample without one is still refused,
