@@ -574,6 +574,32 @@ class AsyncZipReader:
             if isinstance(member, ZipEntry)
             else await self.get_member_entry(member)
         )
+        data = decompress_bytes(
+            await self.read_member_raw(entry), entry.compression_method
+        )
+        if self._verify_crc:
+            _check_crc(self._filename, entry, zlib.crc32(data))
+        return data
+
+    async def read_member_raw(self, member: str | ZipEntry) -> bytes:
+        """Read a member's raw (likely compressed) bytes fully into memory.
+
+        Reads the local file header and the data in a single request, where
+        ``open_member_raw`` makes one request for each; a local header longer
+        than estimated takes a second request. Unlike ``read_member_fully``,
+        this does NOT decompress the data or check its CRC-32.
+
+        Args:
+            member: Name or ZipEntry of the member file within the archive
+
+        Returns:
+            The member's bytes as the archive stores them
+        """
+        entry = (
+            member
+            if isinstance(member, ZipEntry)
+            else await self.get_member_entry(member)
+        )
 
         # Estimate variable header size from central directory filename
         # plus generous padding for the extra field
@@ -594,20 +620,14 @@ class AsyncZipReader:
         data_start = 30 + name_len + extra_len
 
         if data_start + entry.compressed_size <= len(buf):
-            compressed_data = buf[data_start : data_start + entry.compressed_size]
-        else:
-            # Variable header was larger than estimated; fall back to separate read
-            abs_data_start = read_start + data_start
-            compressed_data = await self._filesystem.read_file_bytes_fully(
-                self._filename,
-                abs_data_start,
-                abs_data_start + entry.compressed_size,
-            )
-
-        data = decompress_bytes(compressed_data, entry.compression_method)
-        if self._verify_crc:
-            _check_crc(self._filename, entry, zlib.crc32(data))
-        return data
+            return buf[data_start : data_start + entry.compressed_size]
+        # Variable header was larger than estimated; fall back to separate read
+        abs_data_start = read_start + data_start
+        return await self._filesystem.read_file_bytes_fully(
+            self._filename,
+            abs_data_start,
+            abs_data_start + entry.compressed_size,
+        )
 
     async def _get_member_range_and_method(
         self, member: str | ZipEntry

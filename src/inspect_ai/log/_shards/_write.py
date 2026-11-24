@@ -4,14 +4,16 @@ import functools
 import json
 import zipfile
 import zlib
+from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 import anyio
 from pydantic import BaseModel
 
+from inspect_ai._util._async import unwrap_exception_group
 from inspect_ai._util.async_zip import AsyncZipReader, _check_crc
-from inspect_ai._util.compression import PieceDecompressor
+from inspect_ai._util.compression import PieceDecompressor, decompress_bytes
 from inspect_ai._util.constants import get_deserializing_context
 from inspect_ai._util.error import EvalError
 from inspect_ai._util.json import (
@@ -173,11 +175,11 @@ async def write_merged_zip(
             bytes follow the end of the stream.
         zstandard.ZstdError: A sample member's zstd frame is incomplete
             or skippable.
+        RuntimeError: A read of a sample member ended cancelled with nothing
+            cancelling the merge.
     """
     with zipfile.ZipFile(out, "w", **zipfile_compress_kwargs) as zf:
-        inputs: list[_SampleInputs] = []
-        for key in keys:
-            inputs.append(await _copy_sample(zf, key, read_member))
+        inputs = await _copy_samples(zf, keys, read_member)
         results, reductions = _results(task, inputs, total_samples)
         header = make_header(
             MergedScoring(
@@ -452,26 +454,131 @@ class _SampleCopy:
             self._output.close()
 
 
+_READ_AHEAD = 256
+"""Sample members held at once: the one being copied and those read ahead."""
+_READ_AHEAD_BYTES = 8 * 1024 * 1024
+"""Compressed bytes read ahead before further reads wait. A larger member
+is not read ahead but streamed as it is copied, so the members held stay
+under twice this. Each read in flight holds one or two more copies of its
+member until it returns."""
+_CONCURRENT_READS = 32
+"""Reads of the members read ahead that are in flight at once."""
+_CHUNK_SIZE = 256 * 1024
+"""Compressed bytes of a member read ahead that one worker call copies. A
+cancelled merge waits for the call in progress, and the deflate decompressor
+copies the unread rest of a chunk for each piece it reads."""
+
+
+class _ReadAhead:
+    """A sample member's compressed bytes, read ahead of its copy."""
+
+    def __init__(self, member: SampleMember) -> None:
+        self._member = member
+        self._done = anyio.Event()
+        self._data: bytes | None = None
+        self._error: Exception | None = None
+
+    async def read(self, limiter: anyio.Semaphore) -> None:
+        """Read the member, keeping an error for `data` to raise at its turn."""
+        try:
+            async with limiter:
+                self._data = await self._member.reader.read_member_raw(
+                    self._member.entry
+                )
+        except Exception as ex:
+            self._error = ex
+        self._done.set()
+
+    async def data(self) -> bytes:
+        await self._done.wait()
+        if self._error is not None:
+            raise self._error
+        assert self._data is not None
+        return self._data
+
+
+async def _copy_samples(
+    zf: zipfile.ZipFile,
+    keys: Sequence[SampleRecordKey],
+    read_member: Callable[[SampleRecordKey], Awaitable[SampleMember]],
+) -> list[_SampleInputs]:
+    """Copy the sample members into `zf` in the order of `keys`.
+
+    The members after the one being copied are read ahead, `_CONCURRENT_READS`
+    at once: with the one being copied, up to `_READ_AHEAD` members, until
+    they hold `_READ_AHEAD_BYTES`. Read one at a time, a merge from S3 spends
+    nearly all its time waiting for each member's requests in turn. A member
+    read ahead waits for its turn to be copied, so more are read ahead than
+    are in flight: a slow read then holds up the copy, not the reads behind
+    it. A read's error is raised when its member's turn comes, as copying
+    one at a time raises it.
+
+    Raises:
+        RuntimeError: A read ended cancelled with nothing cancelling the
+            merge, so not every member was copied.
+    """
+    inputs: list[_SampleInputs] = []
+    ahead: deque[tuple[SampleRecordKey, SampleMember, _ReadAhead | None]] = deque()
+    held = 0
+    following = iter(keys)
+    # fast_acquire: a yield to the event loop per member slows a merge of local logs 7%
+    reads = anyio.Semaphore(_CONCURRENT_READS, fast_acquire=True)
+    async with unwrap_exception_group(), anyio.create_task_group() as tg:
+        for _ in keys:
+            while len(ahead) < _READ_AHEAD and (held < _READ_AHEAD_BYTES or not ahead):
+                key = next(following, None)
+                if key is None:
+                    break
+                member = await read_member(key)
+                read = None
+                if member.entry.compressed_size <= _READ_AHEAD_BYTES:
+                    read = _ReadAhead(member)
+                    held += member.entry.compressed_size
+                    tg.start_soon(read.read, reads)
+                ahead.append((key, member, read))
+            key, member, read = ahead.popleft()
+            inputs.append(await _copy_sample(zf, key, member, read))
+            if read is not None:
+                held -= member.entry.compressed_size
+    if len(inputs) != len(keys):
+        # a read that ends cancelled on its own cancels the task group, which
+        # then exits without raising
+        raise RuntimeError(
+            "A read of a sample member was cancelled, so the merge stopped after "
+            f"{len(inputs)} of {len(keys)} members. Nothing was written; run the "
+            "merge again."
+        )
+    return inputs
+
+
 async def _copy_sample(
     zf: zipfile.ZipFile,
     key: SampleRecordKey,
-    read_member: Callable[[SampleRecordKey], Awaitable[SampleMember]],
+    member: SampleMember,
+    read: _ReadAhead | None,
 ) -> _SampleInputs:
     """Copy one sample member into `zf` and return what the results need of it.
 
-    The member is streamed, so only one chunk of its compressed bytes and one
-    bounded piece of its decompressed bytes are in memory at a time, unless it
-    holds a number the streaming parser refuses; it is then read again and
-    parsed whole.
+    A member that was not read ahead is streamed, so only one chunk of its
+    compressed bytes is in memory at a time. Either way only one bounded
+    piece of its decompressed bytes is, unless it holds a number the
+    streaming parser refuses; it is then parsed whole, from the bytes read
+    ahead or read again.
     """
-    member = await read_member(key)
     copy = _SampleCopy(zf, _sample_filename(key.sample_id, key.epoch), member)
     chunks: AsyncGenerator[bytes, None] | None = None
+    data: bytes | None = None
     try:
-        raw = await member.reader.open_member_raw(member.entry)
-        chunks = raw.__aiter__()
-        async for chunk in chunks:
-            await run_owned(functools.partial(copy.write, chunk))
+        if read is not None:
+            data = await read.data()
+            for start in range(0, len(data), _CHUNK_SIZE):
+                chunk = data[start : start + _CHUNK_SIZE]
+                await run_owned(functools.partial(copy.write, chunk))
+        else:
+            raw = await member.reader.open_member_raw(member.entry)
+            chunks = raw.__aiter__()
+            async for chunk in chunks:
+                await run_owned(functools.partial(copy.write, chunk))
         parsed = await run_owned(copy.finish)
     finally:
         with anyio.CancelScope(shield=True):
@@ -489,8 +596,13 @@ async def _copy_sample(
                     finally:
                         copy.close()
     if parsed is None:
-        data = await member.reader.read_member_fully(member.entry)
-        parsed = await run_owned(functools.partial(_parse_whole, data))
+        if data is None:
+            whole = await member.reader.read_member_fully(member.entry)
+        else:
+            # read ahead: `finish` has checked the CRC-32 of these bytes
+            method = member.entry.compression_method
+            whole = await run_owned(functools.partial(decompress_bytes, data, method))
+        parsed = await run_owned(functools.partial(_parse_whole, whole))
     return _sample_inputs(key, parsed)
 
 

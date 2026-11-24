@@ -826,7 +826,11 @@ What the merge must do differently from today's write paths:
   metadata each retained about 20 MB, against about 100 KB for one), plus
   the central-directory index and upload buffers. That aggregate is kept
   whole, because recomputing from less is the lossy input the merge rules
-  out (see "Constraints"); no streaming-metric API is proposed.
+  out (see "Constraints"); no streaming-metric API is proposed. The merge
+  also reads the members after the current one ahead of their copy: they
+  hold under 16 MiB of compressed bytes (a member over 8 MiB is streamed
+  instead), and each read in flight holds one or two more copies of its
+  member until it returns.
 - **Conditional publish must be multipart.** The compare-and-swap guard
   (see "Overlapping merges") currently rides on `_s3_put_object`, a single
   `put_object` with the whole body in memory (`_recorders/eval.py:742-764`);

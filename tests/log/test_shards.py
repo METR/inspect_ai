@@ -2330,7 +2330,7 @@ def test_incremental_merge_reads_only_changed_shards(
     opened: list[str] = []
     member_reads: list[tuple[str, str]] = []
     init = AsyncZipReader.__init__
-    read_member = AsyncZipReader.read_member_fully
+    read_member = AsyncZipReader.read_member_raw
 
     def spy_init(
         self: AsyncZipReader, fs: Any, filename: str, *a: Any, **k: Any
@@ -2338,21 +2338,13 @@ def test_incremental_merge_reads_only_changed_shards(
         opened.append(filename)
         init(self, fs, filename, *a, **k)
 
-    open_member = AsyncZipReader.open_member_raw
-
     async def spy_read(self: AsyncZipReader, member: Any) -> bytes:
         name = member if isinstance(member, str) else member.filename
         member_reads.append((self._filename, name))
         return await read_member(self, member)
 
-    async def spy_open(self: AsyncZipReader, member: Any) -> Any:
-        name = member if isinstance(member, str) else member.filename
-        member_reads.append((self._filename, name))
-        return await open_member(self, member)
-
     monkeypatch.setattr(AsyncZipReader, "__init__", spy_init)
-    monkeypatch.setattr(AsyncZipReader, "read_member_fully", spy_read)
-    monkeypatch.setattr(AsyncZipReader, "open_member_raw", spy_open)
+    monkeypatch.setattr(AsyncZipReader, "read_member_raw", spy_read)
 
     # nothing changed: nothing written, no shard opened
     result = merge_eval_log_shards(merged, _task(), allow_incomplete=True)
@@ -3137,7 +3129,8 @@ def _crc_failures(
 ) -> list[str]:
     """Fail the first `failures` reads of `member` from a shard with `error`.
 
-    Whole reads (headers) and streamed reads (samples) are both counted.
+    Whole reads (headers, and samples read ahead) and streamed reads are both
+    counted.
     """
     calls: list[str] = []
 
@@ -3152,7 +3145,7 @@ def _crc_failures(
 
         return call
 
-    for method in ["read_member_fully", "open_member_raw"]:
+    for method in ["read_member_raw", "open_member_raw"]:
         monkeypatch.setattr(
             AsyncZipReader, method, failing(getattr(AsyncZipReader, method))
         )
@@ -3178,8 +3171,12 @@ def test_a_failed_shard_read_fails_the_merge_with_its_error(
     with pytest.raises(type(error)) as raised:
         merge_eval_log_shards(merged, _task())
     assert raised.value is error
-    # header reads of the two shards run concurrently; sample reads one by one
-    assert 1 <= len(calls) <= (2 if member == "header.json" else 1)
+    if member == "header.json":
+        # the two shards' headers are read concurrently
+        assert 1 <= len(calls) <= 2
+    else:
+        # their six samples are read ahead, none of them twice
+        assert 1 <= len(calls) <= 6 and len(set(calls)) == len(calls)
     assert not os.path.exists(merged)
 
 
@@ -3201,7 +3198,7 @@ def test_a_shard_sample_that_does_not_validate_fails_at_once(
 
     with pytest.raises(ValidationError):
         merge_eval_log_shards(merged, _task())
-    assert len(calls) == 1
+    assert calls.count("samples/1_epoch_1.json") == 1
     assert not os.path.exists(merged)
 
 
@@ -3409,14 +3406,15 @@ def test_merge_on_s3_copies_unchanged_members_of_changed_shards_from_the_merged_
         write_eval_log(log, f"s3://test-bucket/{key}")
 
     sample_reads: list[tuple[str, str]] = []
-    open_member = AsyncZipReader.open_member_raw
+    read_member = AsyncZipReader.read_member_raw
 
-    async def spy_open(self: AsyncZipReader, member: Any) -> Any:
-        if member.filename.startswith("samples/"):
-            sample_reads.append((self._filename, member.filename))
-        return await open_member(self, member)
+    async def spy_read(self: AsyncZipReader, member: Any) -> bytes:
+        name = member if isinstance(member, str) else member.filename
+        if name.startswith("samples/"):
+            sample_reads.append((self._filename, name))
+        return await read_member(self, member)
 
-    monkeypatch.setattr(AsyncZipReader, "open_member_raw", spy_open)
+    monkeypatch.setattr(AsyncZipReader, "read_member_raw", spy_read)
     assert merge_eval_log_shards(merged, _task()).written
 
     from_shards = {name for file, name in sample_reads if file.startswith(shards)}
@@ -5253,6 +5251,14 @@ def test_merge_shards_command_exits_only_through_its_failure_report() -> None:
 _MiB = 1024 * 1024
 
 
+@pytest.fixture
+def streamed_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stream every sample member, as the merge does one too large to read ahead."""
+    from inspect_ai.log._shards import _write
+
+    monkeypatch.setattr(_write, "_READ_AHEAD_BYTES", 0)
+
+
 @solver
 def _chatty(events: int, repeated: bool) -> Solver:
     """Logs `events` info events of 32 KiB of text each.
@@ -5288,6 +5294,7 @@ def _merge_peak(merged: str, task: Task) -> tuple[ShardMergeResult, int]:
         tracemalloc.stop()
 
 
+@pytest.mark.usefixtures("streamed_samples")
 @pytest.mark.parametrize("data", ["random", "repeated"])
 @pytest.mark.parametrize("write", ["fresh", "incremental"])
 def test_merge_peak_memory_does_not_grow_with_transcript_size(
@@ -5313,6 +5320,38 @@ def test_merge_peak_memory_does_not_grow_with_transcript_size(
     # sample members of about 3 and 13 MiB; parsing them whole took 4.5 times
     # their size, and recompressing them held a member's compressed bytes
     assert peaks[400] - peaks[100] < _MiB, peaks
+
+
+def test_merge_peak_memory_does_not_grow_with_the_samples_read_ahead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_ai.log._shards import _write
+
+    monkeypatch.setattr(_write, "_READ_AHEAD_BYTES", _MiB)
+    chunks: list[int] = []
+    write = _write._SampleCopy.write
+
+    def spy(self: Any, data: bytes) -> None:
+        chunks.append(len(data))
+        write(self, data)
+
+    monkeypatch.setattr(_write._SampleCopy, "write", spy)
+    peaks = {}
+    for samples in [8, 32]:
+        task = _task(samples=samples, solver=_chatty(12, False))
+        merged, shards = _paths(tmp_path / str(samples))
+        half = samples // 2
+        _run(shards, "0", task, sample_id=list(range(1, half + 1)))
+        _run(shards, "1", task, sample_id=list(range(half + 1, samples + 1)))
+        result, peaks[samples] = _merge_peak(merged, task)
+        assert result.written
+        with zipfile.ZipFile(local_path(merged)) as zf:
+            size = zf.getinfo("samples/2_epoch_1.json").compress_size
+        assert _write._CHUNK_SIZE < size < _MiB
+    # 24 more members, 6 MiB or more in all, of which under 2 MiB is held
+    assert peaks[32] - peaks[8] < _MiB, peaks
+    # each is copied a chunk at a time
+    assert max(chunks) == _write._CHUNK_SIZE
 
 
 _SEEN_SCORE_METADATA: list[dict[str, Any] | None] = []
@@ -5387,11 +5426,14 @@ def big_metadata_scored() -> Scorer:
     return score
 
 
+@pytest.mark.parametrize("read", ["ahead", "streamed"])
 def test_a_sample_the_streaming_parser_refuses_is_parsed_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: str
 ) -> None:
     from inspect_ai.log._shards import _write
 
+    if read == "streamed":
+        monkeypatch.setattr(_write, "_READ_AHEAD_BYTES", 0)
     # an integer too large for the streaming parser, in the dataset metadata
     big = 2**70
     task = _task(samples=4)
@@ -5410,10 +5452,13 @@ def test_a_sample_the_streaming_parser_refuses_is_parsed_whole(
         return parsed
 
     monkeypatch.setattr(_write, "_parse_whole", spy)
+    reads = _crc_failures(monkeypatch, shards, 0, ZipCrcError("unused"))
     _SEEN_SAMPLE_METADATA.clear()
     result = merge_eval_log_shards(merged, task)
     assert result.written
     assert whole == [3]
+    # parsed from the bytes read ahead; a streamed member is read again
+    assert reads.count("samples/3_epoch_1.json") == (1 if read == "ahead" else 2)
     assert _SEEN_SAMPLE_METADATA == [{"index": i} for i in (1, 2)] + [
         {"index": 3, "big": big},
         {"index": 4},
@@ -5632,6 +5677,7 @@ def test_a_sample_member_with_an_incomplete_zstd_frame_fails_the_merge(
     assert not os.path.exists(merged)
 
 
+@pytest.mark.usefixtures("streamed_samples")
 async def test_a_cancelled_read_still_closes_the_sample_input(
     two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5668,6 +5714,7 @@ async def test_a_cancelled_read_still_closes_the_sample_input(
     assert not os.path.exists(merged)
 
 
+@pytest.mark.usefixtures("streamed_samples")
 @pytest.mark.parametrize("stop", ["error", "cancelled"])
 async def test_a_sample_copy_whose_input_fails_to_open_is_freed(
     two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch, stop: str
@@ -5718,6 +5765,7 @@ async def test_a_sample_copy_whose_input_fails_to_open_is_freed(
     assert not os.path.exists(merged)
 
 
+@pytest.mark.usefixtures("streamed_samples")
 @pytest.mark.parametrize("stop", ["error", "cancelled"])
 async def test_a_sample_copy_that_stops_closes_its_input_first(
     two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch, stop: str
@@ -5816,6 +5864,186 @@ async def test_a_sample_copy_that_stops_closes_its_output_in_a_worker(
     assert not os.path.exists(merged)
 
 
+def _wrap_sample_reads(
+    monkeypatch: pytest.MonkeyPatch, around: Callable[[str, Callable[[], Any]], Any]
+) -> None:
+    """Make each read-ahead of a sample member `await around(name, read)`."""
+    read_member = AsyncZipReader.read_member_raw
+
+    async def wrapped(self: AsyncZipReader, member: Any) -> Any:
+        name = member if isinstance(member, str) else member.filename
+        read = functools.partial(read_member, self, member)
+        return await (around(name, read) if name.startswith("samples/") else read())
+
+    monkeypatch.setattr(AsyncZipReader, "read_member_raw", wrapped)
+
+
+@pytest.mark.parametrize("limit", ["_READ_AHEAD", "_CONCURRENT_READS"])
+async def test_sample_members_are_read_ahead_and_merged_in_order(
+    two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch, limit: str
+) -> None:
+    from inspect_ai.log import merge_eval_log_shards_async
+    from inspect_ai.log._shards import _write
+
+    merged, shards = two_shards
+    # three members read ahead, or six with three of their reads in flight
+    monkeypatch.setattr(_write, limit, 3)
+    names = [f"samples/{i}_epoch_1.json" for i in range(1, 7)]
+    ended = {name: anyio.Event() for name in names}
+    reading: set[str] = set()
+    peak = 0
+
+    async def around(name: str, read: Callable[[], Any]) -> Any:
+        nonlocal peak
+        reading.add(name)
+        peak = max(peak, len(reading))
+        try:
+            # the first two reads each end after the next sample's
+            if name in names[:2]:
+                with anyio.fail_after(30):
+                    await ended[names[names.index(name) + 1]].wait()
+            return await read()
+        finally:
+            reading.remove(name)
+            ended[name].set()
+
+    _wrap_sample_reads(monkeypatch, around)
+    assert (await merge_eval_log_shards_async(merged, _task())).written
+    # three samples were being read at once, never a fourth
+    assert peak == 3
+    with zipfile.ZipFile(local_path(merged)) as zf:
+        assert [n for n in zf.namelist() if n.startswith("samples/")] == names
+    expected: dict[str, tuple[int, bytes]] = {}
+    for shard in Path(shards).glob("*/*.eval"):
+        expected |= _compressed_samples(str(shard))
+    assert _compressed_samples(merged) == expected
+
+
+async def test_a_failed_read_ahead_is_raised_at_its_samples_turn(
+    two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_ai.log import merge_eval_log_shards_async
+    from inspect_ai.log._shards import _write
+
+    merged, shards = two_shards
+    calls = _crc_failures(
+        monkeypatch, shards, 100, OSError("unread"), "samples/6_epoch_1.json"
+    )
+
+    def torn(*args: Any) -> None:
+        raise ZipCrcError("torn")
+
+    # sample 1's copy fails before sample 6's turn, as when read one by one
+    monkeypatch.setattr(_write, "_check_crc", torn)
+    with pytest.raises(ZipCrcError, match="torn"):
+        await merge_eval_log_shards_async(merged, _task())
+    assert calls == ["samples/6_epoch_1.json"]
+    assert not os.path.exists(merged)
+
+
+def test_a_read_ahead_that_ends_cancelled_fails_the_merge(
+    two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    merged, _ = two_shards
+
+    async def around(name: str, read: Callable[[], Any]) -> Any:
+        if name == "samples/3_epoch_1.json":
+            # as a cancelled future it awaited raises, with no scope cancelled
+            raise asyncio.CancelledError()
+        return await read()
+
+    _wrap_sample_reads(monkeypatch, around)
+    with pytest.raises(RuntimeError, match="was cancelled.*of 6 members"):
+        merge_eval_log_shards(merged, _task())
+    assert not os.path.exists(merged)
+
+
+async def test_sample_members_go_on_being_read_ahead_as_copies_free_their_bytes(
+    two_shards: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from inspect_ai.log import merge_eval_log_shards_async
+    from inspect_ai.log._shards import _write
+
+    merged, shards = two_shards
+    sizes = [
+        len(data)
+        for shard in Path(shards).glob("*/*.eval")
+        for _, data in _compressed_samples(str(shard)).values()
+    ]
+    # two members reach the limit, so a third is read only once one is copied
+    assert 2 * min(sizes) > max(sizes)
+    monkeypatch.setattr(_write, "_READ_AHEAD_BYTES", max(sizes) + 1)
+    started = {f"samples/{i}_epoch_1.json": anyio.Event() for i in range(1, 7)}
+
+    async def around(name: str, read: Callable[[], Any]) -> Any:
+        started[name].set()
+        if name == "samples/4_epoch_1.json":
+            # still read ahead of its copy: sample 5's read starts meanwhile
+            with anyio.fail_after(30):
+                await started["samples/5_epoch_1.json"].wait()
+        return await read()
+
+    _wrap_sample_reads(monkeypatch, around)
+    assert (await merge_eval_log_shards_async(merged, _task())).written
+
+
+@pytest.mark.parametrize("cancel", ["scope", "native"])
+async def test_a_cancelled_merge_cancels_its_read_ahead(
+    two_shards: tuple[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: str,
+) -> None:
+    import asyncio
+
+    import sniffio
+
+    from inspect_ai.log import merge_eval_log_shards_async
+    from inspect_ai.log._shards import _write
+
+    if cancel == "native" and sniffio.current_async_library() != "asyncio":
+        pytest.skip("asyncio's own cancellation")
+    merged, _ = two_shards
+    before = _files(str(tmp_path))
+    # three reads in flight, and three waiting for one of them to end
+    monkeypatch.setattr(_write, "_CONCURRENT_READS", 3)
+    started = 0
+    cancelled = 0
+    all_started = anyio.Event()
+
+    async def around(name: str, read: Callable[[], Any]) -> Any:
+        nonlocal started, cancelled
+        started += 1
+        if started == 3:
+            all_started.set()
+        try:
+            # a read the cancellation does not reach ends at this deadline
+            with anyio.fail_after(30):
+                await anyio.sleep_forever()
+        except anyio.get_cancelled_exc_class():
+            cancelled += 1
+            raise
+
+    _wrap_sample_reads(monkeypatch, around)
+    with anyio.fail_after(60):
+        if cancel == "native":
+            merge = asyncio.ensure_future(merge_eval_log_shards_async(merged, _task()))
+            await all_started.wait()
+            merge.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await merge
+        else:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(merge_eval_log_shards_async, merged, _task())
+                await all_started.wait()
+                tg.cancel_scope.cancel()
+    # the reads in flight were cancelled, and no waiting read started
+    assert (started, cancelled) == (3, 3)
+    assert _files(str(tmp_path)) == before
+
+
 def _compressed_samples(log: str) -> dict[str, tuple[int, bytes]]:
     """Each sample member's compression method and compressed bytes."""
     path = local_path(log)
@@ -5839,9 +6067,12 @@ def _compressed_samples(log: str) -> dict[str, tuple[int, bytes]]:
     return members
 
 
+@pytest.mark.parametrize("read_ahead", ["all", "some"])
 def test_merged_sample_members_are_the_shards_compressed_bytes(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_ahead: str
 ) -> None:
+    from inspect_ai.log._shards import _write
+
     merged, shards = _paths(tmp_path)
     zstd = _run(shards, "0", sample_id=[1, 2, 3])
     deflated = _run(shards, "1", sample_id=[4, 5, 6])
@@ -5850,11 +6081,24 @@ def test_merged_sample_members_are_the_shards_compressed_bytes(
     with zipfile.ZipFile(local_path(deflated.location)) as zf:
         sample = zf.read(name)
     _replace_member(deflated.location, name, sample)
-    result = merge_eval_log_shards(merged, _task())
-
     expected = _compressed_samples(zstd.location) | _compressed_samples(
         deflated.location
     )
+    if read_ahead == "some":
+        # the smallest members are read ahead and the rest streamed
+        sizes = {len(data) for _, data in expected.values()}
+        assert len(sizes) > 1
+        monkeypatch.setattr(_write, "_READ_AHEAD_BYTES", min(sizes))
+    ahead: list[str] = []
+
+    async def around(name: str, read: Callable[[], Any]) -> Any:
+        ahead.append(name)
+        return await read()
+
+    _wrap_sample_reads(monkeypatch, around)
+    result = merge_eval_log_shards(merged, _task())
+    assert len(ahead) == 6 if read_ahead == "all" else 0 < len(ahead) < 6
+
     assert {method for method, _ in expected.values()} == {
         zipfile_compress_kwargs["compression"],
         zipfile.ZIP_DEFLATED,
