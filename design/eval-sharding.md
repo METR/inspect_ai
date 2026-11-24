@@ -717,6 +717,16 @@ shard, not a transfer through the client.
 
 ### Eval-set integration
 
+> **Historical.** Inspect 0.3.292 replaced this section
+> (UKGovernmentBEIS/inspect_ai#6602): `eval_set()` does not merge shards and
+> refuses a log directory that holds any. An incomplete set is completed by
+> retrying each incomplete shard in its own directory with the same
+> selection and merging again, not by resuming the merged log as an ordinary
+> whole run as described below. This fork still supports that resume
+> through a selection's `resume`, which Hawk uses; see
+> `test_eval_set_selection_resumes_an_incomplete_merged_log_whole` in
+> `tests/test_eval_set_selection.py`.
+
 `eval_set()` startup scans for `*.shards/` companions in the log directory
 and runs the incremental merge for each before any pairing, at the point
 where it lists the directory today (`evalset.py:1043-1060`). The merged log
