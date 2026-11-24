@@ -1,6 +1,5 @@
 import copy
-from logging import getLogger
-from typing import TYPE_CHECKING, Awaitable, Callable, NamedTuple
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 import anyio
 from tenacity import (
@@ -25,14 +24,6 @@ from inspect_ai.model._generate_overrides import generate_config_override
 if TYPE_CHECKING:
     from inspect_ai.model._generate_config import GenerateConfig
     from inspect_ai.model._model import RetryDecision
-
-
-logger = getLogger(__name__)
-
-
-class _Limits(NamedTuple):
-    max_retries: int | None
-    timeout: int | None
 
 
 class ModelRetryConfig(TypedDict):
@@ -82,7 +73,6 @@ def model_retry_config(
     # - exponential backoff starting at 3 seconds (will wait 25 minutes
     #   on the 10th retry,then will wait no longer than 30 minutes on
     #   subsequent retries)
-    # - with neither limit, auth failures in a row get their own backoff (default_wait)
     #
     # `live_overrides` controls whether the stop condition reads the live
     # `inspect ctl config` max_retries/timeout overrides (see the stop
@@ -140,14 +130,6 @@ def model_retry_config(
         if res is not None:
             await res
 
-    def limits() -> _Limits:
-        if live_overrides:
-            return _Limits(
-                max_retries=generate_config_override("max_retries", max_retries),
-                timeout=generate_config_override("timeout", timeout),
-            )
-        return _Limits(max_retries=max_retries, timeout=timeout)
-
     # resolve wait
     if wait is None:
         backoff = wait_exponential_jitter(
@@ -159,20 +141,17 @@ def model_retry_config(
             # A refreshed key is sent only after these waits, so it has to outlive them.
             nonlocal auth_failures
             ex = rs.outcome.exception() if rs.outcome else None
-            # A limited call keeps the plain backoff, so its limit ends it as usual.
-            if limits() != (None, None) or not (
+            if not (
                 isinstance(ex, Exception) and is_auth_failure and is_auth_failure(ex)
             ):
                 auth_failures = 0
                 return backoff(rs)
-            auth_failures += 1
-            rs = copy.copy(rs)
-            rs.attempt_number = auth_failures
-            delay = backoff(rs)
-            if delay >= 10 * 60:
-                # The retry log warns only from a 20-minute wait; these stop at 10.
-                logger.warning(f"{model_name}: {auth_failures} auth failures in a row")
-            return min(delay, 10 * 60)
+            # With max_retries a call keeps its pace, so its retries outlast an outage.
+            if generate_config_override("max_retries", max_retries) is None:
+                auth_failures += 1
+                rs = copy.copy(rs)
+                rs.attempt_number = auth_failures
+            return min(backoff(rs), 10 * 60)
 
         wait = default_wait
 
@@ -213,7 +192,11 @@ def model_retry_config(
     # N retries allow N+1 total attempts (0 = fail after the first attempt).
     # Timeout semantics match tenacity's stop_after_delay.
     def stop(retry_state: RetryCallState) -> bool:
-        effective_max_retries, effective_timeout = limits()
+        if live_overrides:
+            effective_max_retries = generate_config_override("max_retries", max_retries)
+            effective_timeout = generate_config_override("timeout", timeout)
+        else:
+            effective_max_retries, effective_timeout = max_retries, timeout
         if (
             effective_max_retries is not None
             and retry_state.attempt_number > effective_max_retries

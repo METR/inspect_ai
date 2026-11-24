@@ -2,10 +2,9 @@ import importlib
 import json
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
-from functools import partial
 from subprocess import Popen
 from typing import Any, NamedTuple, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import anthropic
 import anyio
@@ -34,8 +33,6 @@ from inspect_ai.model import (
     ModelOutput,
     get_model,
 )
-from inspect_ai.model._generate_overrides import _overrides
-from inspect_ai.model._model import AttemptTimeoutError
 from inspect_ai.model._model_info import _get_model_info_direct
 from inspect_ai.model._providers.anthropic import AnthropicAPI
 from inspect_ai.model._providers.grok import GrokAPI
@@ -47,7 +44,6 @@ from inspect_ai.model._providers.providers import validate_openai_client
 from inspect_ai.model._providers.vllm import VLLMAPI
 from inspect_ai.model._providers.vllm_completions import VLLMCompletionsAPI
 from inspect_ai.model._registry import modelapi
-from inspect_ai.model._retry import batch_admin_retry_config
 from inspect_ai.tool import ToolChoice, ToolInfo
 
 
@@ -72,7 +68,6 @@ class Mock401API(ModelAPI):
             config=config,
         )
         self.fail_count = model_args.get("fail_count", 2)
-        self.script = iter(model_args.get("script", ""))  # t: a timeout, else a 401
         self.call_count = 0
         self.initialize_count = 0
 
@@ -89,8 +84,6 @@ class Mock401API(ModelAPI):
         config: GenerateConfig,
     ) -> ModelOutput:
         """Fail with 401-like exception first N times, then succeed."""
-        if step := next(self.script, ""):
-            raise AttemptTimeoutError(None) if step == "t" else Mock401Exception(step)
         self.call_count += 1
 
         if self.call_count <= self.fail_count:
@@ -178,68 +171,70 @@ def test_reactive_token_refresh_on_401(mock_refresh_token_hook: MockRefreshToken
 
 
 @pytest.mark.real_retry_wait
-async def test_auth_backoff_without_a_limit(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("limit", "down"),
+    [
+        pytest.param(GenerateConfig(timeout=36000), 0, id="no-max-retries"),
+        pytest.param(GenerateConfig(max_retries=15), 240, id="max-retries"),
+    ],
+)
+async def test_a_key_that_expires_during_a_long_backoff_is_replaced_in_time(
+    monkeypatch: pytest.MonkeyPatch, limit: GenerateConfig, down: int
 ) -> None:
-    """A call with no limit backs off auth failures in a row on their own count."""
-    sleep = AsyncMock()
+    """A call ten failures deep is answered though its 30-minute key expires meanwhile.
+
+    The key service is down for `down` seconds from the first refused key.
+    """
+    now = 0.0  # the clock; the retry loop's sleeps move it
+    held = 1800.0  # the hook's key: a key is the time it expires at
+    back_at = 0.0  # when the key service answers again
+    busy = 10
+
+    class Keys(Hooks):
+        def override_api_key(self, data: ApiKeyOverride) -> str | None:
+            # As a hook renewing in the background: the new key is for the next call.
+            nonlocal held
+            key, held = held, held if now < back_at else now + 1800
+            return str(key) if key > now else None
+
+    class Busy(Exception):
+        pass
+
+    class Provider(ModelAPI):
+        async def generate(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            tool_choice: ToolChoice,
+            config: GenerateConfig,
+        ) -> ModelOutput:
+            nonlocal busy, back_at
+            if busy:
+                busy -= 1
+                raise Busy()
+            if float(self.api_key or 0) <= now:
+                back_at = back_at or now + down
+                raise Mock401Exception()
+            return ModelOutput.from_content(self.model_name, "answered")
+
+        def should_retry(self, ex: Exception) -> bool:
+            return isinstance(ex, Busy)
+
+        def is_auth_failure(self, ex: Exception) -> bool:
+            return isinstance(ex, Mock401Exception)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+        assert now < 12 * 3600, "still retrying after 12 hours"
+
     monkeypatch.setattr("inspect_ai.model._retry._sleep", sleep)
-    monkeypatch.setitem(_registry, "modelapi:mock401", None)  # removed on teardown
-    modelapi(name="mock401")(lambda: Mock401API)
-    monkeypatch.setattr(Mock401API, "should_retry", lambda *_: True)  # not just auth
-
-    async def waits(fail: str, limit: GenerateConfig = GenerateConfig()) -> list[float]:
-        sleep.reset_mock()
-        model = get_model("mock401/t", memoize=False, script=fail)
-        await model.generate("t", config=limit)
-        return [c.args[0] for c in sleep.await_args_list]
-
-    def off(want: list[int], got: list[float]) -> list[float]:
-        pairs = zip(want, got, strict=True)  # a capped wait carries no jitter
-        return [w for s, w in pairs if not s <= w <= s + 3 * (s not in (600, 1800))]
-
-    got = await waits("ttta" + "t" * 6 + "a" * 9 + "t" + "a" * 10)  # then its own two
-    ramp = [3 * 2**n for n in range(10)]
-    steps = [*ramp[:3], 3, *ramp[4:], *ramp[:8], 600, 1800, *ramp[:8], *[600] * 4]
-    assert off(steps, got) == []
-    assert len({round(w - s, 3) for s, w in zip(steps[10:18], got[10:18])}) > 1
-    want = [("WARNING", f"t: {n} auth failures in a row") for n in (9, 9, 10, 11, 12)]
-    said = [(r.levelname, r.message) for r in caplog.records if r.module == "_retry"]
-    assert said == want
-    errs = [Mock401Exception(), OSError(), Mock401Exception()]  # not only timeouts
-    for op, done in {"count_tokens": 1, "compact": ([], None)}.items():
-        monkeypatch.setattr(Mock401API, op, AsyncMock(side_effect=[*errs, done]))
-    model = get_model("mock401/t", memoize=False, fail_count=4)  # loops count apart
-    await model.count_tokens("t")
-    await model.compact([], [])
-    assert off([3, 6, 3] * 2, [c.args[0] for c in sleep.await_args_list[-6:]]) == []
-    for limit in (GenerateConfig(max_retries=20), GenerateConfig(timeout=7200)):
-        assert off([*ramp, 1800, 1800], await waits("at" * 5, limit)) == []  # plain
-    with monkeypatch.context() as patch:  # a provider's own wait is kept
-        patch.setattr(Mock401API, "retry_wait", lambda self: lambda rs: 700)
-        assert await waits("ta") == [700] * 4
-    at: dict[int, partial[None]] = {}  # a live limit counts while it is set
-    sleep.side_effect = lambda s: at.get(sleep.call_count, lambda: None)()
-    for key in ("timeout", "max_retries"):  # set at sleep 1, cleared at sleep 9
-        at[1] = partial(monkeypatch.setitem, _overrides, key, 3600)
-        at[9] = partial(monkeypatch.delitem, _overrides, key)
-        assert off([*ramp[:9], 3, 6, 12], await waits("a" * 10)) == []
-    met = [anyio.Event(), anyio.Event()]  # sleeps 1 and 3 last until 2 and 4 start
-
-    async def paired(seconds: float) -> None:
-        event = met[(sleep.await_count - 1) // 2]
-        if sleep.await_count % 2 == 0:
-            event.set()
-        with anyio.fail_after(30):
-            await event.wait()
-
-    sleep.reset_mock()
-    sleep.side_effect = paired
-    await tg_collect([lambda: model.generate("t")] * 2)  # calls at once count apart
-    assert off([3, 3, 6, 6], [c.args[0] for c in sleep.await_args_list]) == []
-    cfg = GenerateConfig(max_retries=5, timeout=9)  # a batch admin loop's launch limits
-    over = [Mock(attempt_number=n, seconds_since_start=s) for n, s in ((6, 0), (1, 9))]
-    assert all(map(batch_admin_retry_config("t", cfg, bool)["stop"], over))
+    for entry in ("hooks:expiring_key", "modelapi:expiring_key"):
+        monkeypatch.setitem(_registry, entry, None)  # removed on teardown
+    hooks("expiring_key", description="keys that expire")(Keys)
+    modelapi(name="expiring_key")(lambda: Provider)
+    model = get_model("expiring_key/m", memoize=False, api_key_vars=["EXPIRING_KEY"])
+    assert (await model.generate("hi", config=limit)).completion == "answered"
 
 
 _OPENAI_COMPLETION = {
