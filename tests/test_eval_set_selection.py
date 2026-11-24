@@ -42,6 +42,7 @@ from inspect_ai.log import (
     EvalLog,
     ProvenanceData,
     list_eval_logs,
+    merge_eval_log_shards,
     read_eval_log,
     zero_samples,
 )
@@ -477,6 +478,74 @@ def test_eval_set_selection_resume_reuses_completed_samples(
     assert solved.count("two") == 2
     assert logs[0].results is not None
     assert logs[0].results.completed_samples == 2
+
+
+def test_eval_set_selection_resumes_an_incomplete_merged_log_whole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run split by sample id and merged with a slice missing resumes as one whole run, which reuses the merged samples.
+
+    Upstream stopped documenting this path in 0.3.292, where each incomplete shard is retried instead. Hawk resumes this way.
+    """
+    solved: list[str] = []
+    ids = ["one", "two", "three", "four"]
+
+    @solver
+    def record_solved() -> Solver:
+        async def solve(state: TaskState, generate: Generate) -> TaskState:
+            solved.append(str(state.sample_id))
+            return await generate(state)
+
+        return solve
+
+    def sliced_tasks() -> list[Task]:
+        return [
+            Task(
+                dataset=[Sample(id=id, input="Say hello") for id in ids],
+                solver=record_solved(),
+                scorer=includes(),
+                name="sliced",
+            )
+        ]
+
+    capture = enumerate_eval_set(monkeypatch, tmp_path, tasks=sliced_tasks())
+    identifier = next(t for t in capture.tasks if t.model == MODELS[0]).identifier
+    log_dir = tmp_path / "logs"
+    merged = log_dir / "2026-11-24T00-00-00-00-00_sliced_whole.eval"
+
+    # one of the two slices runs, as a worker runs it: its samples by id, in
+    # its own directory of the run's shards
+    first_slice = selection_for(identifier)
+    first_slice.completion = "definition"
+    first_slice.overrides = EvalSetOverrides(
+        log_dir=str(merged.with_suffix(".shards") / "0"), sample_id=ids[:2]
+    )
+    success, _ = run_selection(
+        monkeypatch, tmp_path, first_slice, log_dir, tasks=sliced_tasks(), name="slice"
+    )
+    assert success
+    header = merge_eval_log_shards(
+        str(merged), sliced_tasks()[0], sample_ids=ids, allow_incomplete=True
+    ).log
+    assert header.status == "started"
+    held = {s.id: s.uuid for s in read_eval_log(str(merged)).samples or []}
+    assert sorted(held) == sorted(ids[:2])
+
+    whole = EvalSetSelection(
+        version=EVAL_SET_SELECTION_VERSION,
+        eval_set_id="worker-test",
+        tasks=[EvalSetSelectionTask(identifier=identifier, resume=str(merged))],
+        completion="definition",
+    )
+    success, [resumed] = run_selection(
+        monkeypatch, tmp_path, whole, log_dir, tasks=sliced_tasks(), name="whole"
+    )
+    assert success and resumed.status == "success"
+    samples = read_eval_log(resumed.location).samples or []
+    assert sorted(str(s.id) for s in samples) == sorted(ids)
+    assert {s.id: s.uuid for s in samples if s.id in held} == held
+    # the merged samples were not run again
+    assert sorted(solved) == sorted(ids)
 
 
 def test_eval_set_selection_forces_fail_on_error_off(
