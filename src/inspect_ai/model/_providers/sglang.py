@@ -121,6 +121,11 @@ class SGLangAPI(OpenAICompatibleAPI):
             )
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        # a server this process launched accepts only its launch key
+        return self.server_process is None
+
+    @override
     async def proxy_endpoint(self) -> tuple[AsyncOpenAI, str] | None:
         # A server someone named may sit behind a proxy; one this process
         # started never does. The named URL is also the service's own here,

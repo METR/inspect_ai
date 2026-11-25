@@ -443,11 +443,10 @@ class ModelAPI(abc.ABC):
         self.initialize()
 
     def _refreshes_in_place(self) -> bool:
-        # providers override refresh_credentials() to keep the client others use
-        return type(self).refresh_credentials is not ModelAPI.refresh_credentials
+        # opt in only where refresh_credentials() keeps the client others are using
+        return False
 
     async def _refresh_if_key_changed(self) -> None:
-        # only in place: a rebuilt client would cut off other calls' requests
         if not self._refreshes_in_place():
             return
         held = (self.api_key, [os.environ.get(var) for var in self.api_key_vars])

@@ -697,8 +697,7 @@ class AnthropicAPI(ModelAPI):
         self._http_hooks = HttpxHooks(self.client._client, api=self)
         self._batcher: AnthropicBatcher | None = None
 
-    @override
-    def _refreshes_in_place(self) -> bool:
+    def _uses_api_key(self) -> bool:
         # Bedrock, Vertex and ANTHROPIC_AUTH_TOKEN credentials aren't the hooks' key
         return (
             isinstance(self.client, AsyncAnthropic)
@@ -707,10 +706,14 @@ class AnthropicAPI(ModelAPI):
         )
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        # Azure keeps its own key: the hooks may supply one for another endpoint
+        return self._uses_api_key() and not self.is_azure()
+
+    @override
     async def refresh_credentials(self) -> None:
-        # In-flight requests and SDK retries share this client; closing it
-        # during credential refresh would also fail other samples.
-        if not self._refreshes_in_place():
+        # closing the shared client would fail other samples' requests
+        if not self._uses_api_key():
             await super().refresh_credentials()
             return
         assert isinstance(self.client, AsyncAnthropic)

@@ -253,6 +253,10 @@ class GroqAPI(ModelAPI):
         self._http_hooks = HttpxHooks(self.client._client, api=self)
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        return True
+
+    @override
     async def refresh_credentials(self) -> None:
         # In-flight requests and SDK retries share this client; closing it
         # during credential refresh would also fail other samples.

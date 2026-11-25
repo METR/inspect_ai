@@ -553,6 +553,103 @@ async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
         await http_client.aclose()
 
 
+@pytest.mark.parametrize(
+    "model_name,base_url,var,header",
+    [
+        (
+            "openai/azure/gpt-4o",
+            "https://example.openai.azure.com",
+            "OPENAI_API_KEY",
+            "api-key",
+        ),
+        (
+            "openai/bedrock/openai.gpt-oss-120b",
+            "https://example.com/v1",
+            "OPENAI_API_KEY",
+            "authorization",
+        ),
+        (
+            "anthropic/azure/claude-sonnet-4-6",
+            "https://example.services.ai.azure.com/anthropic",
+            "ANTHROPIC_API_KEY",
+            "api-key",
+        ),
+    ],
+)
+async def test_a_client_for_another_endpoint_keeps_its_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+    key_hook: _KeyHook,
+    model_name: str,
+    base_url: str,
+    var: str,
+    header: str,
+) -> None:
+    """Once the hooks have a key for the provider's own endpoint, it goes nowhere else."""
+    sent: list[str] = []
+    reply = (
+        _ANTHROPIC_MESSAGE
+        if model_name.startswith("anthropic/")
+        else _OPENAI_COMPLETION
+    )
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers[header].removeprefix("Bearer "))
+        return httpx2.Response(200, json=reply)
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    key_hook.var, key_hook.key = var, None
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+    model = get_model(
+        model_name,
+        config=GenerateConfig(max_retries=0, max_tokens=1),
+        base_url=base_url,
+        api_key="own-key",
+        memoize=False,
+        http_client=http_client,
+    )
+    try:
+        key_hook.key = "gateway-key"
+        await model.generate("hello")
+        assert sent == ["own-key"]
+    finally:
+        await model.api.aclose()
+        await http_client.aclose()
+
+
+async def test_overriding_refresh_credentials_does_not_opt_in_to_the_key_read(
+    monkeypatch: pytest.MonkeyPatch, key_hook: _KeyHook
+) -> None:
+    refreshes = 0
+
+    class Provider(ModelAPI):
+        async def refresh_credentials(self) -> None:
+            nonlocal refreshes
+            refreshes += 1
+            await super().refresh_credentials()
+
+        async def generate(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            tool_choice: ToolChoice,
+            config: GenerateConfig,
+        ) -> ModelOutput:
+            return ModelOutput.from_content(self.model_name, "ok")
+
+    monkeypatch.setitem(_registry, "modelapi:no_opt_in", None)  # removed on teardown
+    modelapi(name="no_opt_in")(lambda: Provider)
+    key_hook.var = "NO_OPT_IN_API_KEY"
+    model = get_model(
+        "no_opt_in/m",
+        api_key="old-key",
+        api_key_vars=["NO_OPT_IN_API_KEY"],
+        memoize=False,
+    )
+    key_hook.key = "new-key"
+    await model.generate("hello")
+    assert refreshes == 0
+
+
 async def test_anthropic_auth_token_refresh_rereads_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

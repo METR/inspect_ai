@@ -314,6 +314,10 @@ class GrokAPI(ModelAPI):
             return len(tokens)
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        return True
+
+    @override
     async def refresh_credentials(self) -> None:
         # Other requests build a client per call. The batcher shares one
         # client that its in-flight batch operations are using, so it gets a
