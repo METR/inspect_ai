@@ -31,7 +31,6 @@ from inspect_ai.model import (
     Model,
     ModelAPI,
     ModelOutput,
-    ModelUsage,
     get_model,
 )
 from inspect_ai.model._model_info import _get_model_info_direct
@@ -119,6 +118,26 @@ class MockRefreshTokenHook(Hooks):
         token = f"token-{self.call_count}"
         self.provided_tokens.append(token)
         return token
+
+
+class _KeyHook(Hooks):
+    """Answers for `var` with `key`, as a gateway's key hook does; None declines."""
+
+    def __init__(self) -> None:
+        self.var = "OPENAI_API_KEY"
+        self.key: str | None = "old-key"
+
+    def override_api_key(self, data: ApiKeyOverride) -> str | None:
+        return self.key if data.env_var_name == self.var else None
+
+
+@pytest.fixture
+def key_hook(monkeypatch: pytest.MonkeyPatch) -> _KeyHook:
+    monkeypatch.setitem(_registry, "hooks:key_hook", None)  # removed on teardown
+    hooks("key_hook", description="a key the test rotates")(_KeyHook)
+    hook = registry_lookup("hooks", "key_hook")
+    assert isinstance(hook, _KeyHook)
+    return hook
 
 
 @pytest.fixture
@@ -385,88 +404,153 @@ async def test_refresh_preserves_concurrent_requests(
     assert http_client.is_closed
 
 
-@pytest.mark.parametrize("auth_token", [None, "auth-token"])
+@pytest.mark.parametrize(
+    "model_name,model_args,auth_token,credential",
+    [
+        pytest.param("claude-sonnet-4-6", {}, None, None, id="api-key"),
+        pytest.param(
+            "claude-sonnet-4-6", {}, "auth-token", "Bearer auth-token", id="auth-token"
+        ),
+        pytest.param(
+            "bedrock/anthropic.claude-sonnet-4-6",
+            {"aws_access_key": "AKIDEXAMPLE", "aws_secret_key": "secret"},
+            None,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE",
+            id="bedrock",
+        ),
+        pytest.param(
+            "vertex/claude-sonnet-4-6",
+            {"access_token": "vertex-token"},
+            None,
+            "Bearer vertex-token",
+            id="vertex",
+        ),
+    ],
+)
 async def test_a_key_the_hooks_replace_is_sent_with_the_next_request(
-    monkeypatch: pytest.MonkeyPatch, auth_token: str | None
+    monkeypatch: pytest.MonkeyPatch,
+    key_hook: _KeyHook,
+    model_name: str,
+    model_args: dict[str, str],
+    auth_token: str | None,
+    credential: str | None,
 ) -> None:
-    """No auth failure first, same client, and ANTHROPIC_AUTH_TOKEN left alone."""
-    token = "old-key"
+    """No auth failure first and the same client; other credentials are left alone."""
     sent: list[str] = []
 
-    def override_api_key(env_var_name: str, value: str) -> str:
-        return token
-
     def respond(request: httpx2.Request) -> httpx2.Response:
-        sent.append(request.headers["authorization"].removeprefix("Bearer "))
-        if sent[-1] != (auth_token or token):
-            return httpx2.Response(401, json={"error": {"message": "expired"}})
+        # up to a SigV4 header's date and signature
+        sent.append(request.headers["authorization"].split("/")[0])
         return httpx2.Response(200, json=_ANTHROPIC_MESSAGE)
 
-    monkeypatch.setattr("inspect_ai.hooks._hooks.override_api_key", override_api_key)
+    key_hook.var = "ANTHROPIC_API_KEY"
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     if auth_token:
         monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", auth_token)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-east5")
+    monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "project")
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
     model = get_model(
-        "anthropic/claude-sonnet-4-6",
+        f"anthropic/{model_name}",
         config=GenerateConfig(max_retries=0, max_tokens=1),
         base_url="https://example.com",
-        api_key=token,
+        api_key="old-key",
         memoize=False,
         http_client=http_client,
+        **model_args,
     )
     api = model.api
     assert isinstance(api, AnthropicAPI)
     client = api.client
     try:
         await model.generate("hello")
-        token = "new-key"
+        key_hook.key = "new-key"
         await model.generate("hello")
-        assert sent == [auth_token or "old-key", auth_token or "new-key"]
+        assert sent == [credential or "Bearer old-key", credential or "Bearer new-key"]
         assert api.client is client
     finally:
         await api.aclose()
         await http_client.aclose()
 
 
-async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_a_retry_sends_the_key_the_hooks_supply_after_the_failure(
+    key_hook: _KeyHook,
 ) -> None:
-    token = "old-key"
-    sent: list[str | None] = []
+    """The key is read before each attempt, not once per call."""
+    sent: list[str] = []
 
-    def override_api_key(env_var_name: str, value: str) -> str:
-        return token
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        if len(sent) == 1:
+            key_hook.key = "new-key"
+            return httpx2.Response(503, json={"error": {"message": "unavailable"}})
+        return httpx2.Response(200, json=_OPENAI_COMPLETION)
 
-    class Provider(Mock401API):
-        async def refresh_credentials(self) -> None:
-            self.initialize()
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+    model = get_model(
+        "openai/gpt-4o",
+        config=GenerateConfig(max_retries=1),
+        base_url="https://example.com/v1",
+        api_key="old-key",
+        memoize=False,
+        http_client=http_client,
+        max_retries=0,
+    )
+    try:
+        await model.generate("hello")
+        assert sent == ["old-key", "new-key"]
+    finally:
+        await model.api.aclose()
+        await http_client.aclose()
 
-        async def count_tokens(
-            self, input: str | list[ChatMessage], config: GenerateConfig | None = None
-        ) -> int:
-            sent.append(self.api_key)
-            return 1
 
-        async def compact(
-            self,
-            input: list[ChatMessage],
-            tools: list[ToolInfo],
-            config: GenerateConfig,
-            instructions: str | None = None,
-        ) -> tuple[list[ChatMessage], ModelUsage | None]:
-            sent.append(self.api_key)
-            return input, None
+async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
+    key_hook: _KeyHook,
+) -> None:
+    sent: list[str] = []
 
-    monkeypatch.setattr("inspect_ai.hooks._hooks.override_api_key", override_api_key)
-    monkeypatch.setitem(_registry, "modelapi:fresh_key", None)  # removed on teardown
-    modelapi(name="fresh_key")(lambda: Provider)
-    model = get_model("fresh_key/m", memoize=False, api_key=token)
-    token = "new-key"
-    await model.count_tokens("hello")
-    token = "newer-key"
-    await model.compact([ChatMessageUser(content="hello")], [])
-    assert sent == ["new-key", "newer-key"]
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        if request.url.path.endswith("/input_tokens"):
+            return httpx2.Response(
+                200, json={"object": "response.input_tokens", "input_tokens": 1}
+            )
+        return httpx2.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "response.compaction",
+                "created_at": 0,
+                "output": [{"id": "c", "type": "compaction", "encrypted_content": "e"}],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+            },
+        )
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+    model = get_model(
+        "openai/gpt-4o",
+        base_url="https://example.com/v1",
+        api_key="old-key",
+        memoize=False,
+        http_client=http_client,
+        responses_api=True,
+    )
+    try:
+        key_hook.key = "new-key"
+        await model.count_tokens([ChatMessageUser(content="hello")])
+        key_hook.key = "newer-key"
+        await model.compact([ChatMessageUser(content="hello")], [])
+        assert sent == ["new-key", "newer-key"]
+    finally:
+        await model.api.aclose()
+        await http_client.aclose()
 
 
 async def test_anthropic_auth_token_refresh_rereads_environment(
