@@ -31,6 +31,7 @@ from inspect_ai.model import (
     Model,
     ModelAPI,
     ModelOutput,
+    ModelUsage,
     get_model,
 )
 from inspect_ai.model._model_info import _get_model_info_direct
@@ -382,6 +383,90 @@ async def test_refresh_preserves_concurrent_requests(
         await api.aclose()
         await http_client.aclose()
     assert http_client.is_closed
+
+
+@pytest.mark.parametrize("auth_token", [None, "auth-token"])
+async def test_a_key_the_hooks_replace_is_sent_with_the_next_request(
+    monkeypatch: pytest.MonkeyPatch, auth_token: str | None
+) -> None:
+    """No auth failure first, same client, and ANTHROPIC_AUTH_TOKEN left alone."""
+    token = "old-key"
+    sent: list[str] = []
+
+    def override_api_key(env_var_name: str, value: str) -> str:
+        return token
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        if sent[-1] != (auth_token or token):
+            return httpx2.Response(401, json={"error": {"message": "expired"}})
+        return httpx2.Response(200, json=_ANTHROPIC_MESSAGE)
+
+    monkeypatch.setattr("inspect_ai.hooks._hooks.override_api_key", override_api_key)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    if auth_token:
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", auth_token)
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+    model = get_model(
+        "anthropic/claude-sonnet-4-6",
+        config=GenerateConfig(max_retries=0, max_tokens=1),
+        base_url="https://example.com",
+        api_key=token,
+        memoize=False,
+        http_client=http_client,
+    )
+    api = model.api
+    assert isinstance(api, AnthropicAPI)
+    client = api.client
+    try:
+        await model.generate("hello")
+        token = "new-key"
+        await model.generate("hello")
+        assert sent == [auth_token or "old-key", auth_token or "new-key"]
+        assert api.client is client
+    finally:
+        await api.aclose()
+        await http_client.aclose()
+
+
+async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "old-key"
+    sent: list[str | None] = []
+
+    def override_api_key(env_var_name: str, value: str) -> str:
+        return token
+
+    class Provider(Mock401API):
+        async def refresh_credentials(self) -> None:
+            self.initialize()
+
+        async def count_tokens(
+            self, input: str | list[ChatMessage], config: GenerateConfig | None = None
+        ) -> int:
+            sent.append(self.api_key)
+            return 1
+
+        async def compact(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            config: GenerateConfig,
+            instructions: str | None = None,
+        ) -> tuple[list[ChatMessage], ModelUsage | None]:
+            sent.append(self.api_key)
+            return input, None
+
+    monkeypatch.setattr("inspect_ai.hooks._hooks.override_api_key", override_api_key)
+    monkeypatch.setitem(_registry, "modelapi:fresh_key", None)  # removed on teardown
+    modelapi(name="fresh_key")(lambda: Provider)
+    model = get_model("fresh_key/m", memoize=False, api_key=token)
+    token = "new-key"
+    await model.count_tokens("hello")
+    token = "newer-key"
+    await model.compact([ChatMessageUser(content="hello")], [])
+    assert sent == ["new-key", "newer-key"]
 
 
 async def test_anthropic_auth_token_refresh_rereads_environment(
@@ -809,6 +894,31 @@ async def test_vllm_refresh_during_discovery(
         assert server.models_auth == ["Bearer hook-key", "Bearer rotated-key"]
         registered = _get_model_info_direct(api.input_tokens_name())
         assert registered is not None and registered.context_length == 4096
+    finally:
+        await server.aclose(api)
+
+
+async def test_lazy_vllm_sends_the_key_the_hooks_supply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """From before its server starts, and discovery reruns only for a new key."""
+    server = _VLLMDiscoveryServer(monkeypatch, managed=False)
+    server.reject_once = set()
+    model = get_model(
+        "vllm/credential-test",
+        config=GenerateConfig(max_retries=0, max_tokens=1),
+        base_url="http://localhost:8000/v1",
+        api_key="initial-key",
+        memoize=False,
+    )
+    api = model.api
+    assert isinstance(api, VLLMAPI)
+    try:
+        await model.generate("hello")
+        server.token = "rotated-key"
+        await model.generate("hello")
+        await model.generate("hello")
+        assert server.models_auth == ["Bearer hook-key", "Bearer rotated-key"]
     finally:
         await server.aclose(api)
 

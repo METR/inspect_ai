@@ -442,6 +442,19 @@ class ModelAPI(abc.ABC):
         await self.aclose()
         self.initialize()
 
+    def _refreshes_in_place(self) -> bool:
+        # providers override refresh_credentials() to keep the client others use
+        return type(self).refresh_credentials is not ModelAPI.refresh_credentials
+
+    async def _refresh_if_key_changed(self) -> None:
+        # only in place: a rebuilt client would cut off other calls' requests
+        if not self._refreshes_in_place():
+            return
+        held = (self.api_key, [os.environ.get(var) for var in self.api_key_vars])
+        self._apply_api_key_overrides()
+        if held != (self.api_key, [os.environ.get(var) for var in self.api_key_vars]):
+            await self.refresh_credentials()
+
     async def aclose(self) -> None:
         """Async close method for closing any client allocated for the model."""
         self.close()
@@ -1440,6 +1453,7 @@ class Model:
         async def _count_tokens_retried(
             input: str | list[ChatMessage], config: GenerateConfig | None
         ) -> int:
+            await self.api._refresh_if_key_changed()
             with attempts.attempt():
                 return await self.api.count_tokens(input, config)
 
@@ -1597,6 +1611,7 @@ class Model:
                 messages: list[ChatMessage],
             ) -> tuple[list[ChatMessage], ModelUsage | None]:
                 await wait_generate_dispatch(self, slot)
+                await self.api._refresh_if_key_changed()
                 # a concurrent call can reach a limit while this one waits for
                 # its slot, the pause gate, a retry or a caller's lock
                 _check_limits_before_dispatch()
@@ -1939,6 +1954,7 @@ class Model:
                     idle_scope if idle_scope is not None else contextlib.nullcontext()
                 )
 
+                await self.api._refresh_if_key_changed()
                 await stream_observer.begin_attempt(event)
                 # begin_attempt may await the on_stream retry boundary,
                 # during which a concurrent call can reach a limit

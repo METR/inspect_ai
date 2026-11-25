@@ -698,18 +698,22 @@ class AnthropicAPI(ModelAPI):
         self._batcher: AnthropicBatcher | None = None
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        # Bedrock, Vertex and ANTHROPIC_AUTH_TOKEN credentials aren't the hooks' key
+        return (
+            isinstance(self.client, AsyncAnthropic)
+            and not self.client.auth_token
+            and not os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        )
+
+    @override
     async def refresh_credentials(self) -> None:
         # In-flight requests and SDK retries share this client; closing it
-        # during credential refresh would also fail other samples. Bedrock,
-        # Vertex and ANTHROPIC_AUTH_TOKEN credentials don't come from the key
-        # hooks, so those keep the default rebuild.
-        if (
-            not isinstance(self.client, AsyncAnthropic)
-            or self.client.auth_token
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        ):
+        # during credential refresh would also fail other samples.
+        if not self._refreshes_in_place():
             await super().refresh_credentials()
             return
+        assert isinstance(self.client, AsyncAnthropic)
         super().initialize()
         self.client.api_key = self.api_key
 

@@ -278,6 +278,11 @@ class VLLMAPI(OpenAICompatibleAPI):
             self._server.api_key = self.api_key
 
     @override
+    def _refreshes_in_place(self) -> bool:
+        # the client is built when the server is resolved, which reads the key hooks
+        return self._resolved_epoch == self._server._epoch
+
+    @override
     async def refresh_credentials(self) -> None:
         """Refresh credentials and allow context-window discovery to run again.
 
