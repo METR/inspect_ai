@@ -501,7 +501,7 @@ async def _fails_once_as_the_key_rotates(
                 await context.abort(grpc.StatusCode.UNKNOWN, "unavailable")
             return _grok_completion()
 
-        handler = grpc.unary_unary_rpc_method_handler(
+        handler: grpc.RpcMethodHandler[Any, Any] = grpc.unary_unary_rpc_method_handler(
             complete,
             request_deserializer=_CHAT_PB2.GetCompletionsRequest.FromString,
             response_serializer=lambda response: response.SerializeToString(),
@@ -759,12 +759,14 @@ async def test_a_compatible_subclass_that_replaces_refresh_credentials_is_not_op
         memoize=False,
         http_client=http_client,
     )
-    client = model.api.client
+    api = model.api
+    assert isinstance(api, OpenAICompatibleAPI)
+    client = api.client
     try:
         key_hook.key = "new-key"
         await model.generate("hello")
         assert sent == ["old-key"]
-        assert model.api.client is client
+        assert api.client is client
     finally:
         await model.api.aclose()
         await http_client.aclose()
