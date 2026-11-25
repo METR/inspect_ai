@@ -451,6 +451,10 @@ class ModelAPI(abc.ABC):
 
         Providers that can update credentials in place should override this
         method to avoid interrupting concurrent requests using their client.
+        Most built-in providers that do so also call it before each Inspect
+        attempt (not SDK retries or batch polls) when the key hooks return a
+        different key, so hooks should be quick and return the same key for
+        the same input.
         """
         await self.aclose()
         self.initialize()
