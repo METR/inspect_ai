@@ -18,7 +18,7 @@ from openai import AuthenticationError, DefaultAsyncHttpxClient
 from test_helpers.utils import skip_if_trio
 
 from inspect_ai import Task, eval
-from inspect_ai._util._async import tg_collect
+from inspect_ai._util._async import current_async_backend, tg_collect
 from inspect_ai._util.error import PrerequisiteError
 from inspect_ai._util.registry import _registry, registry_lookup
 from inspect_ai.dataset import Sample
@@ -474,35 +474,105 @@ async def test_a_key_the_hooks_replace_is_sent_with_the_next_request(
         await http_client.aclose()
 
 
-async def test_a_retry_sends_the_key_the_hooks_supply_after_the_failure(
-    key_hook: _KeyHook,
-) -> None:
-    """The key is read before each attempt, not once per call."""
+@asynccontextmanager
+async def _fails_once_as_the_key_rotates(
+    model_name: str, key_hook: _KeyHook
+) -> AsyncIterator[tuple[dict[str, Any], list[str]]]:
+    """Model args for a server that fails the first attempt with a retryable error.
+
+    Also yields the key each attempt sent.
+    """
     sent: list[str] = []
 
-    def respond(request: httpx2.Request) -> httpx2.Response:
-        sent.append(request.headers["authorization"].removeprefix("Bearer "))
-        if len(sent) == 1:
-            key_hook.key = "new-key"
-            return httpx2.Response(503, json={"error": {"message": "unavailable"}})
-        return httpx2.Response(200, json=_OPENAI_COMPLETION)
+    def fails(authorization: str) -> bool:
+        sent.append(authorization.removeprefix("Bearer "))
+        key_hook.key = "new-key"
+        return len(sent) == 1
 
-    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
-    model = get_model(
-        "openai/gpt-4o",
-        config=GenerateConfig(max_retries=1),
-        base_url="https://example.com/v1",
-        api_key="old-key",
-        memoize=False,
-        http_client=http_client,
-        max_retries=0,
-    )
-    try:
-        await model.generate("hello")
-        assert sent == ["old-key", "new-key"]
-    finally:
-        await model.api.aclose()
-        await http_client.aclose()
+    if model_name.startswith("grok/"):
+        if current_async_backend() == "trio":
+            pytest.skip("gRPC is asyncio-only")
+
+        async def complete(request: Any, context: grpc.aio.ServicerContext) -> Any:
+            if fails(str(dict(context.invocation_metadata() or ())["authorization"])):
+                # UNKNOWN, since the SDK retries UNAVAILABLE itself
+                await context.abort(grpc.StatusCode.UNKNOWN, "unavailable")
+            return _grok_completion()
+
+        handler = grpc.unary_unary_rpc_method_handler(
+            complete,
+            request_deserializer=_CHAT_PB2.GetCompletionsRequest.FromString,
+            response_serializer=lambda response: response.SerializeToString(),
+        )
+        server = grpc.aio.server()
+        server.add_generic_rpc_handlers(
+            (
+                grpc.method_handlers_generic_handler(
+                    "xai_api.Chat", {"GetCompletion": handler}
+                ),
+            )
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        try:
+            yield {"base_url": f"127.0.0.1:{port}", "use_insecure_channel": True}, sent
+        finally:
+            await server.stop(None)
+    else:
+        # the Groq SDK is built on httpx rather than httpx2
+        http = httpx if model_name.startswith("groq/") else httpx2
+        reply = (
+            _ANTHROPIC_MESSAGE
+            if model_name.startswith("anthropic/")
+            else _OPENAI_COMPLETION
+        )
+
+        def respond(request: httpx2.Request) -> httpx2.Response:
+            if fails(request.headers["authorization"]):
+                # every provider retries a dropped connection; Groq returns a 503
+                raise http.RemoteProtocolError("Server disconnected")
+            return http.Response(200, json=reply)
+
+        async with http.AsyncClient(transport=http.MockTransport(respond)) as client:
+            yield (
+                {
+                    "base_url": "https://example.com",
+                    "http_client": client,
+                    "max_retries": 0,
+                },
+                sent,
+            )
+
+
+@pytest.mark.parametrize(
+    "model_name,var",
+    [
+        ("openai/gpt-4o", "OPENAI_API_KEY"),
+        ("openai-api/test/model", "TEST_API_KEY"),
+        ("groq/llama-3.3-70b-versatile", "GROQ_API_KEY"),
+        ("grok/grok-4.5", "XAI_API_KEY"),
+        ("anthropic/claude-sonnet-4-6", "ANTHROPIC_API_KEY"),
+    ],
+)
+async def test_a_retry_sends_the_key_the_hooks_supply_after_the_failure(
+    monkeypatch: pytest.MonkeyPatch, key_hook: _KeyHook, model_name: str, var: str
+) -> None:
+    """The key is read before each attempt, not once per call."""
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    key_hook.var = var
+    async with _fails_once_as_the_key_rotates(model_name, key_hook) as (args, sent):
+        model = get_model(
+            model_name,
+            config=GenerateConfig(max_retries=1, max_tokens=1),
+            api_key="old-key",
+            memoize=False,
+            **args,
+        )
+        try:
+            await model.generate("hello")
+        finally:
+            await model.api.aclose()
+    assert sent == ["old-key", "new-key"]
 
 
 async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
@@ -1153,6 +1223,21 @@ _CHAT_PB2: Any = importlib.import_module("xai_sdk.proto").chat_pb2
 _EMPTY_PB2: Any = importlib.import_module("google.protobuf.empty_pb2")
 
 
+def _grok_completion() -> Any:
+    return _CHAT_PB2.GetChatCompletionResponse(
+        id="grok-response",
+        outputs=[
+            _CHAT_PB2.CompletionOutput(
+                index=0,
+                finish_reason="REASON_STOP",
+                message=_CHAT_PB2.CompletionMessage(
+                    role=_CHAT_PB2.MessageRole.ROLE_ASSISTANT, content="ok"
+                ),
+            )
+        ],
+    )
+
+
 class _GrokBatchServer(grpc.GenericRpcHandler):
     """xAI batch API stand-in that scripts each batch by its prompt.
 
@@ -1246,18 +1331,7 @@ class _GrokBatchServer(grpc.GenericRpcHandler):
         await self._hold("ListBatchResults")
         if self.hold is not None and not request.pagination_token:
             return _BATCH_PB2.ListBatchResultsResponse(pagination_token="page-2")
-        completion = _CHAT_PB2.GetChatCompletionResponse(
-            id="grok-response",
-            outputs=[
-                _CHAT_PB2.CompletionOutput(
-                    index=0,
-                    finish_reason="REASON_STOP",
-                    message=_CHAT_PB2.CompletionMessage(
-                        role=_CHAT_PB2.MessageRole.ROLE_ASSISTANT, content="ok"
-                    ),
-                )
-            ],
-        )
+        completion = _grok_completion()
         return _BATCH_PB2.ListBatchResultsResponse(
             results=[
                 _BATCH_PB2.BatchResult(
