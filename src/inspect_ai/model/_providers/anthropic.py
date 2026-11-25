@@ -712,7 +712,7 @@ class AnthropicAPI(ModelAPI):
 
     @override
     async def refresh_credentials(self) -> None:
-        # closing the shared client would fail other samples' requests
+        # Bedrock, Vertex and ANTHROPIC_AUTH_TOKEN clients are closed and rebuilt
         if not self._uses_api_key():
             await super().refresh_credentials()
             return
