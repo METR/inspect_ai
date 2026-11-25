@@ -70,8 +70,9 @@ def model_retry_config(
     #
     # retry for transient http errors:
     # - use config.max_retries and config.timeout if specified, otherwise retry forever
-    # - exponential backoff starting at 3 seconds (will wait no longer
-    #   than 10 minutes, from the 9th retry on)
+    # - exponential backoff starting at 3 seconds (will wait 25 minutes
+    #   on the 10th retry,then will wait no longer than 30 minutes on
+    #   subsequent retries)
     #
     # `live_overrides` controls whether the stop condition reads the live
     # `inspect ctl config` max_retries/timeout overrides (see the stop
@@ -132,7 +133,7 @@ def model_retry_config(
     # resolve wait
     if wait is None:
         backoff = wait_exponential_jitter(
-            **backoff_multiplier(3), max=(10 * 60), jitter=3
+            **backoff_multiplier(3), max=(30 * 60), jitter=3
         )
         auth_failures = 0
 
@@ -150,7 +151,7 @@ def model_retry_config(
                 auth_failures += 1
                 rs = copy.copy(rs)
                 rs.attempt_number = auth_failures
-            return backoff(rs)
+            return min(backoff(rs), 10 * 60)
 
         wait = default_wait
 
