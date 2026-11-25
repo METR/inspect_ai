@@ -170,6 +170,73 @@ def test_reactive_token_refresh_on_401(mock_refresh_token_hook: MockRefreshToken
         del _registry["modelapi:mock401"]
 
 
+@pytest.mark.real_retry_wait
+@pytest.mark.parametrize(
+    ("limit", "down"),
+    [
+        pytest.param(GenerateConfig(timeout=36000), 0, id="no-max-retries"),
+        pytest.param(GenerateConfig(max_retries=15), 240, id="max-retries"),
+    ],
+)
+async def test_a_key_that_expires_during_a_long_backoff_is_replaced_in_time(
+    monkeypatch: pytest.MonkeyPatch, limit: GenerateConfig, down: int
+) -> None:
+    """A call ten failures deep is answered though its 30-minute key expires meanwhile.
+
+    The key service is down for `down` seconds from the first refused key.
+    """
+    now = 0.0  # the clock; the retry loop's sleeps move it
+    held = 1800.0  # the hook's key: a key is the time it expires at
+    back_at = 0.0  # when the key service answers again
+    busy = 10
+
+    class Keys(Hooks):
+        def override_api_key(self, data: ApiKeyOverride) -> str | None:
+            # As a hook renewing in the background: the new key is for the next call.
+            nonlocal held
+            key, held = held, held if now < back_at else now + 1800
+            return str(key) if key > now else None
+
+    class Busy(Exception):
+        pass
+
+    class Provider(ModelAPI):
+        async def generate(
+            self,
+            input: list[ChatMessage],
+            tools: list[ToolInfo],
+            tool_choice: ToolChoice,
+            config: GenerateConfig,
+        ) -> ModelOutput:
+            nonlocal busy, back_at
+            if busy:
+                busy -= 1
+                raise Busy()
+            if float(self.api_key or 0) <= now:
+                back_at = back_at or now + down
+                raise Mock401Exception()
+            return ModelOutput.from_content(self.model_name, "answered")
+
+        def should_retry(self, ex: Exception) -> bool:
+            return isinstance(ex, Busy)
+
+        def is_auth_failure(self, ex: Exception) -> bool:
+            return isinstance(ex, Mock401Exception)
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+        assert now < 12 * 3600, "still retrying after 12 hours"
+
+    monkeypatch.setattr("inspect_ai.model._retry._sleep", sleep)
+    for entry in ("hooks:expiring_key", "modelapi:expiring_key"):
+        monkeypatch.setitem(_registry, entry, None)  # removed on teardown
+    hooks("expiring_key", description="keys that expire")(Keys)
+    modelapi(name="expiring_key")(lambda: Provider)
+    model = get_model("expiring_key/m", memoize=False, api_key_vars=["EXPIRING_KEY"])
+    assert (await model.generate("hi", config=limit)).completion == "answered"
+
+
 _OPENAI_COMPLETION = {
     "id": "test",
     "object": "chat.completion",
