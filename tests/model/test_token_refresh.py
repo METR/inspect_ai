@@ -1229,8 +1229,12 @@ async def test_lazy_vllm_sends_the_key_the_hooks_supply(
 async def test_a_launched_sglang_server_keeps_its_launch_key(
     monkeypatch: pytest.MonkeyPatch, key_hook: _KeyHook
 ) -> None:
-    """It accepts no other key, so a key the hooks rotate isn't read for it."""
+    """Not one the hooks resolve from SGLANG_API_KEY's reference, or rotate later."""
     sent: list[str] = []
+
+    class SecretsManager(Hooks):
+        def override_api_key(self, data: ApiKeyOverride) -> str | None:
+            return "secret" if data.value == "ref:sglang" else None
 
     def launch(api: SGLangAPI, model_path: str, api_key: str | None) -> tuple[str, str]:
         api.server_process = Popen([sys.executable, "-c", ""], text=True)
@@ -1243,9 +1247,11 @@ async def test_a_launched_sglang_server_keeps_its_launch_key(
 
     http_client = DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond))
     monkeypatch.delenv("SGLANG_BASE_URL", raising=False)
-    monkeypatch.delenv("SGLANG_API_KEY", raising=False)
+    monkeypatch.setenv("SGLANG_API_KEY", "ref:sglang")
     monkeypatch.setattr(SGLangAPI, "_start_server", launch)
     monkeypatch.setattr(SGLangAPI, "_create_http_client", lambda api: http_client)
+    monkeypatch.setitem(_registry, "hooks:secrets_manager", None)  # removed on teardown
+    hooks("secrets_manager", description="resolves a reference")(SecretsManager)
     key_hook.var, key_hook.key = "SGLANG_API_KEY", None
     model = get_model("sglang/test-model", memoize=False)
     try:
