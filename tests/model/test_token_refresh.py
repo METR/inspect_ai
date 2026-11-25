@@ -553,6 +553,47 @@ async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
         await http_client.aclose()
 
 
+async def test_a_legacy_key_override_that_raises_fails_the_build_but_not_a_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before a request, the model keeps its key and logs the type once."""
+    raises = True
+    sent: list[str] = []
+
+    def legacy(var: str, value: str) -> str | None:
+        if raises:
+            raise RuntimeError(f"no key for {value}")
+        return None
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        return httpx2.Response(200, json=_OPENAI_COMPLETION)
+
+    monkeypatch.setattr("inspect_ai.hooks._legacy._override_api_key", legacy)
+    monkeypatch.setattr("inspect_ai._util.logger._warned", [])
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+    args: dict[str, Any] = dict(
+        config=GenerateConfig(max_retries=0),
+        base_url="https://example.com/v1",
+        api_key="old-key",
+        memoize=False,
+        http_client=http_client,
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            get_model("openai/gpt-4o", **args)
+        raises = False
+        model = get_model("openai/gpt-4o", **args)
+        raises = True
+        await model.generate("hello")
+        await model.generate("hello")
+        assert sent == ["old-key", "old-key"]
+        assert caplog.text.count("RuntimeError") == 1
+        assert "old-key" not in caplog.text
+    finally:
+        await http_client.aclose()
+
+
 @pytest.mark.parametrize(
     "model_name,base_url,var,header",
     [

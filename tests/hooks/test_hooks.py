@@ -1360,16 +1360,20 @@ def test_api_key_override_falls_back_to_legacy(mock_hooks: MockHooks) -> None:
     assert overridden == "legacy-TEST_VAR-test_value"
 
 
-def test_api_key_override_logs_a_legacy_override_that_raises(
-    caplog: pytest.LogCaptureFixture,
+def test_api_key_override_logs_the_type_of_a_hook_exception_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def legacy_hook_override(var: str, value: str) -> str | None:
-        raise RuntimeError(f"no key for {value}")
+    class RaisingHooks(Hooks):
+        def override_api_key(self, data: ApiKeyOverride) -> str | None:
+            raise RuntimeError(f"no key for {data.value}")
 
-    with patch("inspect_ai.hooks._hooks.override_api_key_legacy", legacy_hook_override):
-        assert override_api_key("TEST_VAR", "secret-value") is None
+    monkeypatch.setattr("inspect_ai._util.logger._warned", [])
+    monkeypatch.setitem(_registry, "hooks:raising_hooks", None)  # removed on teardown
+    hooks("raising_hooks", description="raises")(RaisingHooks)
+    assert override_api_key("TEST_VAR", "secret-value") is None
+    assert override_api_key("TEST_VAR", "secret-value") is None
 
-    assert "RuntimeError" in caplog.text
+    assert caplog.text.count("RuntimeError") == 1
     assert "secret-value" not in caplog.text
 
 

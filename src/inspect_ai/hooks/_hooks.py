@@ -10,6 +10,7 @@ from inspect_ai._eval.eval import EvalLogs
 from inspect_ai._eval.task.log import TaskLogger
 from inspect_ai._eval.task.resolved import ResolvedTask
 from inspect_ai._util.error import EvalError
+from inspect_ai._util.logger import warn_once
 from inspect_ai._util.registry import (
     RegistryInfo,
     registry_add,
@@ -1143,28 +1144,17 @@ def override_api_key(env_var_name: str, value: str) -> str | None:
     for hook in get_all_hooks():
         if not hook.enabled():
             continue
-        overridden = _hook_api_key(hook.__class__.__name__, hook.override_api_key, data)
-        if overridden is not None:
-            return overridden
+        try:
+            overridden = hook.override_api_key(data)
+            if overridden:
+                return overridden
+        except Exception as ex:
+            warn_once(
+                logger,
+                f"Exception calling override_api_key on hook '{hook.__class__.__name__}': {type(ex).__name__}",
+            )
     # If none have been overridden, fall back to legacy behaviour.
-    return _hook_api_key(
-        "INSPECT_API_KEY_OVERRIDE",
-        lambda data: override_api_key_legacy(data.env_var_name, data.value),
-        data,
-    )
-
-
-def _hook_api_key(
-    name: str, override: Callable[[ApiKeyOverride], str | None], data: ApiKeyOverride
-) -> str | None:
-    """The key a hook returns, or None if it declines, returns "" or raises."""
-    try:
-        return override(data) or None
-    except Exception as ex:
-        logger.warning(
-            f"Exception calling override_api_key on hook '{name}': {type(ex).__name__}"
-        )
-        return None
+    return override_api_key_legacy(env_var_name, value) or None
 
 
 _hooks_cache: list[Hooks] = []

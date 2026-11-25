@@ -454,7 +454,14 @@ class ModelAPI(abc.ABC):
         if not self._refreshes_in_place():
             return
         held = (self.api_key, [os.environ.get(var) for var in self.api_key_vars])
-        self._apply_api_key_overrides()
+        try:
+            self._apply_api_key_overrides()
+        except Exception as ex:
+            warn_once(
+                logger,
+                f"Exception calling override_api_key before a request; keeping the current API key: {type(ex).__name__}",
+            )
+            return
         if held != (self.api_key, [os.environ.get(var) for var in self.api_key_vars]):
             await self.refresh_credentials()
 
