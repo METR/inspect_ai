@@ -1143,16 +1143,28 @@ def override_api_key(env_var_name: str, value: str) -> str | None:
     for hook in get_all_hooks():
         if not hook.enabled():
             continue
-        try:
-            overridden = hook.override_api_key(data)
-            if overridden is not None:
-                return overridden
-        except Exception as ex:
-            logger.warning(
-                f"Exception calling override_api_key on hook '{hook.__class__.__name__}': {ex}"
-            )
+        overridden = _hook_api_key(hook.__class__.__name__, hook.override_api_key, data)
+        if overridden is not None:
+            return overridden
     # If none have been overridden, fall back to legacy behaviour.
-    return override_api_key_legacy(env_var_name, value)
+    return _hook_api_key(
+        "INSPECT_API_KEY_OVERRIDE",
+        lambda data: override_api_key_legacy(data.env_var_name, data.value),
+        data,
+    )
+
+
+def _hook_api_key(
+    name: str, override: Callable[[ApiKeyOverride], str | None], data: ApiKeyOverride
+) -> str | None:
+    """The key a hook returns, or None if it declines, returns "" or raises."""
+    try:
+        return override(data) or None
+    except Exception as ex:
+        logger.warning(
+            f"Exception calling override_api_key on hook '{name}': {type(ex).__name__}"
+        )
+        return None
 
 
 _hooks_cache: list[Hooks] = []

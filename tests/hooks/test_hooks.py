@@ -1360,6 +1360,19 @@ def test_api_key_override_falls_back_to_legacy(mock_hooks: MockHooks) -> None:
     assert overridden == "legacy-TEST_VAR-test_value"
 
 
+def test_api_key_override_logs_a_legacy_override_that_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def legacy_hook_override(var: str, value: str) -> str | None:
+        raise RuntimeError(f"no key for {value}")
+
+    with patch("inspect_ai.hooks._hooks.override_api_key_legacy", legacy_hook_override):
+        assert override_api_key("TEST_VAR", "secret-value") is None
+
+    assert "RuntimeError" in caplog.text
+    assert "secret-value" not in caplog.text
+
+
 def test_init_hooks_can_be_called_multiple_times(mock_hooks: MockHooks) -> None:
     # Ensure that init_hooks can be called multiple times without issues.
     init_hooks()
