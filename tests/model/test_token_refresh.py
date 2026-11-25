@@ -578,10 +578,15 @@ async def test_a_retry_sends_the_key_the_hooks_supply_after_the_failure(
 async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
     key_hook: _KeyHook,
 ) -> None:
+    """Each call's first attempt fails while the key changes, so the retry reads it."""
     sent: list[str] = []
+    rotations = iter(["new-key", "newer-key"])
 
     def respond(request: httpx2.Request) -> httpx2.Response:
         sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        if len(sent) % 2:
+            key_hook.key = next(rotations)
+            return httpx2.Response(503, json={"error": {"message": "unavailable"}})
         if request.url.path.endswith("/input_tokens"):
             return httpx2.Response(
                 200, json={"object": "response.input_tokens", "input_tokens": 1}
@@ -606,18 +611,18 @@ async def test_count_tokens_and_compact_send_the_key_the_hooks_supply(
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
     model = get_model(
         "openai/gpt-4o",
+        config=GenerateConfig(max_retries=1),
         base_url="https://example.com/v1",
         api_key="old-key",
         memoize=False,
         http_client=http_client,
         responses_api=True,
+        max_retries=0,
     )
     try:
-        key_hook.key = "new-key"
         await model.count_tokens([ChatMessageUser(content="hello")])
-        key_hook.key = "newer-key"
         await model.compact([ChatMessageUser(content="hello")], [])
-        assert sent == ["new-key", "newer-key"]
+        assert sent == ["old-key", "new-key", "new-key", "newer-key"]
     finally:
         await model.api.aclose()
         await http_client.aclose()
