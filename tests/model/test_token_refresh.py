@@ -650,45 +650,6 @@ async def test_overriding_refresh_credentials_does_not_opt_in_to_the_key_read(
     assert refreshes == 0
 
 
-async def test_the_hooks_get_the_original_value_and_pick_up_a_rotated_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """As the secrets-manager hook in docs/extensions-hooks.qmd needs."""
-    secret = "secret-1"
-    sent: list[str] = []
-
-    class SecretsManager(Hooks):
-        def override_api_key(self, data: ApiKeyOverride) -> str | None:
-            if data.value.startswith("arn:aws:secretsmanager:"):
-                return secret
-            return None
-
-    def respond(request: httpx2.Request) -> httpx2.Response:
-        sent.append(request.headers["authorization"].removeprefix("Bearer "))
-        return httpx2.Response(200, json=_OPENAI_COMPLETION)
-
-    monkeypatch.setenv("OPENAI_API_KEY", "arn:aws:secretsmanager:us-east-1:0:secret:k")
-    monkeypatch.setattr("inspect_ai.model._model._replaced_env_api_keys", {})
-    monkeypatch.setitem(_registry, "hooks:secrets_manager", None)  # removed on teardown
-    hooks("secrets_manager", description="fetches the key")(SecretsManager)
-    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
-    model = get_model(
-        "openai/gpt-4o",
-        config=GenerateConfig(max_retries=0),
-        base_url="https://example.com/v1",
-        memoize=False,
-        http_client=http_client,
-    )
-    try:
-        await model.generate("hello")
-        secret = "secret-2"
-        await model.generate("hello")
-        assert sent == ["secret-1", "secret-2"]
-    finally:
-        await model.api.aclose()
-        await http_client.aclose()
-
-
 async def test_anthropic_auth_token_refresh_rereads_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

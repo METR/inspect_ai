@@ -344,10 +344,6 @@ class RetryDecision:
         return cls(retry=True, kind="rate_limit", retry_after=retry_after)
 
 
-# the environment value each key from the hooks replaced, by that key
-_replaced_env_api_keys: dict[str, str] = {}
-
-
 class ModelAPI(abc.ABC):
     """Model API provider.
 
@@ -369,9 +365,6 @@ class ModelAPI(abc.ABC):
     constructed outside `get_model()`, in which case such registries simply
     don't attribute this instance's traffic.
     """
-
-    # what the key hooks are offered for api_key: the key before any hook replaced it
-    _api_key_original: str | None = None
 
     def __init__(
         self,
@@ -407,34 +400,28 @@ class ModelAPI(abc.ABC):
 
         # apply api key override
         api_key = self.api_key
-        if api_key is not None and self._api_key_original is None:
-            self._api_key_original = _replaced_env_api_keys.get(api_key, api_key)
-        offered = self._api_key_original if api_key is not None else None
         for key in self.api_key_vars:
             # if there is an explicit api_key passed then it
             # overrides anything in the environment so use it
-            if offered is not None:
-                override = override_api_key(key, offered)
+            if api_key is not None:
+                override = override_api_key(key, api_key)
                 if override is not None:
-                    api_key = offered = override
+                    api_key = override
             # otherwise look it up in the environment and
             # override it if it has a value
             else:
                 value = os.environ.get(key, None)
                 if value is not None:
-                    value = _replaced_env_api_keys.get(value, value)
                     override = override_api_key(key, value)
                     if override is not None:
                         os.environ[key] = override
-                        _replaced_env_api_keys[override] = value
                 # When a hook is registered but no API key exists anywhere,
                 # still call the hook so it can provide credentials from its
                 # own source (e.g. OAuth tokens, vault, etc.)
                 elif has_api_key_override():
                     override = override_api_key(key, "")
                     if override is not None:
-                        api_key = offered = override
-                        self._api_key_original = ""
+                        api_key = override
 
         # set any explicitly specified api key
         self.api_key = api_key
@@ -466,9 +453,9 @@ class ModelAPI(abc.ABC):
     async def _refresh_if_key_changed(self) -> None:
         if not self._refreshes_in_place():
             return
-        held = self.api_key
+        held = (self.api_key, [os.environ.get(var) for var in self.api_key_vars])
         self._apply_api_key_overrides()
-        if self.api_key != held:
+        if held != (self.api_key, [os.environ.get(var) for var in self.api_key_vars]):
             await self.refresh_credentials()
 
     async def aclose(self) -> None:
