@@ -188,7 +188,7 @@ If the required hooks aren't installed then an appropriate error will occur at s
 
 ## API Key Override {.unlisted}
 
-There is a hook event to optionally override the value of model API key environment variables. The `override_api_key()` hook is called during model initialization and automatically when authentication errors are detected. For many providers it is also called before each Inspect attempt (not SDK retries or batch polls), so it should be quick and return the same key for the same input.
+There is a hook event to optionally override the value of model API key environment variables. The `override_api_key()` hook is called during model initialization and automatically when authentication errors are detected. On providers that update their key in place, it is also called before each Inspect attempt, so keep it fast and cache what it fetches.
 
 This could be used to:
 
