@@ -1966,8 +1966,8 @@ class Model:
                     idle_scope if idle_scope is not None else contextlib.nullcontext()
                 )
 
-                await self.api._refresh_if_key_changed()
                 await stream_observer.begin_attempt(event)
+                await self.api._refresh_if_key_changed()
                 # begin_attempt may await the on_stream retry boundary,
                 # during which a concurrent call can reach a limit
                 _check_limits_before_dispatch()
