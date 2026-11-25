@@ -197,15 +197,30 @@ This could be used to:
 -   Use some custom model API authentication mechanism in conjunction with a custom reverse proxy for the model API to avoid Inspect ever having access to real API keys
 
 ``` python
+import time
+
 from inspect_ai.hooks import hooks, Hooks, ApiKeyOverride
+
+# the secret each API key environment variable is fetched from
+SECRET_ARNS = {
+    "OPENAI_API_KEY": "arn:aws:secretsmanager:us-east-1:123456789012:secret:openai",
+}
 
 @hooks(name="api_key_fetcher", description="Fetches API key from secrets manager")
 class ApiKeyFetcher(Hooks):
+    def __init__(self) -> None:
+        self.cache: dict[str, tuple[str, float]] = {}
+
     def override_api_key(self, data: ApiKeyOverride) -> str | None:
-        original_env_var_value = data.value
-        if original_env_var_value.startswith("arn:aws:secretsmanager:"):
-            return fetch_aws_secret(original_env_var_value)
-        return None
+        arn = SECRET_ARNS.get(data.env_var_name)
+        if arn is None:
+            return None
+        cached = self.cache.get(arn)
+        # fetch again after 5 minutes, so a rotated secret is picked up
+        if cached is None or time.monotonic() - cached[1] > 300:
+            cached = (fetch_aws_secret(arn), time.monotonic())
+            self.cache[arn] = cached
+        return cached[0]
 
 def fetch_aws_secret(aws_arn: str) -> str:
     ...
