@@ -220,7 +220,8 @@ class OpenAICompatibleAPI(ModelAPI):
 
     @override
     def _refreshes_in_place(self) -> bool:
-        return True
+        # a subclass that replaces refresh_credentials() may close the shared client
+        return type(self).refresh_credentials is OpenAICompatibleAPI.refresh_credentials
 
     @override
     async def refresh_credentials(self) -> None:

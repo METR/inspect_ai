@@ -657,38 +657,40 @@ async def test_a_client_for_another_endpoint_keeps_its_own_key(
         await http_client.aclose()
 
 
-async def test_overriding_refresh_credentials_does_not_opt_in_to_the_key_read(
+async def test_a_compatible_subclass_that_replaces_refresh_credentials_is_not_opted_in(
     monkeypatch: pytest.MonkeyPatch, key_hook: _KeyHook
 ) -> None:
-    refreshes = 0
+    """Its refresh may replace the client other requests are using."""
+    sent: list[str] = []
 
-    class Provider(ModelAPI):
+    class Provider(OpenAICompatibleAPI):
         async def refresh_credentials(self) -> None:
-            nonlocal refreshes
-            refreshes += 1
-            await super().refresh_credentials()
+            self.initialize()
 
-        async def generate(
-            self,
-            input: list[ChatMessage],
-            tools: list[ToolInfo],
-            tool_choice: ToolChoice,
-            config: GenerateConfig,
-        ) -> ModelOutput:
-            return ModelOutput.from_content(self.model_name, "ok")
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        return httpx2.Response(200, json=_OPENAI_COMPLETION)
 
-    monkeypatch.setitem(_registry, "modelapi:no_opt_in", None)  # removed on teardown
-    modelapi(name="no_opt_in")(lambda: Provider)
-    key_hook.var = "NO_OPT_IN_API_KEY"
+    monkeypatch.setitem(_registry, "modelapi:own_refresh", None)  # removed on teardown
+    modelapi(name="own_refresh")(lambda: Provider)
+    key_hook.var = "TEST_API_KEY"
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
     model = get_model(
-        "no_opt_in/m",
+        "own_refresh/test/model",
+        base_url="https://example.com/v1",
         api_key="old-key",
-        api_key_vars=["NO_OPT_IN_API_KEY"],
         memoize=False,
+        http_client=http_client,
     )
-    key_hook.key = "new-key"
-    await model.generate("hello")
-    assert refreshes == 0
+    client = model.api.client
+    try:
+        key_hook.key = "new-key"
+        await model.generate("hello")
+        assert sent == ["old-key"]
+        assert model.api.client is client
+    finally:
+        await model.api.aclose()
+        await http_client.aclose()
 
 
 async def test_anthropic_auth_token_refresh_rereads_environment(
