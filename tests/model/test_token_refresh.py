@@ -1,5 +1,6 @@
 import importlib
 import json
+import sys
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
 from subprocess import Popen
@@ -41,6 +42,7 @@ from inspect_ai.model._providers.openai import OpenAIAPI
 from inspect_ai.model._providers.openai_compatible import OpenAICompatibleAPI
 from inspect_ai.model._providers.openrouter import OpenRouterAPI
 from inspect_ai.model._providers.providers import validate_openai_client
+from inspect_ai.model._providers.sglang import SGLangAPI
 from inspect_ai.model._providers.vllm import VLLMAPI
 from inspect_ai.model._providers.vllm_completions import VLLMCompletionsAPI
 from inspect_ai.model._registry import modelapi
@@ -1220,6 +1222,38 @@ async def test_lazy_vllm_sends_the_key_the_hooks_supply(
         assert server.models_auth == ["Bearer hook-key", "Bearer rotated-key"]
     finally:
         await server.aclose(api)
+
+
+async def test_a_launched_sglang_server_keeps_its_launch_key(
+    monkeypatch: pytest.MonkeyPatch, key_hook: _KeyHook
+) -> None:
+    """It accepts no other key, so a key the hooks rotate isn't read for it."""
+    sent: list[str] = []
+
+    def launch(api: SGLangAPI, model_path: str, api_key: str | None) -> tuple[str, str]:
+        api.server_process = Popen([sys.executable, "-c", ""], text=True)
+        api.server_process.wait()
+        return "http://localhost:30000/v1", "inspectai"
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request.headers["authorization"].removeprefix("Bearer "))
+        return httpx2.Response(200, json=_OPENAI_COMPLETION)
+
+    http_client = DefaultAsyncHttpxClient(transport=httpx2.MockTransport(respond))
+    monkeypatch.delenv("SGLANG_BASE_URL", raising=False)
+    monkeypatch.delenv("SGLANG_API_KEY", raising=False)
+    monkeypatch.setattr(SGLangAPI, "_start_server", launch)
+    monkeypatch.setattr(SGLangAPI, "_create_http_client", lambda api: http_client)
+    key_hook.var, key_hook.key = "SGLANG_API_KEY", None
+    model = get_model("sglang/test-model", memoize=False)
+    try:
+        await model.generate("hello")
+        key_hook.key = "rotated-key"
+        await model.generate("hello")
+        assert sent == ["inspectai", "inspectai"]
+    finally:
+        await model.api.aclose()
+        await http_client.aclose()
 
 
 # xai_sdk ships no type stubs; going through import_module keeps mypy out of it
