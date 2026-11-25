@@ -54,7 +54,7 @@ def test_model_retry_default_wait_without_warning() -> None:
             lambda ex: None,
             lambda name, rs: None,
         )
-    # 3s doubling capped at 30 minutes, plus up to 3s of jitter
+    # 3s doubling capped at 10 minutes, plus up to 3s of jitter
     for attempt, wait in enumerate(_waits(config["wait"], 12), start=1):
-        base = min(3 * 2 ** (attempt - 1), 30 * 60)
-        assert base <= wait <= min(base + 3, 30 * 60)
+        base = min(3 * 2 ** (attempt - 1), 10 * 60)
+        assert base <= wait <= min(base + 3, 10 * 60)

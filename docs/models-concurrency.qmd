@@ -129,7 +129,7 @@ inspect trace dump --filter "[connections]"
 
 ## Limiting Retries
 
-By default, Inspect will retry model API calls indefinitely (with exponential backoff) when a recoverable HTTP error occurs. The initial backoff is 3 seconds and exponentiation will result in a 25 minute wait for the 10th request (then 30 minutes for the 11th and subsequent requests). You can limit Inspect's retries using the `--max-retries` option:
+By default, Inspect will retry model API calls indefinitely (with exponential backoff) when a recoverable HTTP error occurs. The initial backoff is 3 seconds and exponentiation will result in a 6.4 minute wait for the 8th request (then 10 minutes for the 9th and subsequent requests). You can limit Inspect's retries using the `--max-retries` option:
 
 ``` bash
 inspect eval --model openai/gpt-6-luna --max-retries 10

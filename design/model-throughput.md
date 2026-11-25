@@ -149,8 +149,8 @@ sum at most 60 small structs per model. This bounds memory to a constant
 per model regardless of request rate — a per-request deque would grow with
 throughput, which is exactly the case we care about.
 
-Scheduled backoff deliberately stays **out of the ring**. Sleeps reach 30
-minutes (exponential backoff from 3 s, capped at 30 minutes, up to 3 s jitter,
+Scheduled backoff deliberately stays **out of the ring**. Sleeps reach 10
+minutes (exponential backoff from 3 s, capped at 10 minutes, up to 3 s jitter,
 in `model/_retry.py`) — attributing one to its schedule-time bucket would
 swamp any window containing its start, but pre-writing it into the buckets
 covering `[now, now + s]` fights the ring's slot reuse: a future bucket is
@@ -427,7 +427,7 @@ caveat below) appearing under `inspect trace http`:
    Caveat: `log_model_retry` escalates the line to `WARNING` when the
    upcoming sleep is ≥ 20 minutes (`_model.py`), and `inspect trace http`
    filters by *exact* level — so retry lines for the heaviest-throttle
-   sleeps (backoff caps at 30 minutes) carry the snippet but surface via
+   sleeps (a provider's own wait, such as Grok's, can reach 30 minutes) carry the snippet but surface via
    `inspect trace dump`, not `inspect trace http`. The periodic
    `[Throughput]` line below is unaffected (always logged at `HTTP`).
 
