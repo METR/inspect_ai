@@ -373,6 +373,7 @@ def eval_set(
     embed_viewer: bool = False,
     sentinel: SentinelSpec | None = None,
     sentinel_proxy: SentinelProxy | None = None,
+    *,
     spend_cap: float | None = None,
     **kwargs: Unpack[GenerateConfigArgs],
 ) -> tuple[bool, list[EvalLog]]:
