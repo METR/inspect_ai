@@ -431,7 +431,7 @@ async def test_a_key_the_hooks_replace_is_sent_with_the_next_request(
     monkeypatch: pytest.MonkeyPatch,
     key_hook: _KeyHook,
     model_name: str,
-    model_args: dict[str, str],
+    model_args: dict[str, Any],
     auth_token: str | None,
     credential: str | None,
 ) -> None:
