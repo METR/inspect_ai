@@ -5,6 +5,7 @@ import os
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 
 import pytest
 from test_helpers.utils import skip_if_trio
@@ -19,6 +20,7 @@ from inspect_ai.log._bundle import (
     _insert_content_security_policy,
     _prepare_viewer,
     bundle_log_dir,
+    copy_log_files,
     embed_log_dir,
 )
 from inspect_ai.scorer import match
@@ -194,6 +196,31 @@ def test_bundle_hf_output_dir_allowed(monkeypatch) -> None:
 
     # Should not raise PrerequisiteError about subdirectory
     bundle_log_dir(log_dir=".", output_dir="hf/username/myspace")
+
+
+_LOG_NAME = "2024-01-01T00-00-00+00-00_task_abc.eval"
+
+
+@pytest.fixture
+def memory_fs(monkeypatch: pytest.MonkeyPatch) -> Any:
+    fs = filesystem("memory://").fs
+    monkeypatch.setattr(type(fs), "store", {})
+    monkeypatch.setattr(type(fs), "pseudo_dirs", [""])
+    return fs
+
+
+def test_bundle_leaves_out_logs_in_excluded_dirs(
+    memory_fs: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_fs.pipe(f"/logs/{_LOG_NAME}", b"log")
+    memory_fs.pipe(f"/logs/artifacts/sample/{_LOG_NAME}", b"other")
+    memory_fs.pipe("/logs/artifacts/sample/eval-set.json", b"{}")
+    bundle_logs = tmp_path / "bundle" / "logs"
+    monkeypatch.setenv("INSPECT_LOG_EXCLUDE_DIRS", "artifacts")
+
+    copy_log_files("memory://logs", str(bundle_logs), lambda _: None)
+
+    assert [path.name for path in bundle_logs.iterdir()] == [_LOG_NAME]
 
 
 _FIXTURE_INDEX_HTML = """<!doctype html>

@@ -1,8 +1,9 @@
 import json
 import pathlib
 import re
+import shutil
 import zipfile
-from typing import Literal, NamedTuple
+from typing import Callable, Literal, NamedTuple
 
 import pytest
 from test_helpers.chunked_corpus import CORPUS_SMALL_CHUNK_SIZE, ChunkedCorpus
@@ -1109,3 +1110,34 @@ def test_convert_chunked_renumbers_references_in_legacy_nested_events(
     for ref in refs:
         assert re.fullmatch(r"attachment://\d+", ref), ref
         assert attachments[ref.removeprefix("attachment://")] == content
+
+
+_CONVERTERS: dict[str, Callable[[str, str], None]] = {
+    "convert": lambda path, output_dir: convert_eval_logs(path, "json", output_dir),
+    "chunked": convert_eval_logs_to_chunked,
+}
+
+
+def _nested_log_dir(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    input_file = (
+        _TESTS_DIR
+        / "test_list_logs/2024-11-05T13-32-37-05-00_input-task_hxs4q9azL3ySGkjJirypKZ.eval"
+    )
+    log_dir = tmp_path / "logs"
+    (log_dir / "sub").mkdir(parents=True)
+    shutil.copy(input_file, log_dir / "sub" / input_file.name)
+    return input_file, log_dir
+
+
+@pytest.mark.parametrize("converter", _CONVERTERS.keys())
+def test_convert_dir_leaves_out_logs_in_excluded_dirs(
+    tmp_path: pathlib.Path, converter: str, monkeypatch: pytest.MonkeyPatch
+):
+    _, log_dir = _nested_log_dir(tmp_path)
+    shutil.copytree(log_dir / "sub", log_dir / "artifacts" / "sample")
+    output_dir = tmp_path / "out"
+    monkeypatch.setenv("INSPECT_LOG_EXCLUDE_DIRS", "artifacts")
+
+    _CONVERTERS[converter](str(log_dir), str(output_dir))
+
+    assert [path.name for path in output_dir.iterdir()] == ["sub"]
