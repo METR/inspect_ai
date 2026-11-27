@@ -490,7 +490,10 @@ The walk produces a listing of logical tasks without paging through
   - With `task list --shards`, every `<name>.shards/` is an ordinary
     subdirectory (decision: Ransom, 2026-10-13; "CLI surface").
   - Any other subdirectory: descend, as `list_eval_logs` recurses today, so
-    an eval-set directory or a directory of runs works.
+    an eval-set directory or a directory of runs works. The exception is a
+    subdirectory named in `INSPECT_LOG_EXCLUDE_DIRS`, which is not listed:
+    `list_eval_logs` leaves out the logs below one too. The names do not
+    apply inside a companion, which `list_shard_set` lists as the merge does.
 
   The companion rules are `is_shard_path` (the shared helper `eval_set()`
   filters its listing with): a file is a shard path only when it is
