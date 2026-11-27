@@ -45,7 +45,7 @@ from ..._condense import (
     walk_events,
     walk_input,
 )
-from ..._file import log_files_from_ls
+from ..._file import log_files_from_ls, without_excluded_dirs
 from ..._log import EvalSample
 from ..._skeleton import sample_skeleton
 from ..eval import (
@@ -145,7 +145,8 @@ def convert_eval_logs_to_chunked(
         convert_file(path)
     else:
         root_dir = fs.info(path).name
-        eval_logs = log_files_from_ls(fs.ls(path, recursive=True), ["eval"], True)
+        files = without_excluded_dirs(fs.ls(path, recursive=True), path, fs)
+        eval_logs = log_files_from_ls(files, ["eval"], True)
         input_files = [
             eval_log.name.replace(f"{root_dir}/", "", 1) for eval_log in eval_logs
         ]

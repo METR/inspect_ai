@@ -5048,3 +5048,26 @@ def test_eval_set_grown_dataset_without_stable_ids_still_reruns() -> None:
         final = read_eval_log(logs[0].location)
         assert final.status == "success"
         assert final.eval.dataset.samples == 4
+
+
+def test_eval_set_ignores_logs_in_excluded_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # empty, not unset: a project .env could set an unset variable again
+    monkeypatch.setenv("INSPECT_LOG_EXCLUDE_DIRS", "")
+    mine = Task(dataset=[Sample(input="mine")], name="mine")
+    other = Task(dataset=[Sample(input="other")], name="other")
+    done_dir = tmp_path / "done"
+    success, _ = eval_set([mine, other], log_dir=str(done_dir), model="mockllm/model")
+    assert success
+    # completed logs of this task and of another, as files under artifacts/
+    log_dir = tmp_path / "set"
+    shutil.copytree(done_dir, log_dir / "artifacts" / "sample")
+
+    with pytest.raises(PrerequisiteError, match="not associated with a task"):
+        eval_set(mine, log_dir=str(log_dir), model="mockllm/model")
+    monkeypatch.setenv("INSPECT_LOG_EXCLUDE_DIRS", "artifacts")
+    success, logs = eval_set(mine, log_dir=str(log_dir), model="mockllm/model")
+    assert success
+    # the task ran: its log is its own, not the completed one in artifacts/
+    assert [Path(log.location).parent.name for log in logs] == ["set"]
